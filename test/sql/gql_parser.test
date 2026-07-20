@@ -1,0 +1,51 @@
+# name: test/sql/gql_parser.test
+# description: GQL parser validation, SQL coexistence, normalization, and feature boundaries
+# group: [gql]
+
+require gql
+
+query I
+SELECT 42
+----
+42
+
+query IT
+create graph MiXeD any;
+----
+true	mixed
+
+query T
+SELECT graph_name FROM gql_graphs()
+----
+mixed
+
+statement error
+CREATE GRAPH broken
+----
+<REGEX>:.*GQL parser error.*
+
+statement error
+CREATE GRAPH typed_graph { (Person :Person {name STRING}) }
+----
+<REGEX>:.*GQL feature not implemented: typed, copied, or closed graph creation \(line 1, column 0\).*
+
+statement error
+CREATE GRAPH broken
+RETURN
+----
+<REGEX>:.*GQL parser error at line 2, column 0.*
+
+statement error
+CREATE PROPERTY GRAPH property_spelling ANY
+----
+<REGEX>:.*GQL feature not implemented: PROPERTY GRAPH spelling.*
+
+statement error
+MATCH (n) RETURN n
+----
+<REGEX>:.*GQL node, edge, and path value projection.*
+
+query IT
+DROP GRAPH mixed
+----
+true	mixed

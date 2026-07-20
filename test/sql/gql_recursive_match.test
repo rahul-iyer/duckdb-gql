@@ -1,0 +1,155 @@
+# name: test/sql/gql_recursive_match.test
+# description: Unbounded path quantifiers lowered to native DuckDB recursive CTE plans
+# group: [gql]
+
+require gql
+
+statement ok
+CREATE GRAPH recursive_paths ANY
+
+statement ok
+SESSION SET GRAPH recursive_paths
+
+statement ok
+INSERT (:City {name: 'A'})-[:ROAD]->(:City {name: 'B'})-[:ROAD]->(:City {name: 'C'})-[:ROAD]->(:City {name: 'D'})
+
+query TT rowsort
+MATCH (source:City)-[:ROAD]->+(target:City)
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	B
+A	C
+A	D
+B	C
+B	D
+C	D
+
+# Star includes the zero-hop binding for every eligible starting vertex.
+query TT rowsort
+MATCH (source:City)-[:ROAD]->*(target:City)
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	A
+A	B
+A	C
+A	D
+B	B
+B	C
+B	D
+C	C
+C	D
+D	D
+
+# Basic result shaping remains in DuckDB above the recursive CTE.
+query T
+MATCH (source:City)-[:ROAD]->*(target:City)
+WHERE source.name = 'A'
+RETURN DISTINCT target.name AS target_name
+ORDER BY target_name DESC
+LIMIT 2
+----
+D
+C
+
+query I
+MATCH (source:City)-[:ROAD]->*(target:City)
+WHERE source.name = 'A'
+RETURN COUNT(*) AS reachable_count
+----
+4
+
+query TT rowsort
+MATCH (source:City)-[:ROAD]->{2,}(target:City)
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	C
+A	D
+B	D
+
+query TT rowsort
+MATCH (source:City)-[:ROAD]->{0,}(target:City)
+WHERE source.name = 'A'
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	A
+A	B
+A	C
+A	D
+
+# Direction is applied by each recursive edge expansion while the bindings
+# retain their positions as written in the pattern.
+query TT rowsort
+MATCH (target:City)<-[:ROAD]-+(source:City)
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	B
+A	C
+A	D
+B	C
+B	D
+C	D
+
+# An edge predicate on a zero-or-more factor is vacuously satisfied by the
+# zero-hop branch even when no edge with that label exists.
+query TT rowsort
+MATCH (source:City)-[:RAIL]->*(target:City)
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	A
+B	B
+C	C
+D	D
+
+# Add a self-loop directly to the canonical relational storage to prove that
+# recursive expansion terminates and that an edge cannot be reused in one path.
+statement ok
+INSERT INTO gql_internal.objects (graph_id, kind, source_id, target_id)
+SELECT graph_id, 1, object_id, object_id
+FROM gql_internal.objects
+WHERE graph_id = (SELECT graph_id FROM gql_internal.graphs WHERE graph_name = 'recursive_paths')
+  AND kind = 0
+ORDER BY object_id
+LIMIT 1
+
+query I
+SELECT count(*) FROM gql_internal.objects WHERE source_id = target_id
+----
+1
+
+query TT
+MATCH (source)-[]->+(target)
+WHERE source.name = 'A' AND target.name = 'A'
+RETURN source.name AS source_name, target.name AS target_name
+----
+A	A
+
+query T rowsort
+MATCH (city)-[]->+(city)
+RETURN city.name AS city_name
+----
+A
+
+query T rowsort
+MATCH (city)-[]->*(city)
+RETURN city.name AS city_name
+----
+A
+A
+B
+C
+D
+
+statement error
+MATCH (source)-[:ROAD]->+(middle)-[:ROAD]->(target)
+RETURN element_id(source)
+----
+<REGEX>:.*Unbounded quantified GQL paths combined with other pattern factors or patterns.*
+
+statement error
+MATCH (source)-[:ROAD]->+(target), (other)-[:ROAD]->(last)
+RETURN element_id(source)
+----
+<REGEX>:.*Unbounded quantified GQL paths combined with other pattern factors or patterns.*
+
+statement ok
+DROP GRAPH recursive_paths

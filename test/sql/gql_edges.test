@@ -1,0 +1,82 @@
+# name: test/sql/gql_edges.test
+# description: Directed path insertion and canonical edge topology
+# group: [gql]
+
+require gql
+
+statement ok
+CREATE GRAPH network ANY
+
+statement ok
+SESSION SET GRAPH network
+
+query ITI
+INSERT (:Person {name: 'Ada'})-[:KNOWS {since: 2020}]->(:Person {name: 'Grace'})
+----
+true	network	1
+
+query TIIIIT
+SELECT graph_name, object_id, source_id, target_id, array_length(labels), labels::VARCHAR
+FROM gql_edges()
+----
+network	3	1	2	1	[knows]
+
+query TIII
+SELECT graph_name, graph_version, vertex_count, edge_count
+FROM gql_graphs()
+----
+network	1	2	1
+
+query T
+SELECT union_extract(value, 'int_value')::VARCHAR
+FROM gql_properties()
+WHERE object_id = 3 AND property_name = 'since'
+----
+2020
+
+# A left-pointing edge reverses the stored source and target.
+statement ok
+INSERT (:City {name: 'London'})<-[:BORN_IN]-(:Person {name: 'Alan'})
+
+query IIIT
+SELECT object_id, source_id, target_id, labels::VARCHAR
+FROM gql_edges()
+WHERE object_id = 6
+----
+6	5	4	[born_in]
+
+query III
+SELECT graph_version, vertex_count, edge_count FROM gql_graphs()
+----
+2	4	2
+
+# All vertices and edges in a chain are one graph mutation/version.
+statement ok
+INSERT (:A)-[:AB]->(:B)-[:BC]->(:C)
+
+query IIIT rowsort
+SELECT object_id, source_id, target_id, labels::VARCHAR
+FROM gql_edges()
+WHERE object_id IN (10, 11)
+----
+10	7	8	[ab]
+11	8	9	[bc]
+
+query III
+SELECT graph_version, vertex_count, edge_count FROM gql_graphs()
+----
+3	7	4
+
+# Failure while attaching edge properties rolls back the complete path.
+statement error
+INSERT (:A)-[:BAD {x: 1, x: 2}]->(:B)
+----
+<REGEX>:.*GQL internal storage error.*
+
+query III
+SELECT graph_version, vertex_count, edge_count FROM gql_graphs()
+----
+3	7	4
+
+statement ok
+DROP GRAPH network

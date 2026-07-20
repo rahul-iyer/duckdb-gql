@@ -1,0 +1,131 @@
+# name: test/sql/gql_csr.test
+# description: Versioned outgoing/incoming CSR construction, reuse, and validation
+# group: [gql]
+
+require gql
+
+statement ok
+CREATE GRAPH network ANY
+
+statement ok
+SESSION SET GRAPH network
+
+statement ok
+INSERT (:A)-[:AB]->(:B)-[:BC]->(:C)
+
+# First traversal lazily builds CSR. Node IDs are stable IDs; CSR ordinals stay private.
+query II
+SELECT * FROM gql_neighbors('network', 1, 'out')
+----
+2	4
+
+query II
+SELECT * FROM gql_neighbors('network', 3, 'in')
+----
+2	5
+
+query I
+SELECT count(*) FROM gql_neighbors('network', 3, 'out')
+----
+0
+
+query TIIIII
+SELECT graph_name, graph_version, vertex_count, edge_count, build_count, cached
+FROM gql_csr_stats('network')
+----
+network	1	3	2	1	true
+
+query I
+SELECT memory_bytes > 0 FROM gql_csr_stats('network')
+----
+true
+
+# Repeated inspection and traversal reuse the same versioned snapshot.
+query II
+SELECT * FROM gql_neighbors('network', 2, 'out')
+----
+3	5
+
+query I
+SELECT build_count FROM gql_csr_stats('network')
+----
+1
+
+# A graph mutation changes graph_version and makes the cached snapshot ineligible.
+statement ok
+INSERT (:D)
+
+query TIIII
+SELECT graph_name, graph_version, vertex_count, edge_count, build_count
+FROM gql_csr_stats('network')
+----
+network	2	4	2	2
+
+# The derived representation preserves parallel edges and deterministic edge-ID order.
+statement ok
+INSERT INTO gql_internal.objects (graph_id, kind, source_id, target_id)
+SELECT graph_id, 1, 1, 2 FROM gql_internal.graphs WHERE graph_name = 'network'
+
+statement ok
+INSERT INTO gql_internal.objects (graph_id, kind, source_id, target_id)
+SELECT graph_id, 1, 1, 2 FROM gql_internal.graphs WHERE graph_name = 'network'
+
+# Self-loops occur once in each directional array.
+statement ok
+INSERT INTO gql_internal.objects (graph_id, kind, source_id, target_id)
+SELECT graph_id, 1, 2, 2 FROM gql_internal.graphs WHERE graph_name = 'network'
+
+statement ok
+UPDATE gql_internal.graphs SET graph_version = graph_version + 1 WHERE graph_name = 'network'
+
+query II rowsort
+SELECT * FROM gql_neighbors('network', 1, 'out')
+----
+2	4
+2	7
+2	8
+
+query II rowsort
+SELECT * FROM gql_neighbors('network', 2, 'out')
+----
+2	9
+3	5
+
+query II
+SELECT * FROM gql_neighbors('network', 2, 'in') WHERE neighbor_id = 2
+----
+2	9
+
+query III
+SELECT graph_version, edge_count, build_count FROM gql_csr_stats('network')
+----
+3	5	3
+
+statement error
+SELECT * FROM gql_neighbors('network', 1, 'sideways')
+----
+GQL CSR direction must be 'out' or 'in'
+
+statement error
+SELECT * FROM gql_neighbors('missing', 1, 'out')
+----
+Graph 'missing' does not exist
+
+# Canonical endpoint corruption is detected rather than silently dropping an edge.
+statement ok
+INSERT INTO gql_internal.objects (graph_id, kind, source_id, target_id)
+SELECT graph_id, 1, 999999, 1 FROM gql_internal.graphs WHERE graph_name = 'network'
+
+statement ok
+UPDATE gql_internal.graphs SET graph_version = graph_version + 1 WHERE graph_name = 'network'
+
+statement error
+SELECT * FROM gql_neighbors('network', 1, 'out')
+----
+<REGEX>:.*Graph contains edge.*invalid endpoint.*
+
+statement ok
+DELETE FROM gql_internal.objects WHERE source_id = 999999
+
+statement ok
+DROP GRAPH network

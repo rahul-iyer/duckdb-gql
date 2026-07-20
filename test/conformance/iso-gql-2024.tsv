@@ -1,0 +1,33 @@
+feature_id	area	feature_family	status	test_scope
+GQL-06	program	program activity, session close, and procedure sequencing	planned	parser,binder,execution,diagnostics
+GQL-07	session	session set/reset schema, graph, time zone, and parameters	partial	parser,binder,execution,transactions
+GQL-08	transaction	start transaction modes, commit, and rollback	planned	parser,execution,transactions
+GQL-09	procedure	nested procedures, statement blocks, NEXT, and YIELD	planned	parser,binder,execution
+GQL-10	variables	graph, binding-table, and value variable definitions	planned	parser,binder,types
+GQL-11	expressions	graph, binding-table, and object expressions	planned	parser,binder,types,execution
+GQL-12	catalog	schema, graph, and graph-type create/drop/copy/replace	partial	parser,binder,execution,persistence
+GQL-13	modification	insert, set, remove, delete, detach, and modification pipelines	partial	parser,binder,execution,transactions
+GQL-14	query	linear/composite queries and union/except/intersect/otherwise	planned	parser,binder,execution
+GQL-14.4	query	match and optional match	partial	parser,binder,execution
+GQL-14.6	query	filter	partial	parser,binder,execution
+GQL-14.7	query	let	planned	parser,binder,types,execution
+GQL-14.8	query	for, ordinality, and offset	planned	parser,binder,execution
+GQL-14.9	result	order by, offset, and limit	partial	parser,binder,execution
+GQL-14.10	result	return, finish, projection, distinct, grouping, and aggregation	partial	parser,binder,types,execution
+GQL-14.12	query	select, from graph match, where, having, grouping, and paging	planned	parser,binder,execution
+GQL-15	procedure	named and inline procedure calls, arguments, scope, and yield	planned	parser,binder,execution
+GQL-16.1	focus	at schema and use graph	planned	parser,binder,execution
+GQL-16.3	pattern	graph pattern binding tables and yield	partial	parser,binder,execution
+GQL-16.4	pattern	match modes, multiple paths, bindings, keep, and where	partial	parser,binder,execution
+GQL-16.5	pattern	insert graph patterns and all edge directions	partial	parser,binder,execution,transactions
+GQL-16.6	path	walk/trail/simple/acyclic modes and all/any/shortest searches	planned	parser,binder,execution,csr
+GQL-16.7	path	concatenation, alternation, union, parentheses, and simplified patterns	partial	parser,binder,execution,csr
+GQL-16.8	label	label name, wildcard, negation, conjunction, disjunction, and grouping	partial	parser,binder,execution
+GQL-16.11	path	fixed/general quantifiers and optional path factors	partial	parser,binder,execution,csr
+GQL-17	types	graph types, element types, labels, properties, and inheritance	planned	parser,binder,catalog,persistence
+GQL-18	values	graph, binding-table, scalar, list, record, path, node, and edge value types	partial	parser,binder,types,execution
+GQL-19	predicates	comparison, null, normalized, source/destination, labels, same/different, property exists	partial	parser,binder,types,execution
+GQL-20	expressions	arithmetic, boolean, concatenation, primary expressions, parameters, literals, and casts	partial	parser,binder,types,execution
+GQL-21	functions	string, numeric, aggregate, list, element, datetime, duration, and path functions	partial	parser,binder,types,execution
+GQL-lexical	lexical	identifiers, reserved words, delimiters, comments, literals, and parameters	partial	lexer,parser,diagnostics
+GQL-status	diagnostics	standard status conditions, source locations, and host error mapping	partial	parser,binder,execution,diagnostics

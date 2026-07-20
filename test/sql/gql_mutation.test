@@ -1,0 +1,309 @@
+# name: test/sql/gql_mutation.test
+# description: Matched SET, REMOVE, DELETE, and DETACH DELETE lowered to caller DuckDB statements
+# group: [gql]
+
+require gql
+
+statement ok
+CREATE GRAPH mutations ANY
+
+statement ok
+SESSION SET GRAPH mutations
+
+statement ok
+INSERT (:Person {name: 'Ada', age: 42})-[:KNOWS {since: 2020}]->(:Person {name: 'Grace', age: 35})
+
+statement ok
+INSERT (:Person {name: 'Solo', age: 10})
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = 43
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age
+----
+43
+
+# SET can create a new property dictionary entry.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.city = 'London'
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.city AS city
+----
+London
+
+# SET and REMOVE labels use the normalized label dictionary.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person:Mathematician
+
+query T
+MATCH (person:Mathematician)
+RETURN person.name AS name
+----
+Ada
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+REMOVE person.city
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.city AS city
+----
+NULL
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+REMOVE person:Mathematician
+
+query I
+MATCH (person:Mathematician)
+RETURN COUNT(*) AS item_count
+----
+0
+
+# Mutations participate in an explicit caller transaction.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = 99
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.rollback_only = 'temporary'
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age
+----
+99
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.rollback_only AS rollback_value
+----
+temporary
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age
+----
+43
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.rollback_only AS rollback_value
+----
+NULL
+
+# A plain node DELETE rejects incident edges before changing storage.
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+DELETE person
+----
+<REGEX>:.*use DETACH DELETE.*
+
+query I
+MATCH (person:Person)
+RETURN COUNT(*) AS item_count
+----
+3
+
+query III
+SELECT graph_version, edge_count, build_count
+FROM gql_csr_stats('mutations')
+----
+7	1	1
+
+# An edge can be deleted directly.
+statement ok
+MATCH (source:Person)-[edge:KNOWS]->(target:Person)
+DELETE edge
+
+query I
+MATCH (source:Person)-[:KNOWS]->(target:Person)
+RETURN COUNT(*) AS item_count
+----
+0
+
+query I
+SELECT graph_version FROM gql_internal.graphs WHERE graph_name = 'mutations'
+----
+8
+
+query III
+SELECT graph_version, edge_count, build_count
+FROM gql_csr_stats('mutations')
+----
+8	0	2
+
+# A detached node delete removes both the node and its incident edges.
+statement ok
+INSERT (:Person {name: 'Temp'})-[:KNOWS]->(:Person {name: 'Leaf'})
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Temp'
+DETACH DELETE person
+
+query I
+MATCH (person:Person) WHERE person.name = 'Temp'
+RETURN COUNT(*) AS item_count
+----
+0
+
+query I
+MATCH (source:Person)-[:KNOWS]->(target:Person)
+WHERE source.name = 'Temp' OR target.name = 'Temp'
+RETURN COUNT(*) AS item_count
+----
+0
+
+# An isolated node can be deleted without DETACH.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+DELETE person
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN COUNT(*) AS item_count
+----
+0
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN COUNT(*) AS item_count
+----
+1
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+DELETE person
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN COUNT(*) AS item_count
+----
+0
+
+# Auxiliary rows are cleaned after element deletion.
+query I
+SELECT count(*)
+FROM gql_internal.object_properties property
+LEFT JOIN gql_internal.objects object USING (object_id)
+WHERE object.object_id IS NULL
+----
+0
+
+query I
+SELECT count(*)
+FROM gql_internal.object_labels object_label
+LEFT JOIN gql_internal.objects object USING (object_id)
+WHERE object.object_id IS NULL
+----
+0
+
+# Multiple mutation items share one materialized pre-mutation MATCH result.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = 44, person.city = 'Paris'
+
+query IT
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age, person.city AS city
+----
+44	Paris
+
+# Dynamically typed property arithmetic is converted back to canonical storage.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = person.age + 1
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age
+----
+45
+
+# SET all replaces the complete property map and evaluates values from the snapshot.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person = {name: person.name, age: person.age + 1}
+
+query ITT
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age AS age, person.city AS city, person.name AS name
+----
+46	NULL	Ada
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+REMOVE person.city, person.unknown_property
+
+# If a later generated DML statement fails, the earlier item is rolled back in autocommit mode.
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.rollback_guard = 'changed', person.age = person.missing + 1
+----
+<REGEX>:.*produced NULL or an unsupported value type.*
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.rollback_guard AS rollback_guard
+----
+NULL
+
+# DELETE lists retain all target ids even after the first object is removed.
+statement ok
+INSERT (:DeleteMe {name: 'First'})
+
+statement ok
+INSERT (:DeleteMe {name: 'Second'})
+
+statement ok
+MATCH (a:DeleteMe), (b:DeleteMe)
+WHERE a.name = 'First' AND b.name = 'Second'
+DELETE a, b
+
+query I
+MATCH (person:DeleteMe)
+RETURN COUNT(*) AS item_count
+----
+0
+
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET missing.age = 1
+----
+<REGEX>:.*binding variable 'missing' is not defined.*
+
+statement error
+OPTIONAL MATCH (person:Person)
+DELETE person
+----
+<REGEX>:.*OPTIONAL MATCH data modification pipeline.*
+
+statement error
+MATCH (person:Person)
+DELETE 1
+----
+<REGEX>:.*non-element DELETE target.*
+
+statement ok
+DROP GRAPH mutations

@@ -1,0 +1,225 @@
+# name: test/sql/gql_neo4j_import.test
+# description: Neo4j-compatible CSV and Parquet bulk import
+# group: [gql]
+
+require gql
+
+require parquet
+
+# Neo4j CSV headers carry field roles and scalar property types in column names.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', '42', 'true', NULL, 'Person;Researcher'),
+        ('p2', 'Grace', '37', 'false', 'Amazing Grace', 'Person')
+    ) nodes("personId:ID(People)", "name:string", "age:int", "active:boolean", "nickname:string", ":LABEL")
+) TO '__TEST_DIR__/gql_neo4j_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS', '2020')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE", "since:int")
+) TO '__TEST_DIR__/gql_neo4j_relationships.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH neo_csv ANY
+
+query ITII
+SELECT * FROM gql_load_graph(
+    'neo_csv',
+    '__TEST_DIR__/gql_neo4j_nodes.csv',
+    '__TEST_DIR__/gql_neo4j_relationships.csv',
+    'csv'
+)
+----
+true	neo_csv	2	1
+
+query TIII
+SELECT graph_name, graph_version, vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'neo_csv'
+----
+neo_csv	1	2	1
+
+query TIT
+SELECT graph_name, object_id, labels::VARCHAR
+FROM gql_vertices()
+WHERE graph_name = 'neo_csv'
+ORDER BY object_id
+----
+neo_csv	1	[person, researcher]
+neo_csv	2	[person]
+
+query TIITT
+SELECT graph_name, object_id, source_id, target_id, labels::VARCHAR
+FROM gql_edges()
+WHERE graph_name = 'neo_csv'
+----
+neo_csv	3	1	2	[knows]
+
+query TTI
+SELECT property_name, union_tag(value),
+       coalesce(union_extract(value, 'int_value'), -1)
+FROM gql_properties()
+WHERE graph_name = 'neo_csv' AND property_name IN ('age', 'since')
+ORDER BY object_id, property_name
+----
+age	int_value	42
+age	int_value	37
+since	int_value	2020
+
+query TTT
+SELECT property_name, union_tag(value), union_extract(value, 'string_value')
+FROM gql_properties()
+WHERE graph_name = 'neo_csv' AND property_name IN ('personid', 'name')
+ORDER BY object_id, property_name
+----
+name	string_value	Ada
+personid	string_value	p1
+name	string_value	Grace
+personid	string_value	p2
+
+# Bulk property import preserves sparse/null property semantics.
+query I
+SELECT count(*)
+FROM gql_properties()
+WHERE graph_name = 'neo_csv' AND property_name = 'nickname'
+----
+1
+
+query T
+SELECT union_extract(value, 'string_value')
+FROM gql_properties()
+WHERE graph_name = 'neo_csv' AND property_name = 'nickname'
+----
+Amazing Grace
+
+statement ok
+SESSION SET GRAPH neo_csv
+
+query TT
+MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age
+----
+Grace	37
+Ada	42
+
+# Parquet uses the same semantic Neo4j column names but preserves native types.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (10, 'Compiler', 2024, 'Project'),
+        (20, 'Database', 2025, 'Project')
+    ) nodes("projectId:ID", name, year, ":LABEL")
+) TO '__TEST_DIR__/gql_neo4j_nodes.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (10, 20, 'DEPENDS_ON', 0.75::DOUBLE)
+    ) relationships(":START_ID", ":END_ID", ":TYPE", weight)
+) TO '__TEST_DIR__/gql_neo4j_relationships.parquet' (FORMAT PARQUET)
+
+statement ok
+CREATE GRAPH neo_parquet ANY
+
+query ITII
+SELECT * FROM gql_load_graph(
+    'neo_parquet',
+    '__TEST_DIR__/gql_neo4j_nodes.parquet',
+    '__TEST_DIR__/gql_neo4j_relationships.parquet',
+    'parquet'
+)
+----
+true	neo_parquet	2	1
+
+query TTI
+SELECT property_name, union_tag(value), union_extract(value, 'int_value')
+FROM gql_properties()
+WHERE graph_name = 'neo_parquet' AND property_name = 'year'
+ORDER BY object_id
+----
+year	int_value	2024
+year	int_value	2025
+
+# Broken endpoints roll back the complete import, including nodes and version.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'missing', 'KNOWS')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE")
+) TO '__TEST_DIR__/gql_neo4j_bad_relationships.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH neo_atomic ANY
+
+statement error
+SELECT * FROM gql_load_graph(
+    'neo_atomic',
+    '__TEST_DIR__/gql_neo4j_nodes.csv',
+    '__TEST_DIR__/gql_neo4j_bad_relationships.csv',
+    'csv'
+)
+----
+<REGEX>:.*relationship endpoints must reference imported node.*
+
+query III
+SELECT graph_version, vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'neo_atomic'
+----
+0	0	0
+
+# Duplicate node IDs fail before any canonical objects are published.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('same', 'One'),
+        ('same', 'Two')
+    ) nodes(":ID", "name:string")
+) TO '__TEST_DIR__/gql_neo4j_duplicate_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH neo_duplicate ANY
+
+statement error
+SELECT * FROM gql_load_graph(
+    'neo_duplicate',
+    '__TEST_DIR__/gql_neo4j_duplicate_nodes.csv',
+    NULL,
+    'csv'
+)
+----
+<REGEX>:.*node :ID values must be unique.*
+
+query III
+SELECT graph_version, vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'neo_duplicate'
+----
+0	0	0
+
+# NULL relationship path supports node-only imports.
+statement ok
+CREATE GRAPH neo_nodes_only ANY
+
+query ITII
+SELECT * FROM gql_load_graph(
+    'neo_nodes_only',
+    '__TEST_DIR__/gql_neo4j_nodes.csv',
+    NULL,
+    'csv'
+)
+----
+true	neo_nodes_only	2	0
+
+# Full imports refuse to merge into a non-empty graph.
+statement error
+SELECT * FROM gql_load_graph(
+    'neo_nodes_only',
+    '__TEST_DIR__/gql_neo4j_nodes.csv',
+    NULL,
+    'csv'
+)
+----
+<REGEX>:.*is not empty.*only supports full imports.*

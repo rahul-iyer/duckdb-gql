@@ -1,0 +1,56 @@
+# name: test/sql/gql_catalog.test
+# description: ISO GQL graph catalog creation, selection, introspection, and removal
+# group: [gql]
+
+require gql
+
+query IT
+CREATE GRAPH social ANY
+----
+true	social
+
+query TIII
+SELECT graph_name, graph_version, vertex_count, edge_count
+FROM gql_graphs()
+----
+social	0	0	0
+
+statement error
+CREATE GRAPH social ANY
+----
+Graph 'social' already exists
+
+query IT
+CREATE GRAPH IF NOT EXISTS social ANY
+----
+true	social
+
+query IT
+SESSION SET GRAPH social
+----
+true	social
+
+statement error
+SESSION SET GRAPH missing
+----
+Graph 'missing' does not exist
+
+query IT
+DROP GRAPH social
+----
+true	social
+
+query I
+SELECT count(*) FROM gql_graphs()
+----
+0
+
+statement error
+DROP GRAPH social
+----
+Graph 'social' does not exist
+
+query IT
+DROP GRAPH IF EXISTS social
+----
+true	social

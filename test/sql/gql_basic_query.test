@@ -1,0 +1,104 @@
+# name: test/sql/gql_basic_query.test
+# description: Basic GQL result shaping, optional matching, functions, and aggregation on native DuckDB operators
+# group: [gql]
+
+require gql
+
+statement ok
+CREATE GRAPH basic_queries ANY
+
+statement ok
+SESSION SET GRAPH basic_queries
+
+statement ok
+INSERT (:Person {name: 'Ada', age: 42})-[:KNOWS]->(:Person {name: 'Grace', age: 35})
+
+statement ok
+INSERT (:Person {name: 'Ada', age: 30})
+
+query T rowsort
+MATCH (person:Person)
+RETURN DISTINCT person.name AS name
+----
+Ada
+Grace
+
+query TI
+MATCH (person:Person)
+RETURN person.name AS name, element_id(person) AS person_id
+ORDER BY name DESC, person_id ASC
+OFFSET 1
+LIMIT 1
+----
+Ada	1
+
+query TTTTII rowsort
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN LOWER(person.name) AS lower_name,
+       UPPER(person.name) AS upper_name,
+       LEFT(person.name, 2) AS left_name,
+       RIGHT(person.name, 2) AS right_name,
+       CHAR_LENGTH(person.name) AS name_length,
+       MOD(person.age, 10) AS age_mod
+----
+ada	ADA	Ad	da	3	0
+ada	ADA	Ad	da	3	2
+
+query TT rowsort
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN TRIM('  Ada  ') AS trimmed, person.name || ' Lovelace' AS full_name
+----
+Ada	Ada Lovelace
+Ada	Ada Lovelace
+
+query T
+OPTIONAL MATCH (person:Missing)
+RETURN person.name AS name
+----
+NULL
+
+query T rowsort
+OPTIONAL MATCH (person:Person)
+RETURN person.name AS name
+----
+Ada
+Ada
+Grace
+
+query I
+MATCH (person:Person)
+RETURN COUNT(*) AS person_count
+----
+3
+
+query I
+MATCH (person:Person)
+RETURN COUNT(DISTINCT person.name) AS distinct_names
+----
+2
+
+query IRII
+MATCH (person:Person)
+RETURN SUM(person.age) AS total_age,
+       AVG(person.age) AS average_age,
+       MIN(person.age) AS youngest_age,
+       MAX(person.age) AS oldest_age
+----
+107	35.666666666666664	30	42
+
+query TI rowsort
+MATCH (person:Person)
+RETURN person.name AS name, COUNT(*) AS occurrences
+GROUP BY person
+----
+Ada	2
+Grace	1
+
+query T
+OPTIONAL MATCH (person:Missing)
+RETURN person.name AS name
+LIMIT 0
+----
+
+statement ok
+DROP GRAPH basic_queries
