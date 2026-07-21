@@ -1,0 +1,40 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_returnorderby2_119.test
+# Source: tck/features/clauses/return-orderby/ReturnOrderBy2.feature:119 [5] Support ordering by a property after being distinct-ified
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A'),
+        ('n2', 'B')
+    ) fixture(":ID(GqlFixture_candidate_returnorderby2_119)", ":LABEL")
+) TO '__TEST_DIR__/candidate_returnorderby2_119_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'T')
+    ) fixture(":START_ID(GqlFixture_candidate_returnorderby2_119)", ":END_ID(GqlFixture_candidate_returnorderby2_119)", ":TYPE")
+) TO '__TEST_DIR__/candidate_returnorderby2_119_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_returnorderby2_119 ANY
+
+statement ok
+COPY GRAPH candidate_returnorderby2_119 FROM (
+    VERTICES '__TEST_DIR__/candidate_returnorderby2_119_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_returnorderby2_119_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_returnorderby2_119
+
+query T
+MATCH (a)-[]->(b)
+RETURN DISTINCT b
+ORDER BY b.name
+----
+{'__gql_id': 2, '__gql_labels': b}

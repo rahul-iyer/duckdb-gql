@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import re
 import shutil
 from pathlib import Path
@@ -19,7 +20,17 @@ from generate_gql_clause_sqllogic import (
     having_executed_blocks,
     scenario_blocks,
 )
-from gql_fixture_adapter import FixtureAdaptationError, compile_fixture_sql, safe_name
+from gql_fixture_adapter import (
+    Edge,
+    Fixture,
+    FixtureAdaptationError,
+    Literal,
+    Node,
+    compile_fixture_sql,
+    parse_insert_fixture,
+    property_schema,
+    safe_name,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -92,14 +103,170 @@ def scalar_cell(cell: str) -> tuple[str, str] | None:
     return None
 
 
-def expected_result(rows: list[list[str]], width: int) -> tuple[str, list[str]] | None:
+def normalized_properties(element: Node | Edge) -> dict[str, Literal]:
+    return {name.casefold(): value for name, value in element.properties.items()}
+
+
+def same_element(expected: Node | Edge, actual: Node | Edge) -> bool:
+    if isinstance(expected, Node) != isinstance(actual, Node):
+        return False
+    if isinstance(expected, Node):
+        assert isinstance(actual, Node)
+        if expected.label.casefold() != actual.label.casefold():
+            return False
+    else:
+        assert isinstance(expected, Edge) and isinstance(actual, Edge)
+        if expected.relationship_type.casefold() != actual.relationship_type.casefold():
+            return False
+    return normalized_properties(expected) == normalized_properties(actual)
+
+
+def render_literal(value: Literal | None) -> str:
+    if value is None or value.kind == "null":
+        return "NULL"
+    if value.kind == "bool":
+        return "true" if value.value else "false"
+    if value.kind.startswith("list:"):
+        assert isinstance(value.value, tuple)
+        return "[" + ", ".join(render_literal(item) for item in value.value) + "]"
+    return str(value.value)
+
+
+def render_properties(
+    element: Node | Edge, schema: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    properties = normalized_properties(element)
+    return [
+        (name.casefold(), render_literal(properties.get(name.casefold())))
+        for name, _ in schema
+    ]
+
+
+def render_node(node: Node, node_index: int, fixture: Fixture) -> str:
+    fields = [
+        ("__gql_id", str(node_index + 1)),
+        (
+            "__gql_labels",
+            ";".join(label.strip().casefold() for label in node.label.split(";")),
+        ),
+        *render_properties(node, property_schema(fixture.nodes)),
+    ]
+    return "{" + ", ".join(f"'{name}': {value}" for name, value in fields) + "}"
+
+
+def render_edge(edge: Edge, edge_index: int, fixture: Fixture) -> str:
+    node_indices = {node.external_id: index + 1 for index, node in enumerate(fixture.nodes)}
+    fields = [
+        ("__gql_id", str(edge_index + 1)),
+        ("__gql_type", edge.relationship_type.casefold()),
+        ("__gql_source", str(node_indices[edge.source_id])),
+        ("__gql_target", str(node_indices[edge.target_id])),
+        *render_properties(edge, property_schema(fixture.edges)),
+    ]
+    return "{" + ", ".join(f"'{name}': {value}" for name, value in fields) + "}"
+
+
+def node_candidates(expected: Node, fixture: Fixture) -> list[int]:
+    return [
+        index
+        for index, node in enumerate(fixture.nodes)
+        if same_element(expected, node)
+    ]
+
+
+def edge_candidates(expected: Edge, fixture: Fixture) -> list[int]:
+    return [
+        index
+        for index, edge in enumerate(fixture.edges)
+        if same_element(expected, edge)
+    ]
+
+
+def graph_cell(cell: str, fixture: Fixture | None) -> tuple[str, str] | None:
+    if fixture is None:
+        return None
+    try:
+        if cell.startswith("(") and cell.endswith(")"):
+            expected = parse_insert_fixture("INSERT " + cell)
+            if len(expected.nodes) != 1 or expected.edges:
+                return None
+            candidates = node_candidates(expected.nodes[0], fixture)
+            if len(candidates) != 1:
+                return None
+            index = candidates[0]
+            return render_node(fixture.nodes[index], index, fixture), "text"
+
+        if cell.startswith("[:") and cell.endswith("]"):
+            expected = parse_insert_fixture("INSERT ()-" + cell + "->()")
+            if len(expected.edges) != 1:
+                return None
+            candidates = edge_candidates(expected.edges[0], fixture)
+            if len(candidates) != 1:
+                return None
+            index = candidates[0]
+            return render_edge(fixture.edges[index], index, fixture), "text"
+
+        if cell.startswith("<") and cell.endswith(")>"):
+            expected = parse_insert_fixture("INSERT " + cell[1:-1])
+            if not expected.nodes:
+                return None
+            candidate_sets = [node_candidates(node, fixture) for node in expected.nodes]
+            if any(not candidates for candidates in candidate_sets):
+                return None
+            local_positions = {
+                node.external_id: index for index, node in enumerate(expected.nodes)
+            }
+            matches: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+            for node_choice in itertools.product(*candidate_sets):
+                edge_choice: list[int] = []
+                valid = True
+                for edge in expected.edges:
+                    source = fixture.nodes[node_choice[local_positions[edge.source_id]]]
+                    target = fixture.nodes[node_choice[local_positions[edge.target_id]]]
+                    candidates = [
+                        index
+                        for index, actual in enumerate(fixture.edges)
+                        if actual.source_id == source.external_id
+                        and actual.target_id == target.external_id
+                        and same_element(edge, actual)
+                    ]
+                    if len(candidates) != 1:
+                        valid = False
+                        break
+                    edge_choice.append(candidates[0])
+                if valid:
+                    matches.append((node_choice, tuple(edge_choice)))
+            if len(matches) != 1:
+                return None
+            node_choice, edge_choice = matches[0]
+            nodes = ", ".join(
+                render_node(fixture.nodes[index], index, fixture)
+                for index in node_choice
+            )
+            edges = ", ".join(
+                render_edge(fixture.edges[index], index, fixture)
+                for index in edge_choice
+            )
+            return f"{{'nodes': [{nodes}], 'edges': [{edges}]}}", "text"
+    except (FixtureAdaptationError, KeyError):
+        return None
+    return None
+
+
+def result_cell(cell: str, fixture: Fixture | None) -> tuple[str, str] | None:
+    return scalar_cell(cell) or graph_cell(cell, fixture)
+
+
+def expected_result(
+    rows: list[list[str]], width: int, fixture: Fixture | None = None
+) -> tuple[str, list[str]] | None:
     if not rows or any(len(row) != width for row in rows):
         return None
     converted: list[list[tuple[str, str]]] = []
     for row in rows:
         converted_row = []
         for cell in row:
-            value = scalar_cell(cell)
+            value = result_cell(cell, fixture)
             if value is None:
                 return None
             converted_row.append(value)
@@ -116,6 +283,36 @@ def expected_result(rows: list[list[str]], width: int) -> tuple[str, list[str]] 
         else:
             types.append("T")
     return "".join(types), ["\t".join(value for value, _ in row) for row in converted]
+
+
+def self_test() -> None:
+    fixture = parse_insert_fixture(
+        "INSERT (a:A {name: 'Ada', age: 42}), "
+        "(b:B {name: 'Grace'}), (a)-[:KNOWS {since: 2020}]->(b)"
+    )
+    assert graph_cell("(:A {name: 'Ada', age: 42})", fixture) == (
+        "{'__gql_id': 1, '__gql_labels': a, 'age': 42, 'name': Ada}",
+        "text",
+    )
+    assert graph_cell("[:KNOWS {since: 2020}]", fixture) == (
+        "{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, "
+        "'__gql_target': 2, 'since': 2020}",
+        "text",
+    )
+    assert graph_cell(
+        "<(:A {name: 'Ada', age: 42})-[:KNOWS {since: 2020}]->"
+        "(:B {name: 'Grace'})>",
+        fixture,
+    ) == (
+        "{'nodes': [{'__gql_id': 1, '__gql_labels': a, 'age': 42, 'name': Ada}, "
+        "{'__gql_id': 2, '__gql_labels': b, 'age': NULL, 'name': Grace}], "
+        "'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, "
+        "'__gql_target': 2, 'since': 2020}]}",
+        "text",
+    )
+    duplicate = parse_insert_fixture("INSERT (:A), (:A)")
+    assert graph_cell("(:A)", duplicate) is None
+    print("graph result adapter self-test passed")
 
 
 def safe_query(query: str) -> bool:
@@ -195,8 +392,14 @@ def translate_vlp(query: str) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--self-test", action="store_true")
     arguments = parser.parse_args()
+    if arguments.self_test:
+        self_test()
+        return 0
+    if arguments.output is None:
+        parser.error("--output is required unless --self-test is used")
     output = arguments.output.resolve()
     if output.exists():
         shutil.rmtree(output)
@@ -240,18 +443,23 @@ def main() -> int:
                 continue
             if "no side effects" not in block.casefold():
                 continue
-            headers, expected_rows, rowsort = result
-            expected = expected_result(expected_rows, len(headers))
-            if expected is None:
-                continue
             setup_blocks = background + having_executed_blocks(block)
             if setup_blocks and key not in fixture_ready:
+                continue
+            fixture_text = "\n".join(setup_blocks)
+            try:
+                fixture = parse_insert_fixture(fixture_text)
+            except FixtureAdaptationError:
+                continue
+            headers, expected_rows, rowsort = result
+            expected = expected_result(expected_rows, len(headers), fixture)
+            if expected is None:
                 continue
             name = safe_name(
                 f"candidate_{Path(target_path).stem}_{row['source_line']}"
             )
             try:
-                fixture_sql = compile_fixture_sql("\n".join(setup_blocks), name)
+                fixture_sql = compile_fixture_sql(fixture_text, name)
             except FixtureAdaptationError:
                 continue
             type_string, output_rows = expected

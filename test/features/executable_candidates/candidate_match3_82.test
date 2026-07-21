@@ -1,0 +1,42 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match3_82.test
+# Source: tck/features/clauses/match/Match3.feature:82 [4] Get two related nodes
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 1, 'A'),
+        ('n2', 2, 'B'),
+        ('n3', 3, 'C')
+    ) fixture(":ID(GqlFixture_candidate_match3_82)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_match3_82_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'KNOWS'),
+        ('n1', 'n3', 'KNOWS')
+    ) fixture(":START_ID(GqlFixture_candidate_match3_82)", ":END_ID(GqlFixture_candidate_match3_82)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match3_82_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match3_82 ANY
+
+statement ok
+COPY GRAPH candidate_match3_82 FROM (
+    VERTICES '__TEST_DIR__/candidate_match3_82_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match3_82_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match3_82
+
+query T rowsort
+MATCH ()-[rel:KNOWS]->(x)
+RETURN x
+----
+{'__gql_id': 2, '__gql_labels': b, 'num': 2}
+{'__gql_id': 3, '__gql_labels': c, 'num': 3}

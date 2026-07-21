@@ -1,0 +1,46 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_545.test
+# Source: tck/features/clauses/match/Match7.feature:545 [26] Handling correlated optional matches; first does not match implies second does not match
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', CAST(NULL AS BIGINT), 'Single'),
+        ('n2', 42, 'A'),
+        ('n3', 46, 'B'),
+        ('n4', CAST(NULL AS BIGINT), 'C')
+    ) fixture(":ID(GqlFixture_candidate_match7_545)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_match7_545_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'REL'),
+        ('n1', 'n3', 'REL'),
+        ('n2', 'n4', 'REL'),
+        ('n3', 'n3', 'LOOP')
+    ) fixture(":START_ID(GqlFixture_candidate_match7_545)", ":END_ID(GqlFixture_candidate_match7_545)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match7_545_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match7_545 ANY
+
+statement ok
+COPY GRAPH candidate_match7_545 FROM (
+    VERTICES '__TEST_DIR__/candidate_match7_545_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match7_545_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match7_545
+
+query TT rowsort
+MATCH (a:A), (b:B)
+OPTIONAL MATCH (a)-[]->(x)
+OPTIONAL MATCH (x)-[r]->(b)
+RETURN x, r
+----
+{'__gql_id': 4, '__gql_labels': c, 'num': NULL}	NULL

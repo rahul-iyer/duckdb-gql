@@ -207,8 +207,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match6.feature:98 [5] Path query should return results in written order
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -256,8 +258,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match6.feature:114 [6] Handling direction of named paths
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

@@ -1,0 +1,44 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match9_33.test
+# Source: tck/features/clauses/match/Match9.feature:33 [1] Variable length relationship variables are lists of relationships
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', ''),
+        ('n2', ''),
+        ('n3', '')
+    ) fixture(":ID(GqlFixture_candidate_match9_33)", ":LABEL")
+) TO '__TEST_DIR__/candidate_match9_33_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'T')
+    ) fixture(":START_ID(GqlFixture_candidate_match9_33)", ":END_ID(GqlFixture_candidate_match9_33)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match9_33_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match9_33 ANY
+
+statement ok
+COPY GRAPH candidate_match9_33 FROM (
+    VERTICES '__TEST_DIR__/candidate_match9_33_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match9_33_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match9_33
+
+query T rowsort
+MATCH ()-[r*0..1]-()
+RETURN last(r) AS l
+----
+NULL
+NULL
+NULL
+{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}
+{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}

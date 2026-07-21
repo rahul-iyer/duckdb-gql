@@ -15,7 +15,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -198,7 +198,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -302,8 +302,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere6.feature:140 [6] Join nodes on non-equality of properties – OPTIONAL MATCH and WHERE
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -364,8 +366,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere6.feature:163 [7] Join nodes on non-equality of properties – OPTIONAL MATCH on two relationships and WHERE
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -426,8 +430,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere6.feature:186 [8] Join nodes on non-equality of properties – Two OPTIONAL MATCH clauses and WHERE
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

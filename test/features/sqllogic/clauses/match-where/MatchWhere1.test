@@ -15,7 +15,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -161,8 +161,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:83 [4] Filter start node of relationship with property predicate on multi variables with multiple bindings
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -377,8 +379,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:160 [8] Filter relationship with property predicate on multi variables with multiple bindings
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -481,8 +485,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:196 [10] Filter node with disjunctive property predicate on single variables with multiple bindings
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

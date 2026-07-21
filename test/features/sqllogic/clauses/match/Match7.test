@@ -15,7 +15,7 @@
 # Port status: executable
 # Translation review flags: semantic_review
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Null node result translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 #
 # GQL-adapted source specification:
 #   Scenario: [1] Simple OPTIONAL MATCH on empty graph
@@ -78,8 +78,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:63 [3] OPTIONAL MATCH and bound nodes
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -351,7 +353,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Null optional node result translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -410,8 +412,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:183 [9] Longer pattern with bound nodes
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -778,7 +782,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Null named-path result translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -894,7 +898,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Null optional named-path result translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1188,8 +1192,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:477 [23] OPTIONAL MATCH with labels on the optional end node
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1308,7 +1314,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Null optional edge results translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1370,8 +1376,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:545 [26] Handling correlated optional matches; first does not match implies second does not match
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1557,7 +1565,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1612,7 +1620,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1665,7 +1673,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

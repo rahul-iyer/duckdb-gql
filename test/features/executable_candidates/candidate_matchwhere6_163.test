@@ -1,0 +1,49 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere6_163.test
+# Source: tck/features/clauses/match-where/MatchWhere6.feature:163 [7] Join nodes on non-equality of properties – OPTIONAL MATCH on two relationships and WHERE
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 1, 'X'),
+        ('n2', 2, 'Y'),
+        ('n3', 3, 'Z'),
+        ('n4', 4, 'X'),
+        ('n5', 5, 'Y'),
+        ('n6', 6, 'X')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere6_163)", "val:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere6_163_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'E1'),
+        ('n2', 'n3', 'E2'),
+        ('n4', 'n5', 'E1')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere6_163)", ":END_ID(GqlFixture_candidate_matchwhere6_163)", ":TYPE")
+) TO '__TEST_DIR__/candidate_matchwhere6_163_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere6_163 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere6_163 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere6_163_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere6_163_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere6_163
+
+query TTT rowsort
+MATCH (x:X)
+OPTIONAL MATCH (x)-[:E1]->(y:Y)-[:E2]->(z:Z)
+WHERE x.val < z.val
+RETURN x, y, z
+----
+{'__gql_id': 1, '__gql_labels': x, 'val': 1}	{'__gql_id': 2, '__gql_labels': y, 'val': 2}	{'__gql_id': 3, '__gql_labels': z, 'val': 3}
+{'__gql_id': 4, '__gql_labels': x, 'val': 4}	NULL	NULL
+{'__gql_id': 6, '__gql_labels': x, 'val': 6}	NULL	NULL

@@ -31,7 +31,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -79,7 +79,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -127,7 +127,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -178,7 +178,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -229,7 +229,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -323,7 +323,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -418,7 +418,7 @@
 # Port status: executable
 # Translation review flags: semantic_review
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 #
 # GQL-adapted source specification:
 #   Scenario: [10] Return count aggregation over an empty graph
@@ -437,7 +437,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

@@ -1,0 +1,40 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match9_163.test
+# Source: tck/features/clauses/match/Match9.feature:163 [8] Variable length relationship in OPTIONAL MATCH
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A'),
+        ('n2', 'B')
+    ) fixture(":ID(GqlFixture_candidate_match9_163)", ":LABEL")
+) TO '__TEST_DIR__/candidate_match9_163_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_match9_163)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_match9_163)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match9_163_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match9_163 ANY
+
+statement ok
+COPY GRAPH candidate_match9_163 FROM (
+    VERTICES '__TEST_DIR__/candidate_match9_163_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match9_163_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match9_163
+
+query T rowsort
+MATCH (a:A), (b:B)
+OPTIONAL MATCH (a)-[r*]-(b)
+WHERE r IS NULL
+AND a <> b
+RETURN b
+----
+{'__gql_id': 2, '__gql_labels': b}

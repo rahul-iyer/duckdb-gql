@@ -72,6 +72,15 @@ def main() -> int:
         check=True,
     )
     subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "generate_gql_executable_candidates.py"),
+            "--self-test",
+        ],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "check_gql_feature_corpus.py")],
         cwd=ROOT,
         check=True,

@@ -1,0 +1,42 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_160.test
+# Source: tck/features/clauses/match-where/MatchWhere1.feature:160 [8] Filter relationship with property predicate on multi variables with multiple bindings
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A'),
+        ('n2', ''),
+        ('n3', 'B')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere1_160)", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere1_160_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n2', 'n1', 'KNOWS', 'monkey'),
+        ('n2', 'n3', 'KNOWS', 'woot')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere1_160)", ":END_ID(GqlFixture_candidate_matchwhere1_160)", ":TYPE", "name:string")
+) TO '__TEST_DIR__/candidate_matchwhere1_160_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere1_160 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere1_160 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere1_160_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere1_160_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere1_160
+
+query T rowsort
+MATCH (node)-[r:KNOWS]->(a)
+WHERE r.name = 'monkey'
+RETURN a
+----
+{'__gql_id': 1, '__gql_labels': a}

@@ -13,9 +13,9 @@ manifest rows, and run the verification commands at the end of this document.
 - Branch: `rewrite/native-tables`
 - Native DuckDB wide-table graph storage; no EAV fallback
 - Vectorized CSV and Parquet loading through `COPY GRAPH`
-- 907 assertions passing across 11 GQL test cases
+- 1,117 assertions passing across 11 GQL test cases
 - 93 imported clause feature files and 827 source scenarios
-- 66 verified executable source scenarios; 761 unreviewed
+- 93 verified executable source scenarios; 734 unreviewed
 - 532 of 548 fixture setups adapted
 - ISO manifest: 22 partial and 14 planned feature families
 - Full release conformance gate does not pass yet
@@ -44,8 +44,8 @@ manifest rows, and run the verification commands at the end of this document.
 - [ ] Return quantified/VLP paths as typed values.
 - [x] Define stable DuckDB result representations for node and edge values.
 - [x] Define the stable DuckDB result representation for fixed path values.
-- [ ] Extend the compatibility candidate generator to validate element and path
-      result cells.
+- [x] Extend the compatibility candidate generator to validate unambiguous node,
+      edge, and fixed-path result cells against adapted fixture identities.
 
 ### Element access functions
 
@@ -121,7 +121,7 @@ manifest rows, and run the verification commands at the end of this document.
 ### Compatibility corpus
 
 - [ ] Adapt the remaining 16 fixture setups.
-- [ ] Classify all 761 currently unreviewed source scenarios.
+- [ ] Classify all 734 currently unreviewed source scenarios.
 - [ ] Promote every passing source-equivalent scenario into the active suite.
 - [ ] Keep unsupported scenarios explicit and tied to concrete implementation
       gaps.
@@ -250,9 +250,9 @@ manifest rows, and run the verification commands at the end of this document.
 
 ## Recommended next sequence
 
-1. Extend result-cell adaptation for non-null element and path values.
-2. Implement native GQL `INSERT`.
-3. Implement element type, label, source, and destination functions.
+1. Implement native GQL `INSERT`.
+2. Implement element type, label, source, and destination functions.
+3. Materialize quantified/VLP path values.
 4. Regenerate and promote compatibility candidates.
 
 ## Verification commands

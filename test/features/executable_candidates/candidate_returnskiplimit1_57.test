@@ -1,0 +1,44 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_returnskiplimit1_57.test
+# Source: tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature:57 [2] Start the result from the second row by param
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A', ''),
+        ('n2', 'B', ''),
+        ('n3', 'C', ''),
+        ('n4', 'D', ''),
+        ('n5', 'E', '')
+    ) fixture(":ID(GqlFixture_candidate_returnskiplimit1_57)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_returnskiplimit1_57_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_returnskiplimit1_57)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_returnskiplimit1_57)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_returnskiplimit1_57_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_returnskiplimit1_57 ANY
+
+statement ok
+COPY GRAPH candidate_returnskiplimit1_57 FROM (
+    VERTICES '__TEST_DIR__/candidate_returnskiplimit1_57_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_returnskiplimit1_57_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_returnskiplimit1_57
+
+query T
+MATCH (n)
+RETURN n
+ORDER BY n.name ASC
+OFFSET $skipAmount
+----
+{'__gql_id': 3, '__gql_labels': , 'name': C}
+{'__gql_id': 4, '__gql_labels': , 'name': D}
+{'__gql_id': 5, '__gql_labels': , 'name': E}

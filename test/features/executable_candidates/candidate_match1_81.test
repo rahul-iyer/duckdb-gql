@@ -1,0 +1,38 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match1_81.test
+# Source: tck/features/clauses/match/Match1.feature:81 [4] Simple node inline property predicate
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', CAST(NULL AS VARCHAR), 'bar', ''),
+        ('n2', CAST(NULL AS VARCHAR), 'monkey', ''),
+        ('n3', 'bar', CAST(NULL AS VARCHAR), '')
+    ) fixture(":ID(GqlFixture_candidate_match1_81)", "firstname:string", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_match1_81_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_match1_81)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_match1_81)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match1_81_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match1_81 ANY
+
+statement ok
+COPY GRAPH candidate_match1_81 FROM (
+    VERTICES '__TEST_DIR__/candidate_match1_81_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match1_81_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match1_81
+
+query T rowsort
+MATCH (n {name: 'bar'})
+RETURN n
+----
+{'__gql_id': 1, '__gql_labels': , 'firstname': NULL, 'name': bar}

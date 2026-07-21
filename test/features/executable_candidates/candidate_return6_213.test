@@ -1,0 +1,41 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return6_213.test
+# Source: tck/features/clauses/return/Return6.feature:213 [12] Counting matches per group
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'L'),
+        ('n2', ''),
+        ('n3', '')
+    ) fixture(":ID(GqlFixture_candidate_return6_213)", ":LABEL")
+) TO '__TEST_DIR__/candidate_return6_213_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'A'),
+        ('n1', 'n3', 'A')
+    ) fixture(":START_ID(GqlFixture_candidate_return6_213)", ":END_ID(GqlFixture_candidate_return6_213)", ":TYPE")
+) TO '__TEST_DIR__/candidate_return6_213_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_return6_213 ANY
+
+statement ok
+COPY GRAPH candidate_return6_213 FROM (
+    VERTICES '__TEST_DIR__/candidate_return6_213_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_return6_213_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_return6_213
+
+query TI rowsort
+MATCH (a:L)-[rel]->(b)
+RETURN a, count(*)
+----
+{'__gql_id': 1, '__gql_labels': l}	2

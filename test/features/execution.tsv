@@ -1,67 +1,94 @@
 source_path	source_line	status	test_path	notes
-tck/features/clauses/match-where/MatchWhere1.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match-where/MatchWhere6.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match-where/MatchWhere6.feature	101	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match1.feature	97	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match3.feature	310	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match3.feature	329	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	69	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	94	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	131	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	144	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	177	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	206	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	219	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	267	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	280	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	297	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	323	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	348	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	397	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	412	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	427	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match5.feature	446	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	34	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	161	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	325	executable	test/sql/gql_feature_compatibility.test	Null named-path result translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	367	executable	test/sql/gql_feature_compatibility.test	Null optional named-path result translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	520	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	615	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	634	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/match/Match7.feature	652	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere1.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere1.feature	83	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere1.feature	160	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere1.feature	196	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere3.feature	51	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere3.feature	71	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere6.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere6.feature	101	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere6.feature	140	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere6.feature	163	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match-where/MatchWhere6.feature	186	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match1.feature	97	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match2.feature	44	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	49	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	65	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	82	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	118	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	171	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	236	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	252	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	310	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match3.feature	329	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	69	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	94	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	131	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	144	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	177	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	206	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	219	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	267	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	280	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	297	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	323	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	348	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	397	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	412	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	427	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match5.feature	446	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match6.feature	98	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match6.feature	114	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	34	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	63	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	161	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	183	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	325	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	367	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	477	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	520	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	545	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	615	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	634	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	652	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/merge/Merge1.feature	46	executable	test/sql/gql_feature_merge.test	Shared managed-graph fixture; MERGE result and side effects asserted through post-state MATCH
 tck/features/clauses/merge/Merge1.feature	60	executable	test/sql/gql_feature_merge.test	Existing label match and absence of node creation asserted
 tck/features/clauses/merge/Merge1.feature	76	executable	test/sql/gql_feature_merge.test	Property-only create branch and resulting property asserted
 tck/features/clauses/merge/Merge1.feature	94	executable	test/sql/gql_feature_merge.test	Label-and-property miss creates a distinct node from an unlabeled property match
 tck/features/clauses/merge/Merge1.feature	112	executable	test/sql/gql_feature_merge.test	Existing label-and-property match has no side effects
 tck/features/clauses/merge/Merge1.feature	128	executable	test/sql/gql_feature_merge.test	Multiple label matches do not create another node
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	54	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	75	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	155	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	190	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy2.feature	226	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-orderby/ReturnOrderBy3.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	86	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	136	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	156	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	84	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	44	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	60	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	76	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	92	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	108	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	140	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	172	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return2.feature	184	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return3.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return4.feature	66	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return4.feature	82	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return4.feature	130	executable	test/sql/gql_feature_compatibility.test	Aggregate source scenario with a named fixed-path binding translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return4.feature	146	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return5.feature	49	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return6.feature	33	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return6.feature	82	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return6.feature	127	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return6.feature	164	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
-tck/features/clauses/return/Return6.feature	196	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	54	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	75	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	136	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	155	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	190	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	226	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-orderby/ReturnOrderBy3.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	86	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	136	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	156	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	84	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	44	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	60	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	76	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	92	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	108	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	140	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	172	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return2.feature	184	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return3.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return3.feature	65	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return4.feature	50	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return4.feature	66	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return4.feature	82	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return4.feature	130	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return4.feature	146	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return5.feature	49	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	33	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	82	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	127	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	164	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	196	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/return/Return6.feature	213	executable	test/sql/gql_feature_compatibility.test	Source scenario translated to ISO GQL and verified against its adapted native-table fixture

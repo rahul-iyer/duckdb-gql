@@ -59,8 +59,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/return/Return4.feature:50 [2] Support column renaming
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -108,7 +110,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -156,7 +158,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -297,7 +299,7 @@
 # Port status: executable
 # Translation review flags: insert
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Named fixed path binding translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -345,7 +347,7 @@
 # Port status: executable
 # Translation review flags: insert,for_iteration
 # Executable test: test/sql/gql_feature_compatibility.test
-# Review notes: Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+# Review notes: Source scenario translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

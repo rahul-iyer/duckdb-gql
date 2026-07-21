@@ -1,0 +1,41 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match2_97.test
+# Source: tck/features/clauses/match/Match2.feature:97 [5] Match relationship with inline property value
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A'),
+        ('n2', ''),
+        ('n3', 'B')
+    ) fixture(":ID(GqlFixture_candidate_match2_97)", ":LABEL")
+) TO '__TEST_DIR__/candidate_match2_97_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n2', 'n1', 'KNOWS', 'monkey'),
+        ('n2', 'n3', 'KNOWS', 'woot')
+    ) fixture(":START_ID(GqlFixture_candidate_match2_97)", ":END_ID(GqlFixture_candidate_match2_97)", ":TYPE", "name:string")
+) TO '__TEST_DIR__/candidate_match2_97_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match2_97 ANY
+
+statement ok
+COPY GRAPH candidate_match2_97 FROM (
+    VERTICES '__TEST_DIR__/candidate_match2_97_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match2_97_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match2_97
+
+query T rowsort
+MATCH (node)-[r:KNOWS {name: 'monkey'}]->(a)
+RETURN a
+----
+{'__gql_id': 1, '__gql_labels': a}

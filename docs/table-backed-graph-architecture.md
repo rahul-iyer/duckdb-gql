@@ -268,6 +268,7 @@ Required native coverage includes:
 - fixed MATCH, predicates, projection, optional, grouping, ordering, and limits;
 - node/edge struct projection, including null optional bindings;
 - fixed-path struct projection in forward, reverse, node-only, and optional forms;
+- fixture-aware compatibility assertions for unambiguous node, edge, and fixed-path values;
 - native recursive VLP on cycles, parallel edges, reverse direction, and zero-hop paths;
 - explicit CSR build, reuse, refresh, and ineligible-hint diagnostics;
 - persistence and crash/reopen behavior;
@@ -278,8 +279,8 @@ The active SQL tests use `CREATE GRAPH` and `COPY GRAPH`. Tests that depended on
 
 ## Near-term execution order
 
-1. Extend result-cell adaptation for non-null node, edge, and path values; then materialize quantified path values from recursive/CSR execution.
-2. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
+1. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
+2. Materialize quantified path values from recursive/CSR execution.
 3. Add native graph DDL for explicit element-table schemas instead of manual registration.
 4. Expand the native conformance suite across expressions, optional matching, aggregation, and finite paths.
 5. Add transaction-local write/version tracking for CSR invalidation, then introduce cost-based native-versus-CSR planning after both paths have comparable semantics.

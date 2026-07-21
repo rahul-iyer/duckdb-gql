@@ -1,0 +1,43 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_83.test
+# Source: tck/features/clauses/match-where/MatchWhere1.feature:83 [4] Filter start node of relationship with property predicate on multi variables with multiple bindings
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'Alice', 'Person'),
+        ('n2', 'Bob', 'Person'),
+        ('n3', CAST(NULL AS VARCHAR), ''),
+        ('n4', CAST(NULL AS VARCHAR), '')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere1_83)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere1_83_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n3', 'T'),
+        ('n2', 'n4', 'T')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere1_83)", ":END_ID(GqlFixture_candidate_matchwhere1_83)", ":TYPE")
+) TO '__TEST_DIR__/candidate_matchwhere1_83_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere1_83 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere1_83 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere1_83_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere1_83_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere1_83
+
+query T rowsort
+MATCH (n:Person)-[]->()
+WHERE n.name = 'Bob'
+RETURN n
+----
+{'__gql_id': 2, '__gql_labels': person, 'name': Bob}

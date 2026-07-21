@@ -28,12 +28,12 @@ vertex/edge counts and a precise reason for setups that still require work.
 
 `scripts/gql_fixture_adapter.py` compiles deterministic literal `INSERT`
 patterns into DuckDB `COPY` statements, typed Neo4j-format node and edge CSVs,
-`CREATE GRAPH`, `COPY GRAPH`, and `SESSION SET GRAPH`. It supports scalar node
-and relationship properties, directed paths, and variables bound within the
-same setup. It deliberately rejects query-dependent setup, loops, lists,
-multiple labels, undirected insertion, and dynamically incompatible property
-types because the current native table representation cannot preserve those
-semantics exactly.
+`CREATE GRAPH`, `COPY GRAPH`, and `SESSION SET GRAPH`. It supports scalar and
+scalar-list properties, directed paths, multiple labels in the semantic label
+column, variables bound within the same setup, and bounded deterministic `FOR`
+fixture expansion. It deliberately rejects query-dependent setup, nested or
+incompatibly mixed lists, undirected insertion, and other forms the current
+native table representation cannot preserve exactly.
 
 ## SQLLogicTest porting convention
 
@@ -71,6 +71,21 @@ query vocabulary GQL-shaped without claiming semantic equivalence; synthetic
 fixtures, value-rendering conventions, `MERGE` action clauses, and other
 non-isomorphic behavior.
 
+## Executable candidate promotion
+
+`generate_gql_executable_candidates.py` creates isolated SQLLogic candidates
+for supported read-only scenarios. In addition to scalar cells, it resolves
+node, edge, and fixed-path literals against the adapted fixture and renders the
+native DuckDB `STRUCT` representation, including internal identities,
+endpoints, normalized labels/types, and all mapped properties. Ambiguous graph
+literals are skipped rather than guessed.
+
+`promote_gql_executable_candidates.py` executes every candidate independently,
+rebuilds the active compatibility test from passing candidates, updates
+`execution.tsv`, and synchronizes per-feature counts and source-port status
+markers. Promotion therefore remains test-backed even though Gherkin is not
+executed directly.
+
 ## Reproduce and validate
 
 ```bash
@@ -78,7 +93,13 @@ git clone https://github.com/opencypher/openCypher.git /tmp/openCypher
 git -C /tmp/openCypher checkout 677cbafabb8c3c5eed458fd3b1ec0daec8d67d23
 python3 scripts/sync_gql_clause_features.py --source /tmp/openCypher
 python3 scripts/gql_fixture_adapter.py --self-test
+python3 scripts/generate_gql_executable_candidates.py --self-test
 python3 scripts/generate_gql_clause_sqllogic.py
+python3 scripts/generate_gql_executable_candidates.py \
+  --output test/features/executable_candidates
+python3 scripts/promote_gql_executable_candidates.py \
+  --candidates test/features/executable_candidates \
+  --runner build/debug/test/unittest
 python3 scripts/check_gql_feature_corpus.py
 ```
 

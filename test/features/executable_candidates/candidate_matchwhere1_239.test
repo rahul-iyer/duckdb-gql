@@ -1,0 +1,40 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_239.test
+# Source: tck/features/clauses/match-where/MatchWhere1.feature:239 [12] Filter path with path length predicate on multi variables with one binding
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A', 'A'),
+        ('n2', 'B', 'B')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere1_239)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere1_239_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'KNOWS')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere1_239)", ":END_ID(GqlFixture_candidate_matchwhere1_239)", ":TYPE")
+) TO '__TEST_DIR__/candidate_matchwhere1_239_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere1_239 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere1_239 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere1_239_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere1_239_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere1_239
+
+query T rowsort
+MATCH p = (n)-[]->(x)
+WHERE length(p) = 1
+RETURN x
+----
+{'__gql_id': 2, '__gql_labels': b, 'name': B}

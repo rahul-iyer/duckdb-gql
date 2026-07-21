@@ -1,0 +1,42 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match6_297.test
+# Source: tck/features/clauses/match/Match6.feature:297 [16] Return a var length path
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'A', 'A'),
+        ('n2', 'B', 'B'),
+        ('n3', 'C', 'C')
+    ) fixture(":ID(GqlFixture_candidate_match6_297)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_match6_297_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'KNOWS', 1),
+        ('n2', 'n3', 'KNOWS', 2)
+    ) fixture(":START_ID(GqlFixture_candidate_match6_297)", ":END_ID(GqlFixture_candidate_match6_297)", ":TYPE", "num:long")
+) TO '__TEST_DIR__/candidate_match6_297_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match6_297 ANY
+
+statement ok
+COPY GRAPH candidate_match6_297 FROM (
+    VERTICES '__TEST_DIR__/candidate_match6_297_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match6_297_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match6_297
+
+query T rowsort
+MATCH p = (n {name: 'A'})-[:KNOWS]->{1,2}(x)
+RETURN p
+----
+{'nodes': [{'__gql_id': 1, '__gql_labels': a, 'name': A}, {'__gql_id': 2, '__gql_labels': b, 'name': B}, {'__gql_id': 3, '__gql_labels': c, 'name': C}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2, 'num': 1}, {'__gql_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3, 'num': 2}]}
+{'nodes': [{'__gql_id': 1, '__gql_labels': a, 'name': A}, {'__gql_id': 2, '__gql_labels': b, 'name': B}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2, 'num': 1}]}

@@ -1,0 +1,42 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere5_33.test
+# Source: tck/features/clauses/match-where/MatchWhere5.feature:33 [1] Filter out on null
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'x', CAST(NULL AS VARCHAR), 'Root'),
+        ('n2', CAST(NULL AS VARCHAR), 's:text', 'TextNode'),
+        ('n3', CAST(NULL AS VARCHAR), 'i:0', 'IntNode')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere5_33)", "name:string", "var:variant", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere5_33_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'T'),
+        ('n1', 'n3', 'T')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere5_33)", ":END_ID(GqlFixture_candidate_matchwhere5_33)", ":TYPE")
+) TO '__TEST_DIR__/candidate_matchwhere5_33_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere5_33 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere5_33 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere5_33_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere5_33_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere5_33
+
+query T rowsort
+MATCH (:Root {name: 'x'})-[]->(i:TextNode)
+WHERE i.var > 'te'
+RETURN i
+----
+{'__gql_id': 2, '__gql_labels': textnode, 'name': NULL, 'var': text}
