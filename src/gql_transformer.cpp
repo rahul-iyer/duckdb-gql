@@ -255,8 +255,8 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		Unsupported(root, "MATCH pattern or projection");
 		return false;
 	};
-	auto expected_primitives = 1 + filter_statements.size();
-	if (match_statements.size() != 1 || modifying_statements.size() > 1 ||
+	auto expected_primitives = match_statements.size() + filter_statements.size();
+	if (modifying_statements.size() > 1 ||
 	    (has_mutation ? !return_statements.empty() || !order_statements.empty() : return_statements.size() != 1) ||
 	    order_statements.size() > 1 ||
 	    (primitive_statements.size() != expected_primitives &&
@@ -264,51 +264,34 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		return fail();
 	}
 
-	GQLParser::SimpleMatchStatementContext *simple_match = nullptr;
-	bool optional = false;
-	if (match_statements[0]->simpleMatchStatement()) {
-		simple_match = match_statements[0]->simpleMatchStatement();
-	} else if (auto optional_match = match_statements[0]->optionalMatchStatement()) {
-		auto operand = optional_match->optionalOperand();
-		if (!operand || !operand->simpleMatchStatement()) {
-			return fail();
-		}
-		simple_match = operand->simpleMatchStatement();
-		optional = true;
-	}
-	if (!simple_match) {
-		return fail();
-	}
-	if (has_mutation && optional) {
-		Unsupported(root, "OPTIONAL MATCH data modification pipeline");
-		return false;
-	}
-	auto binding_table = simple_match->graphPatternBindingTable();
-	auto graph_pattern = binding_table->graphPattern();
-	if (binding_table->graphPatternYieldClause() || graph_pattern->matchMode() || graph_pattern->keepClause()) {
-		return fail();
-	}
-	auto paths = graph_pattern->pathPatternList()->pathPattern();
-	if (paths.empty()) {
-		return fail();
-	}
-
 	auto match = make_shared_ptr<GqlMatchStatement>(SourceRange(root));
-	match->optional = optional;
-	for (auto path : paths) {
+	auto append_match = [&](GQLParser::SimpleMatchStatementContext &simple_match, bool optional,
+	                        idx_t optional_stage) {
+		auto binding_table = simple_match.graphPatternBindingTable();
+		auto graph_pattern = binding_table->graphPattern();
+		if (binding_table->graphPatternYieldClause() || graph_pattern->matchMode() || graph_pattern->keepClause()) {
+			return false;
+		}
+		auto paths = graph_pattern->pathPatternList()->pathPattern();
+		if (paths.empty()) {
+			return false;
+		}
+		for (auto path : paths) {
 		if (path->pathVariableDeclaration() || path->pathPatternPrefix()) {
-			return fail();
+			return false;
 		}
 		auto path_expression = dynamic_cast<GQLParser::PpePathTermContext *>(path->pathPatternExpression());
 		if (!path_expression) {
-			return fail();
+			return false;
 		}
 		auto factors = path_expression->pathTerm()->pathFactor();
 		if (factors.empty() || factors.size() % 2 == 0) {
-			return fail();
+			return false;
 		}
 
 		GqlPattern ast_pattern;
+		ast_pattern.optional = optional;
+		ast_pattern.optional_stage = optional_stage;
 		ast_pattern.source = SourceRange(*path);
 		for (idx_t index = 0; index < factors.size(); index++) {
 			GQLParser::PathPrimaryContext *path_primary = nullptr;
@@ -319,11 +302,11 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 				path_primary = factor->pathPrimary();
 				quantifier = factor->graphPatternQuantifier();
 			} else {
-				return fail();
+				return false;
 			}
 			auto primary = dynamic_cast<GQLParser::PpElementPatternContext *>(path_primary);
 			if (!primary) {
-				return fail();
+				return false;
 			}
 			auto element = primary->elementPattern();
 			GqlPatternElement ast_element;
@@ -331,25 +314,42 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 			if (index % 2 == 0) {
 				if (!element->nodePattern() || !TransformMatchElement(element->nodePattern()->elementPatternFiller(),
 				                                                      GqlPatternElementType::VERTEX, ast_element)) {
-					return fail();
+					return false;
 				}
 			} else {
 				auto edge = element->edgePattern();
-				if (!edge || !edge->fullEdgePattern()) {
-					return fail();
+				if (!edge) {
+					return false;
 				}
 				GQLParser::ElementPatternFillerContext *filler = nullptr;
-				if (auto pointing_right = edge->fullEdgePattern()->fullEdgePointingRight()) {
-					filler = pointing_right->elementPatternFiller();
-					ast_element.edge_direction = GqlEdgeDirection::RIGHT;
-				} else if (auto pointing_left = edge->fullEdgePattern()->fullEdgePointingLeft()) {
-					filler = pointing_left->elementPatternFiller();
-					ast_element.edge_direction = GqlEdgeDirection::LEFT;
+				if (auto full = edge->fullEdgePattern()) {
+					if (auto pointing_right = full->fullEdgePointingRight()) {
+						filler = pointing_right->elementPatternFiller();
+						ast_element.edge_direction = GqlEdgeDirection::RIGHT;
+					} else if (auto pointing_left = full->fullEdgePointingLeft()) {
+						filler = pointing_left->elementPatternFiller();
+						ast_element.edge_direction = GqlEdgeDirection::LEFT;
+					} else if (auto any = full->fullEdgeAnyDirection()) {
+						filler = any->elementPatternFiller();
+						ast_element.edge_direction = GqlEdgeDirection::ANY;
+					} else {
+						return false;
+					}
+				} else if (auto abbreviated = edge->abbreviatedEdgePattern()) {
+					if (abbreviated->RIGHT_ARROW()) {
+						ast_element.edge_direction = GqlEdgeDirection::RIGHT;
+					} else if (abbreviated->LEFT_ARROW()) {
+						ast_element.edge_direction = GqlEdgeDirection::LEFT;
+					} else if (abbreviated->MINUS_SIGN() || abbreviated->LEFT_MINUS_RIGHT()) {
+						ast_element.edge_direction = GqlEdgeDirection::ANY;
+					} else {
+						return false;
+					}
 				} else {
-					return fail();
+					return false;
 				}
 				if (!TransformMatchElement(filler, GqlPatternElementType::EDGE, ast_element)) {
-					return fail();
+					return false;
 				}
 			}
 			if (quantifier) {
@@ -406,16 +406,55 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 			}
 			ast_pattern.elements.push_back(std::move(ast_element));
 		}
-		match->patterns.push_back(std::move(ast_pattern));
+			match->patterns.push_back(std::move(ast_pattern));
 	}
 
-	if (auto where = graph_pattern->graphPatternWhereClause()) {
+		if (auto where = graph_pattern->graphPatternWhereClause()) {
 		shared_ptr<GqlExpression> predicate;
 		if (!TransformSearchCondition(*where->searchCondition(), predicate)) {
-			return fail();
+			return false;
 		}
 		match->predicates.push_back(std::move(predicate));
+		match->predicate_optional_stages.push_back(optional_stage);
+		}
+		return true;
+	};
+
+	bool saw_mandatory = false;
+	bool saw_optional = false;
+	idx_t optional_stage = 0;
+	for (auto match_statement : match_statements) {
+		GQLParser::SimpleMatchStatementContext *simple_match = nullptr;
+		bool optional = false;
+		if (match_statement->simpleMatchStatement()) {
+			if (saw_optional) {
+				Unsupported(*match_statement, "mandatory MATCH after OPTIONAL MATCH");
+				return false;
+			}
+			simple_match = match_statement->simpleMatchStatement();
+			saw_mandatory = true;
+		} else if (auto optional_match = match_statement->optionalMatchStatement()) {
+			auto operand = optional_match->optionalOperand();
+			if (!operand || !operand->simpleMatchStatement()) {
+				return fail();
+			}
+			simple_match = operand->simpleMatchStatement();
+			optional = true;
+			saw_optional = true;
+			if (match_statements.size() > 1) {
+				optional_stage++;
+			}
+			if (!saw_mandatory && match_statements.size() > 1) {
+				Unsupported(*optional_match, "OPTIONAL MATCH before mandatory MATCH");
+				return false;
+			}
+		}
+		if (!simple_match || (has_mutation && optional) ||
+		    !append_match(*simple_match, optional, optional ? optional_stage : 0)) {
+			return fail();
+		}
 	}
+	match->optional = match_statements.size() == 1 && match->patterns[0].optional;
 	for (auto filter : filter_statements) {
 		auto condition = filter->searchCondition();
 		if (!condition && filter->whereClause()) {
@@ -426,6 +465,20 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 			return fail();
 		}
 		match->predicates.push_back(std::move(predicate));
+		idx_t owner_optional_stage = 0;
+		if (match_statements.size() > 1) {
+			auto filter_offset = filter->getStart()->getStartIndex();
+			idx_t candidate_optional_stage = 0;
+			for (auto candidate : match_statements) {
+				if (candidate->optionalMatchStatement()) {
+					candidate_optional_stage++;
+				}
+				if (candidate->getStart()->getStartIndex() < filter_offset) {
+					owner_optional_stage = candidate->optionalMatchStatement() ? candidate_optional_stage : 0;
+				}
+			}
+		}
+		match->predicate_optional_stages.push_back(owner_optional_stage);
 	}
 	if (has_mutation) {
 		if (!TransformMutation(*modifying_statements[0], *match)) {
@@ -638,13 +691,34 @@ bool GqlTransformer::TransformMatchElement(GQLParser::ElementPatternFillerContex
 		result.variable = TransformIdentifier(*declaration);
 	}
 	if (auto is_label = filler->isLabelExpression()) {
-		auto label = dynamic_cast<GQLParser::LabelExpressionNameContext *>(is_label->labelExpression());
-		if (!label || !IsRegularIdentifier(label->labelName()->getText())) {
+		if (!TransformLabelExpression(*is_label->labelExpression(), result.labels)) {
 			return false;
 		}
-		result.labels.push_back(TransformIdentifier(*label->labelName()));
 	}
 	return true;
+}
+
+bool GqlTransformer::TransformLabelExpression(GQLParser::LabelExpressionContext &context,
+                                              vector<GqlIdentifier> &labels) {
+	if (auto name = dynamic_cast<GQLParser::LabelExpressionNameContext *>(&context)) {
+		if (!IsRegularIdentifier(name->labelName()->getText())) {
+			return false;
+		}
+		labels.push_back(TransformIdentifier(*name->labelName()));
+		return true;
+	}
+	if (auto conjunction = dynamic_cast<GQLParser::LabelExpressionConjunctionContext *>(&context)) {
+		for (auto expression : conjunction->labelExpression()) {
+			if (!TransformLabelExpression(*expression, labels)) {
+				return false;
+			}
+		}
+		return true;
+	}
+	if (auto parenthesized = dynamic_cast<GQLParser::LabelExpressionParenthesizedContext *>(&context)) {
+		return TransformLabelExpression(*parenthesized->labelExpression(), labels);
+	}
+	return false;
 }
 
 bool GqlTransformer::TransformProjection(GQLParser::ReturnItemContext *item, GqlProjection &result) {
@@ -754,17 +828,46 @@ bool GqlTransformer::TransformExpression(GQLParser::ValueExpressionContext &cont
 	}
 	if (auto predicate_expression = dynamic_cast<GQLParser::PredicateExprAltContext *>(&context)) {
 		auto predicate = predicate_expression->predicate();
-		if (!predicate || !predicate->nullPredicate()) {
+		if (!predicate) {
 			return false;
 		}
-		auto null_predicate = predicate->nullPredicate();
-		expression->type = GqlExpressionType::IS_NULL;
-		expression->negated = null_predicate->nullPredicatePart2()->NOT() != nullptr;
-		if (!TransformExpressionPrimary(*null_predicate->valueExpressionPrimary(), expression->left)) {
-			return false;
+		if (auto null_predicate = predicate->nullPredicate()) {
+			expression->type = GqlExpressionType::IS_NULL;
+			expression->negated = null_predicate->nullPredicatePart2()->NOT() != nullptr;
+			if (!TransformExpressionPrimary(*null_predicate->valueExpressionPrimary(), expression->left)) {
+				return false;
+			}
+			result = std::move(expression);
+			return true;
 		}
-		result = std::move(expression);
-		return true;
+		if (auto labeled = predicate->labeledPredicate()) {
+			auto variable = labeled->elementVariableReference();
+			auto part = labeled->labeledPredicatePart2();
+			if (!variable || !part || !part->labelExpression() ||
+			    !IsRegularIdentifier(variable->getText())) {
+				return false;
+			}
+			vector<GqlIdentifier> labels;
+			if (!TransformLabelExpression(*part->labelExpression(), labels) || labels.empty()) {
+				return false;
+			}
+			expression->type = GqlExpressionType::LABELED;
+			expression->negated = part->isLabeledOrColon()->NOT() != nullptr;
+			for (idx_t index = 0; index < labels.size(); index++) {
+				if (index > 0) {
+					expression->property.value += ";";
+				}
+				expression->property.value += labels[index].value;
+			}
+			expression->property.source = SourceRange(*part->labelExpression());
+			expression->left = make_shared_ptr<GqlExpression>();
+			expression->left->type = GqlExpressionType::VARIABLE_REFERENCE;
+			expression->left->variable = TransformIdentifier(*variable);
+			expression->left->source = SourceRange(*variable);
+			result = std::move(expression);
+			return true;
+		}
+		return false;
 	}
 	return false;
 }
@@ -1121,6 +1224,21 @@ void GqlTransformer::Unsupported(antlr4::ParserRuleContext &context, const strin
 }
 
 bool GqlTransformer::IsRegularIdentifier(const string &value) {
+	if (value.size() >= 2 &&
+	    ((value.front() == '"' && value.back() == '"') ||
+	     (value.front() == '`' && value.back() == '`'))) {
+		auto quote = value.front();
+		for (idx_t index = 1; index + 1 < value.size(); index++) {
+			if (value[index] != quote) {
+				continue;
+			}
+			if (index + 2 >= value.size() || value[index + 1] != quote) {
+				return false;
+			}
+			index++;
+		}
+		return true;
+	}
 	if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value[0])) || value[0] == '_')) {
 		return false;
 	}
@@ -1152,8 +1270,9 @@ string GqlTransformer::UnquoteString(const string &text) {
 
 GqlIdentifier GqlTransformer::TransformIdentifier(antlr4::ParserRuleContext &context) {
 	GqlIdentifier result;
-	result.value = StringUtil::Lower(context.getText());
-	result.delimited = !result.value.empty() && (result.value[0] == '`' || result.value[0] == '"');
+	auto text = context.getText();
+	result.delimited = !text.empty() && (text[0] == '`' || text[0] == '"');
+	result.value = StringUtil::Lower(result.delimited ? UnquoteString(text) : text);
 	result.source = SourceRange(context);
 	return result;
 }

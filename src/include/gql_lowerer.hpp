@@ -9,6 +9,5 @@ namespace duckdb {
 
 ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan);
 unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans);
-vector<unique_ptr<SQLStatement>> GqlLowerMutation(const vector<GqlLogicalPlan> &plans);
 
 } // namespace duckdb

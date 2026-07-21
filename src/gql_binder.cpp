@@ -286,6 +286,18 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 		result->left = BindExpression(*expression.left);
 		result->result_type = {GqlTypeId::BOOLEAN, false};
 		return result;
+	case GqlExpressionType::LABELED:
+		if (!expression.left) {
+			throw InternalException("GQL labeled predicate has no element");
+		}
+		result->left = BindExpression(*expression.left);
+		if (result->left->result_type.id != GqlTypeId::NODE &&
+		    result->left->result_type.id != GqlTypeId::EDGE) {
+			throw BinderException("GQL labeled predicate requires a node or edge");
+		}
+		result->binding_index = result->left->binding_index;
+		result->result_type = {GqlTypeId::BOOLEAN, false};
+		return result;
 	}
 	throw InternalException("Unknown GQL expression type");
 }
@@ -312,11 +324,20 @@ string GqlBinder::ProjectionName(const GqlProjection &projection, const GqlBound
 
 vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &statement) {
 	vector<pair<idx_t, idx_t>> ranged_elements;
+	vector<pair<idx_t, idx_t>> any_direction_elements;
 	idx_t alternative_count = 1;
 	for (idx_t pattern_index = 0; pattern_index < statement.patterns.size(); pattern_index++) {
 		const auto &pattern = statement.patterns[pattern_index];
 		for (idx_t element_index = 0; element_index < pattern.elements.size(); element_index++) {
 			const auto &element = pattern.elements[element_index];
+			if (element.type == GqlPatternElementType::EDGE &&
+			    element.edge_direction == GqlEdgeDirection::ANY) {
+				if (alternative_count > GQL_MAX_FINITE_PATH_ALTERNATIVES / 2) {
+					throw BinderException("GQL any-direction patterns produce more than 64 native alternatives");
+				}
+				alternative_count *= 2;
+				any_direction_elements.emplace_back(pattern_index, element_index);
+			}
 			if (!element.quantified || element.unbounded ||
 			    element.minimum_repetitions == element.maximum_repetitions) {
 				continue;
@@ -349,6 +370,13 @@ vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &stat
 			element.minimum_repetitions = repetitions;
 			element.maximum_repetitions = repetitions;
 		}
+		for (const auto &location : any_direction_elements) {
+			auto &element = branch.patterns[location.first].elements[location.second];
+			element.edge_direction = selection % 2 == 0
+			                             ? GqlEdgeDirection::RIGHT
+			                             : GqlEdgeDirection::LEFT;
+			selection /= 2;
+		}
 		result.push_back(Bind(branch));
 	}
 	return result;
@@ -361,6 +389,8 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 	idx_t next_binding_index = 0;
 	for (const auto &pattern : statement.patterns) {
 		GqlBoundPattern bound_pattern;
+		bound_pattern.optional = pattern.optional;
+		bound_pattern.optional_stage = pattern.optional_stage;
 		bound_pattern.source = pattern.source;
 		auto bind_element = [&](const GqlPatternElement &element, bool force_anonymous) {
 			GqlBoundPatternElement bound_element;
@@ -436,7 +466,12 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 	match->optional = statement.optional;
 
 	shared_ptr<GqlLogicalOperator> current = match;
-	for (const auto &predicate : statement.predicates) {
+	if (!statement.predicate_optional_stages.empty() &&
+	    statement.predicate_optional_stages.size() != statement.predicates.size()) {
+		throw InternalException("GQL MATCH predicate stage metadata is inconsistent");
+	}
+	for (idx_t predicate_index = 0; predicate_index < statement.predicates.size(); predicate_index++) {
+		const auto &predicate = statement.predicates[predicate_index];
 		if (!predicate) {
 			throw InternalException("GQL MATCH contains an empty predicate");
 		}
@@ -447,9 +482,17 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 		if (!IsBoolean(bound_predicate->result_type.id)) {
 			throw BinderException("GQL WHERE/FILTER expression must be BOOLEAN");
 		}
-		auto filter = make_shared_ptr<GqlLogicalFilter>(std::move(bound_predicate));
-		filter->child = std::move(current);
-		current = std::move(filter);
+		auto optional_stage = statement.predicate_optional_stages.empty()
+		                          ? 0
+		                          : statement.predicate_optional_stages[predicate_index];
+		if (optional_stage > 0) {
+			match->optional_predicates.push_back(std::move(bound_predicate));
+			match->optional_predicate_stages.push_back(optional_stage);
+		} else {
+			auto filter = make_shared_ptr<GqlLogicalFilter>(std::move(bound_predicate));
+			filter->child = std::move(current);
+			current = std::move(filter);
+		}
 	}
 
 	auto project = make_shared_ptr<GqlLogicalProject>();

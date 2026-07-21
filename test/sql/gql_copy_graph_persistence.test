@@ -1,0 +1,106 @@
+# name: test/sql/gql_copy_graph_persistence.test
+# description: Persist and drop COPY GRAPH managed native tables
+# group: [gql]
+
+load __TEST_DIR__/gql_copy_graph_persistence.db
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'Alpha', 'Place'),
+        ('2', 'Beta', 'Place')
+    ) nodes("external_id:ID", "name:string", ":LABEL")
+) TO '__TEST_DIR__/gql_copy_graph_persistence_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'ROAD')
+    ) relationships(":START_ID", ":END_ID", ":TYPE")
+) TO '__TEST_DIR__/gql_copy_graph_persistence_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH persistent_native ANY
+
+statement ok
+COPY GRAPH persistent_native FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_persistence_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_persistence_edges.csv'
+) FORMAT NEO4J
+
+restart
+
+query II
+SELECT vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'persistent_native'
+----
+2	1
+
+statement ok
+SESSION SET GRAPH persistent_native
+
+query TT
+MATCH (a:Place)-[:ROAD]->(b:Place)
+RETURN a.name, b.name
+----
+Alpha	Beta
+
+statement ok
+MATCH (a:Place) WHERE a.name = 'Alpha'
+SET a.name = 'Updated'
+
+statement ok
+MATCH (:Place)-[edge:ROAD]->(:Place)
+DELETE edge
+
+statement ok
+MERGE (:Place {external_id: '3', name: 'Gamma'})
+
+restart
+
+statement ok
+SESSION SET GRAPH persistent_native
+
+query T
+MATCH (a:Place) WHERE a.name = 'Updated'
+RETURN a.name
+----
+Updated
+
+query I
+MATCH (:Place)-[:ROAD]->(:Place)
+RETURN count(*)
+----
+0
+
+query T
+MATCH (a:Place) WHERE a.external_id = '3'
+RETURN a.name
+----
+Gamma
+
+statement ok
+DROP GRAPH persistent_native
+
+restart
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'gql_data' AND table_name LIKE 'graph_1_%'
+----
+0
+
+query I
+SELECT count(*) FROM gql_graphs() WHERE graph_name = 'persistent_native'
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_sequences()
+WHERE schema_name = 'gql_internal' AND sequence_name LIKE 'graph_1_%_id_seq'
+----
+0

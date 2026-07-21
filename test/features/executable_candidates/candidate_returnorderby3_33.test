@@ -1,0 +1,42 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_returnorderby3_33.test
+# Source: tck/features/clauses/return-orderby/ReturnOrderBy3.feature:33 [1] Sort on aggregate function and normal property
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'Sweden', ''),
+        ('n2', 'Germany', ''),
+        ('n3', 'England', ''),
+        ('n4', 'Sweden', '')
+    ) fixture(":ID(GqlFixture_candidate_returnorderby3_33)", "division:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_returnorderby3_33_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_returnorderby3_33)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_returnorderby3_33)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_returnorderby3_33_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_returnorderby3_33 ANY
+
+statement ok
+COPY GRAPH candidate_returnorderby3_33 FROM (
+    VERTICES '__TEST_DIR__/candidate_returnorderby3_33_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_returnorderby3_33_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_returnorderby3_33
+
+query TI
+MATCH (n)
+RETURN n.division, count(*)
+ORDER BY count(*) DESC, n.division ASC
+----
+Sweden	2
+England	1
+Germany	1

@@ -1,0 +1,828 @@
+source_path	source_line	scenario	target_path	status	blockers
+tck/features/clauses/call/Call1.feature	33	[1] Standalone call to procedure that takes no arguments and yields no results	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	44	[2] Standalone call to procedure that takes no arguments and yields no results, called with implicit arguments	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	55	[3] In-query call to procedure that takes no arguments and yields no results	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	69	[4] In-query call to procedure that takes no arguments and yields no results and consumes no rows	call/Call1.feature	ported_unverified	insert,procedures
+tck/features/clauses/call/Call1.feature	92	[5] Standalone call to STRING procedure that takes no arguments	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	110	[6] In-query call to STRING procedure that takes no arguments	call/Call1.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call1.feature	129	[7] Standalone call to procedure should fail if explicit argument is missing	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	139	[8] In-query call to procedure should fail if explicit argument is missing	call/Call1.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call1.feature	150	[9] Standalone call to procedure should fail if too many explicit argument are given	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	160	[10] In-query call to procedure should fail if too many explicit argument are given	call/Call1.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call1.feature	171	[11] Standalone call to procedure should fail if implicit argument is missing	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	183	[12] In-query call to procedure that has outputs fails if no outputs are yielded	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	194	[13] Standalone call to unknown procedure should fail	call/Call1.feature	ported_unverified	procedures
+tck/features/clauses/call/Call1.feature	202	[14] In-query call to unknown procedure should fail	call/Call1.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call1.feature	211	[15] In-query procedure call should fail if shadowing an already bound variable	call/Call1.feature	ported_unverified	with_scope_translation,procedures,yield,return_star
+tck/features/clauses/call/Call1.feature	226	[16] In-query procedure call should fail if one of the argument expressions uses an aggregation function	call/Call1.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call2.feature	33	[1] In-query call to procedure with explicit arguments	call/Call2.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call2.feature	53	[2] Standalone call to procedure with explicit arguments	call/Call2.feature	ported_unverified	procedures
+tck/features/clauses/call/Call2.feature	72	[3] Standalone call to procedure with implicit arguments	call/Call2.feature	ported_unverified	procedures
+tck/features/clauses/call/Call2.feature	95	[4] In-query call to procedure that takes arguments fails when trying to pass them implicitly	call/Call2.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call2.feature	106	[5] Standalone call to procedure should fail if input type is wrong	call/Call2.feature	ported_unverified	procedures
+tck/features/clauses/call/Call2.feature	116	[6] In-query call to procedure should fail if input type is wrong	call/Call2.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call3.feature	33	[1] Standalone call to procedure with argument of type NUMBER accepts value of type INTEGER	call/Call3.feature	ported_unverified	procedures
+tck/features/clauses/call/Call3.feature	48	[2] In-query call to procedure with argument of type NUMBER accepts value of type INTEGER	call/Call3.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call3.feature	64	[3] Standalone call to procedure with argument of type NUMBER accepts value of type FLOAT	call/Call3.feature	ported_unverified	procedures
+tck/features/clauses/call/Call3.feature	79	[4] In-query call to procedure with argument of type NUMBER accepts value of type FLOAT	call/Call3.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call3.feature	95	[5] Standalone call to procedure with argument of type FLOAT accepts value of type INTEGER	call/Call3.feature	ported_unverified	procedures
+tck/features/clauses/call/Call3.feature	109	[6] In-query call to procedure with argument of type FLOAT accepts value of type INTEGER	call/Call3.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call4.feature	33	[1] Standalone call to procedure with null argument	call/Call4.feature	ported_unverified	procedures
+tck/features/clauses/call/Call4.feature	47	[2] In-query call to procedure with null argument	call/Call4.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	33	[1] Explicit procedure result projection	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	48	[2] Explicit procedure result projection with RETURN *	call/Call5.feature	ported_unverified	procedures,yield,return_star
+tck/features/clauses/call/Call5.feature	63	[3] The order of yield items is irrelevant	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	83	[4] Rename outputs to unbound variable names	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	113	[5] Fail on renaming to an already bound variable name	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	125	[6] Fail on renaming all outputs to the same variable name	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	138	[7] Fail on in-query call to procedure with YIELD *	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call5.feature	155	[8] Allow standalone call to procedure with YIELD *	call/Call5.feature	ported_unverified	procedures,yield
+tck/features/clauses/call/Call6.feature	33	[1] Calling the same STRING procedure twice using the same outputs in each call	call/Call6.feature	ported_unverified	with_scope_translation,procedures,yield,return_star
+tck/features/clauses/call/Call6.feature	54	[2] Project procedure results between query scopes with WITH clause	call/Call6.feature	ported_unverified	with_scope_translation,procedures,yield
+tck/features/clauses/call/Call6.feature	69	[3] Project procedure results between query scopes with WITH clause and rename the projection	call/Call6.feature	ported_unverified	with_scope_translation,procedures,yield
+tck/features/clauses/create/Create1.feature	33	[1] Create a single node	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	43	[2] Create two nodes	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	53	[3] Create a single node with a label	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	64	[4] Create two nodes with same label	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	75	[5] Create a single node with multiple labels	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	86	[6] Create three nodes with multiple labels	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	97	[7] Create a single node with a property	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	108	[8] Create a single node with a property and return it	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	122	[9] Create a single node with two properties	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	133	[10] Create a single node with two properties and return them	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	147	[11] Create a single node with null properties should not return those properties	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	161	[12] CREATE does not lose precision on large integers	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	176	[13] Fail when creating a node that is already bound	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	185	[14] Fail when creating a node with properties that is already bound	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	195	[15] Fail when adding a new label predicate on a node that is already bound 1	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	205	[16] Fail when adding new label predicate on a node that is already bound 2	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	214	[17] Fail when adding new label predicate on a node that is already bound 3	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	223	[18] Fail when adding new label predicate on a node that is already bound 4	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	232	[19] Fail when adding new label predicate on a node that is already bound 5	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create1.feature	241	[20] Fail when creating a node using undefined variable in pattern	create/Create1.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	33	[1] Create two nodes and a single relationship in a single pattern	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	44	[2] Create two nodes and a single relationship in separate patterns	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	56	[3] Create two nodes and a single relationship in separate clauses	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	69	[4] Create two nodes and a single relationship in the reverse direction	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	89	[5] Create a single relationship between two existing nodes	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	105	[6] Create a single relationship between two existing nodes in the reverse direction	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	129	[7] Create a single node and a single self loop in a single pattern	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	140	[8] Create a single node and a single self loop in separate patterns	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	152	[9] Create a single node and a single self loop in separate clauses	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	164	[10] Create a single self loop on an existing node	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	179	[11] Create a single relationship and an end node on an existing starting node	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	204	[12] Create a single relationship and a starting node on an existing end node	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	229	[13] Create a single relationship with a property	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	241	[14] Create a single relationship with a property and return it	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	256	[15] Create a single relationship with two properties	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	268	[16] Create a single relationship with two properties and return them	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	283	[17] Create a single relationship with null properties should not return those properties	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	298	[18] Fail when creating a relationship without a type	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	306	[19] Fail when creating a relationship without a direction	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	314	[20] Fail when creating a relationship with two directions	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	322	[21] Fail when creating a relationship with more than one type	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	330	[22] Fail when creating a variable-length relationship	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	338	[23] Fail when creating a relationship that is already bound	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create2.feature	347	[24] Fail when creating a relationship using undefined variable in pattern	create/Create2.feature	ported_unverified	insert
+tck/features/clauses/create/Create3.feature	33	[1] MATCH-CREATE	create/Create3.feature	ported_unverified	insert
+tck/features/clauses/create/Create3.feature	48	[2] WITH-CREATE	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	65	[3] MATCH-CREATE-WITH-CREATE	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	83	[4] MATCH-CREATE: Newly-created nodes not visible to preceding MATCH	create/Create3.feature	ported_unverified	insert
+tck/features/clauses/create/Create3.feature	98	[5] WITH-CREATE: Nodes are not created when aliases are applied to variable names	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	118	[6] WITH-CREATE: Only a single node is created when an alias is applied to a variable name	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	138	[7] WITH-CREATE: Nodes are not created when aliases are applied to variable names multiple times	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	160	[8] WITH-CREATE: Only a single node is created when an alias is applied to a variable name multiple times	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	182	[9] WITH-CREATE: A bound node should be recognized after projection with WITH + WITH	create/Create3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/create/Create3.feature	197	[10] WITH-UNWIND-CREATE: A bound node should be recognized after projection with WITH + UNWIND	create/Create3.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/create/Create3.feature	212	[11] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE node	create/Create3.feature	ported_unverified	insert,with_scope_translation,merge_compatibility
+tck/features/clauses/create/Create3.feature	227	[12] WITH-MERGE-CREATE: A bound node should be recognized after projection with WITH + MERGE pattern	create/Create3.feature	ported_unverified	insert,with_scope_translation,merge_compatibility,merge_path
+tck/features/clauses/create/Create3.feature	244	[13] Merge followed by multiple creates	create/Create3.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/create/Create4.feature	33	[1] Generate the movie graph	create/Create4.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create4.feature	579	[2] Many CREATE clauses	create/Create4.feature	ported_unverified	insert
+tck/features/clauses/create/Create5.feature	33	[1] Create a pattern with multiple hops	create/Create5.feature	ported_unverified	insert
+tck/features/clauses/create/Create5.feature	53	[2] Create a pattern with multiple hops in the reverse direction	create/Create5.feature	ported_unverified	insert
+tck/features/clauses/create/Create5.feature	73	[3] Create a pattern with multiple hops in varying directions	create/Create5.feature	ported_unverified	insert
+tck/features/clauses/create/Create5.feature	93	[4] Create a pattern with multiple hops with multiple types and varying directions	create/Create5.feature	ported_unverified	insert
+tck/features/clauses/create/Create5.feature	112	[5] Create a pattern with multiple hops and varying directions	create/Create5.feature	ported_unverified	insert,return_star
+tck/features/clauses/create/Create6.feature	33	[1] Limiting to zero results after creating nodes affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert
+tck/features/clauses/create/Create6.feature	48	[2] Skipping all results after creating nodes affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert
+tck/features/clauses/create/Create6.feature	63	[3] Skipping and limiting to a few results after creating nodes does not affect the result set nor the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	81	[4] Skipping zero result and limiting to all results after creating nodes does not affect the result set nor the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	102	[5] Filtering after creating nodes affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/create/Create6.feature	121	[6] Aggregating in `RETURN` after creating nodes affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	137	[7] Aggregating in `WITH` after creating nodes affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/create/Create6.feature	154	[8] Limiting to zero results after creating relationships affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert
+tck/features/clauses/create/Create6.feature	169	[9] Skipping all results after creating relationships affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert
+tck/features/clauses/create/Create6.feature	184	[10] Skipping and limiting to a few results after creating relationships does not affect the result set nor the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	202	[11] Skipping zero result and limiting to all results after creating relationships does not affect the result set nor the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	223	[12] Filtering after creating relationships affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/create/Create6.feature	242	[13] Aggregating in `RETURN` after creating relationships affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/create/Create6.feature	258	[14] Aggregating in `WITH` after creating relationships affects the result set but not the side effects	create/Create6.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/delete/Delete1.feature	33	[1] Delete nodes	delete/Delete1.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete1.feature	48	[2] Detach delete node	delete/Delete1.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete1.feature	63	[3] Detach deleting connected nodes and relationships	delete/Delete1.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete1.feature	83	[4] Delete on null node	delete/Delete1.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete1.feature	93	[5] Ignore null when deleting node	delete/Delete1.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete1.feature	106	[6] Detach delete on null node	delete/Delete1.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete1.feature	116	[7] Failing when deleting connected nodes	delete/Delete1.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete1.feature	132	[8] Failing when deleting a label	delete/Delete1.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete2.feature	33	[1] Delete relationships	delete/Delete2.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/delete/Delete2.feature	49	[2] Delete optionally matched relationship	delete/Delete2.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete2.feature	65	[3] Delete relationship with bidirectional matching	delete/Delete2.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete2.feature	83	[4] Ignore null when deleting relationship	delete/Delete2.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete2.feature	96	[5] Failing when deleting a relationship type	delete/Delete2.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete3.feature	33	[1] Detach deleting paths	delete/Delete3.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete3.feature	53	[2] Delete on null path	delete/Delete3.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete4.feature	33	[1] Undirected expand followed by delete and count	delete/Delete4.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete4.feature	52	[2] Undirected variable length expand followed by delete and count	delete/Delete4.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete4.feature	73	[3] Create and delete in same query	delete/Delete4.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete5.feature	33	[1] Delete node from a list	delete/Delete5.feature	ported_unverified	insert,with_scope_translation,parameters
+tck/features/clauses/delete/Delete5.feature	56	[2] Delete relationship from a list	delete/Delete5.feature	ported_unverified	insert,with_scope_translation,parameters
+tck/features/clauses/delete/Delete5.feature	78	[3] Delete nodes from a map	delete/Delete5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete5.feature	95	[4] Delete relationships from a map	delete/Delete5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete5.feature	113	[5] Detach delete nodes from nested map/list	delete/Delete5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete5.feature	132	[6] Delete relationships from nested map/list	delete/Delete5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete5.feature	150	[7] Delete paths from nested map/list	delete/Delete5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete5.feature	170	[8] Failing when using undefined variable in DELETE	delete/Delete5.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete5.feature	179	[9] Failing when deleting an integer expression	delete/Delete5.feature	ported_unverified	semantic_review
+tck/features/clauses/delete/Delete6.feature	33	[1] Limiting to zero results after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	53	[2] Skipping all results after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	73	[3] Skipping and limiting to a few results after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	99	[4] Skipping zero results and limiting to all results after deleting nodes does not affect the result set nor the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	128	[5] Filtering after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete6.feature	156	[6] Aggregating in `RETURN` after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete6.feature	181	[7] Aggregating in `WITH` after deleting nodes affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete6.feature	207	[8] Limiting to zero results after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	226	[9] Skipping all results after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	245	[10] Skipping and limiting to a few results after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	270	[11] Skipping zero result and limiting to all results after deleting relationships does not affect the result set nor the side effects	delete/Delete6.feature	ported_unverified	insert
+tck/features/clauses/delete/Delete6.feature	298	[12] Filtering after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete6.feature	325	[13] Aggregating in `RETURN` after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/delete/Delete6.feature	349	[14] Aggregating in `WITH` after deleting relationships affects the result set but not the side effects	delete/Delete6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match1.feature	33	[1] Match non-existent nodes returns empty	match/Match1.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match1.feature	44	[2] Matching all nodes	match/Match1.feature	ported_unverified	insert
+tck/features/clauses/match/Match1.feature	62	[3] Matching nodes using multiple labels	match/Match1.feature	ported_unverified	insert
+tck/features/clauses/match/Match1.feature	81	[4] Simple node inline property predicate	match/Match1.feature	ported_unverified	insert
+tck/features/clauses/match/Match1.feature	97	[5] Use multiple MATCH clauses to do a Cartesian product	match/Match1.feature	ported_unverified	insert
+tck/features/clauses/match/Match1.feature	123	[6] Fail when using parameter as node predicate in MATCH	match/Match1.feature	ported_unverified	parameters
+tck/features/clauses/match/Match1.feature	132	[7] Fail when a relationship has the same variable in a preceding MATCH	match/Match1.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match1.feature	156	[8] Fail when a path has the same variable in a preceding MATCH	match/Match1.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match1.feature	185	[9] Fail when a relationship has the same variable in the same pattern	match/Match1.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match1.feature	222	[10] Fail when a path has the same variable in the same pattern	match/Match1.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match1.feature	254	[11] Fail when matching a node variable bound to a value	match/Match1.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match2.feature	33	[1] Match non-existent relationships returns empty	match/Match2.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match2.feature	44	[2] Matching a relationship pattern using a label predicate on both sides	match/Match2.feature	ported_unverified	insert
+tck/features/clauses/match/Match2.feature	63	[3] Matching a self-loop with an undirected relationship pattern	match/Match2.feature	ported_unverified	insert
+tck/features/clauses/match/Match2.feature	80	[4] Matching a self-loop with a directed relationship pattern	match/Match2.feature	ported_unverified	insert
+tck/features/clauses/match/Match2.feature	97	[5] Match relationship with inline property value	match/Match2.feature	ported_unverified	insert
+tck/features/clauses/match/Match2.feature	113	[6] Match relationships with multiple types	match/Match2.feature	ported_unverified	insert
+tck/features/clauses/match/Match2.feature	135	[7] Matching twice with conflicting relationship types on same relationship	match/Match2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match2.feature	152	[8] Fail when using parameter as relationship predicate in MATCH	match/Match2.feature	ported_unverified	parameters
+tck/features/clauses/match/Match2.feature	161	[9] Fail when a node has the same variable in a preceding MATCH	match/Match2.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match2.feature	200	[10] Fail when a path has the same variable in a preceding MATCH	match/Match2.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match2.feature	232	[11] Fail when a node has the same variable in the same pattern	match/Match2.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match2.feature	261	[12] Fail when a path has the same variable in the same pattern	match/Match2.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match2.feature	281	[13] Fail when matching a relationship variable bound to a value	match/Match2.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match3.feature	33	[1] Get neighbours	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	49	[2] Directed match of a simple relationship	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	65	[3] Undirected match on simple relationship graph	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	82	[4] Get two related nodes	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	101	[5] Return two subgraphs with bound undirected relationship	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	118	[6] Matching a relationship pattern using a label predicate	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	136	[7] Matching nodes with many labels	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	154	[8] Matching using relationship predicate with multiples of the same type	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	171	[9] Get related to related to	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	187	[10] Matching using self-referencing pattern returns no result	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	204	[11] Undirected match in self-relationship graph	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	220	[12] Undirected match of self-relationship in self-relationship graph	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	236	[13] Directed match on self-relationship graph	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	252	[14] Directed match of self-relationship on self-relationship graph	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	268	[15] Mixing directed and undirected pattern parts with self-relationship, simple	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	287	[16] Mixing directed and undirected pattern parts with self-relationship, undirected	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	310	[17] Handling cyclic patterns	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	329	[18] Handling cyclic patterns when separated into two parts	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	348	[19] Two bound nodes pointing to the same node	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	371	[20] Three bound nodes pointing to the same node	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	396	[21] Three bound nodes pointing to the same node with extra connections	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	432	[22] Returning bound nodes that are not part of the pattern	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	451	[23] Matching disconnected patterns	match/Match3.feature	ported_unverified	insert
+tck/features/clauses/match/Match3.feature	473	[24] Matching twice with duplicate relationship types on same relationship	match/Match3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match3.feature	491	[25] Matching twice with an additional node label	match/Match3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match3.feature	508	[26] Matching twice with a duplicate predicate	match/Match3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match3.feature	526	[27] Matching from null nodes should return no results owing to finding no matches	match/Match3.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match3.feature	539	[28] Matching from null nodes should return no results owing to matches being filtered out	match/Match3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match3.feature	556	[29] Fail when re-using a relationship in the same pattern	match/Match3.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match3.feature	565	[30] Fail when using a list or nodes as a node	match/Match3.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match4.feature	33	[1] Handling fixed-length variable length pattern	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match4.feature	49	[2] Simple variable length pattern	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match4.feature	71	[3] Zero-length variable length pattern in the middle of the pattern	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match4.feature	93	[4] Matching longer variable length paths	match/Match4.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/match/Match4.feature	116	[5] Matching variable length pattern with property predicate	match/Match4.feature	ported_unverified	insert,return_star
+tck/features/clauses/match/Match4.feature	134	[6] Matching variable length patterns from a bound node	match/Match4.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/match/Match4.feature	153	[7] Matching variable length patterns including a bound relationship	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match4.feature	176	[8] Matching relationships into a list and matching variable length using the list	match/Match4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match4.feature	198	[9] Fail when asterisk operator is missing	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match4.feature	241	[10] Fail on negative bound	match/Match4.feature	ported_unverified	insert
+tck/features/clauses/match/Match5.feature	69	[1] Handling unbounded variable length match	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	94	[2] Handling explicitly unbounded variable length match	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	119	[3] Handling single bounded variable length match 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	131	[4] Handling single bounded variable length match 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	144	[5] Handling single bounded variable length match 3	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	159	[6] Handling upper and lower bounded variable length match 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	177	[7] Handling upper and lower bounded variable length match 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	194	[8] Handling symmetrically bounded variable length match, bounds are zero	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	206	[9] Handling symmetrically bounded variable length match, bounds are one	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	219	[10] Handling symmetrically bounded variable length match, bounds are two	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	234	[11] Handling upper and lower bounded variable length match, empty interval 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	245	[12] Handling upper and lower bounded variable length match, empty interval 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	256	[13] Handling upper bounded variable length match, empty interval	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	267	[14] Handling upper bounded variable length match 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	280	[15] Handling upper bounded variable length match 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	297	[16] Handling lower bounded variable length match 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	323	[17] Handling lower bounded variable length match 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	348	[18] Handling lower bounded variable length match 3	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	371	[19] Handling a variable length relationship and a standard relationship in chain, zero length 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	384	[20] Handling a variable length relationship and a standard relationship in chain, zero length 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	397	[21] Handling a variable length relationship and a standard relationship in chain, single length 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	412	[22] Handling a variable length relationship and a standard relationship in chain, single length 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	427	[23] Handling a variable length relationship and a standard relationship in chain, longer 1	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	446	[24] Handling a variable length relationship and a standard relationship in chain, longer 2	match/Match5.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match5.feature	465	[25] Handling a variable length relationship and a standard relationship in chain, longer 3	match/Match5.feature	ported_unverified	insert
+tck/features/clauses/match/Match5.feature	500	[26] Handling mixed relationship patterns and directions 1	match/Match5.feature	ported_unverified	insert
+tck/features/clauses/match/Match5.feature	541	[27] Handling mixed relationship patterns and directions 2	match/Match5.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/match/Match5.feature	584	[28] Handling mixed relationship patterns 1	match/Match5.feature	ported_unverified	insert
+tck/features/clauses/match/Match5.feature	619	[29] Handling mixed relationship patterns 2	match/Match5.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	33	[1] Zero-length named path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	49	[2] Return a simple path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	66	[3] Return a three node path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	82	[4] Respecting direction when matching non-existent path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	98	[5] Path query should return results in written order	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	114	[6] Handling direction of named paths	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	130	[7] Respecting direction when matching existing path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	147	[8] Respecting direction when matching non-existent path with multiple directions	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	164	[9] Longer path query should return results in written order	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	180	[10] Named path with alternating directed/undirected relationships	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	198	[11] Named path with multiple alternating directed/undirected relationships	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	217	[12] Matching path with multiple bidirectional relationships	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	238	[13] Matching path with both directions should respect other directions	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	257	[14] Named path with undirected fixed variable length pattern	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	281	[15] Variable-length named path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	297	[16] Return a var length path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	314	[17] Return a named var length path of length zero	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	332	[18] Undirected named path	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	350	[19] Variable length relationship without lower bound	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	370	[20] Variable length relationship without bounds	match/Match6.feature	ported_unverified	insert
+tck/features/clauses/match/Match6.feature	390	[21] Fail when a node has the same variable in a preceding MATCH	match/Match6.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match6.feature	417	[22] Fail when a relationship has the same variable in a preceding MATCH	match/Match6.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match6.feature	445	[23] Fail when a node has the same variable in the same pattern	match/Match6.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match6.feature	477	[24] Fail when a relationship has the same variable in the same pattern	match/Match6.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match6.feature	509	[25] Fail when matching a path variable bound to a value	match/Match6.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match7.feature	34	[1] Simple OPTIONAL MATCH on empty graph	match/Match7.feature	ported_unverified	semantic_review
+tck/features/clauses/match/Match7.feature	46	[2] OPTIONAL MATCH with previously bound nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	63	[3] OPTIONAL MATCH and bound nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	85	[4] Optionally matching relationship with bound nodes in reverse direction	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	104	[5] Optionally matching relationship with a relationship that is already bound	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	123	[6] Optionally matching relationship with a relationship and node that are both already bound	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	142	[7] MATCH with OPTIONAL MATCH in longer pattern	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	161	[8] Longer pattern with bound nodes without matches	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	183	[9] Longer pattern with bound nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	205	[10] Optionally matching from null nodes should return null	match/Match7.feature	ported_unverified	with_scope_translation
+tck/features/clauses/match/Match7.feature	219	[11] Return two subgraphs with bound undirected relationship and optional relationship	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	238	[12] Variable length optional relationships	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	263	[13] Variable length optional relationships with bound nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	285	[14] Variable length optional relationships with length predicates	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	307	[15] Variable length patterns and nulls	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	325	[16] Optionally matching named paths - null result	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	347	[17] Optionally matching named paths - existing result	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	367	[18] Named paths inside optional matches with node predicates	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	389	[19] Optionally matching named paths with single and variable length patterns	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	407	[20] Variable length optional relationships with bound nodes, no matches	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	429	[21] Handling optional matches between nulls	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	453	[22] MATCH after OPTIONAL MATCH	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	477	[23] OPTIONAL MATCH with labels on the optional end node	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	498	[24] Optionally matching self-loops	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	520	[25] Optionally matching self-loops without matches	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	545	[26] Handling correlated optional matches; first does not match implies second does not match	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	568	[27] Handling optional matches between optionally matched entities	match/Match7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match7.feature	593	[28] Handling optional matches with inline label predicate	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	615	[29] Satisfies the open world assumption, relationships between same nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	634	[30] Satisfies the open world assumption, single relationship	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match7.feature	652	[31] Satisfies the open world assumption, relationships between different nodes	match/Match7.feature	ported_unverified	insert
+tck/features/clauses/match/Match8.feature	33	[1] Pattern independent of bound variables results in cross product	match/Match8.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match8.feature	54	[2] Counting rows after MATCH, MERGE, OPTIONAL MATCH	match/Match8.feature	ported_unverified	insert,with_scope_translation,merge_compatibility
+tck/features/clauses/match/Match8.feature	75	[3] Matching and disregarding output, then matching again	match/Match8.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match9.feature	33	[1] Variable length relationship variables are lists of relationships	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	54	[2] Return relationships by collecting them as a list - directed, one way	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	70	[3] Return relationships by collecting them as a list - undirected, starting from two extremes	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	87	[4] Return relationships by collecting them as a list - undirected, starting from one extreme	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	103	[5] Variable length pattern with label predicate on both sides	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	122	[6] Matching relationships into a list and matching variable length using the list, with bound nodes	match/Match9.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match9.feature	143	[7] Matching relationships into a list and matching variable length using the list, with bound nodes, wrong direction	match/Match9.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match/Match9.feature	163	[8] Variable length relationship in OPTIONAL MATCH	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match/Match9.feature	182	[9] Optionally matching named paths with variable length patterns	match/Match9.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	33	[1] Filter node with node label predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	50	[2] Filter node with node label predicate on multi variables without any bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	66	[3] Filter node with property predicate on a single variable with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	83	[4] Filter start node of relationship with property predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	103	[5] Filter end node of relationship with property predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	120	[6] Filter node with a parameter in a property predicate on multi variables with one binding	match-where/MatchWhere1.feature	ported_unverified	insert,parameters
+tck/features/clauses/match-where/MatchWhere1.feature	139	[7] Filter relationship with relationship type predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	160	[8] Filter relationship with property predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	177	[9] Filter relationship with a parameter in a property predicate on multi variables with one binding	match-where/MatchWhere1.feature	ported_unverified	insert,parameters
+tck/features/clauses/match-where/MatchWhere1.feature	196	[10] Filter node with disjunctive property predicate on single variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	216	[11] Filter relationship with disjunctive relationship type predicate on multi variables with multiple bindings	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	239	[12] Filter path with path length predicate on multi variables with one binding	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	256	[13] Filter path with false path length predicate on multi variables with one binding	match-where/MatchWhere1.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere1.feature	272	[14] Fail when filtering path with property predicate	match-where/MatchWhere1.feature	ported_unverified	semantic_review
+tck/features/clauses/match-where/MatchWhere1.feature	283	[15] Fail on aggregation in WHERE	match-where/MatchWhere1.feature	ported_unverified	semantic_review
+tck/features/clauses/match-where/MatchWhere2.feature	33	[1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings	match-where/MatchWhere2.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere2.feature	58	[2] Filter node with conjunctive multi-part property predicates on multi variables with multiple bindings	match-where/MatchWhere2.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere3.feature	33	[1] Join between node identities	match-where/MatchWhere3.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere3.feature	51	[2] Join between node properties of disconnected nodes	match-where/MatchWhere3.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere3.feature	71	[3] Join between node properties of adjacent nodes	match-where/MatchWhere3.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere4.feature	33	[1] Join nodes on inequality	match-where/MatchWhere4.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere4.feature	51	[2] Join with disjunctive multi-part predicates including patterns	match-where/MatchWhere4.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere5.feature	33	[1] Filter out on null	match-where/MatchWhere5.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere5.feature	54	[2] Filter out on null if the AND'd predicate evaluates to false	match-where/MatchWhere5.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere5.feature	75	[3] Filter out on null if the AND'd predicate evaluates to true	match-where/MatchWhere5.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere5.feature	96	[4] Do not filter out on null if the OR'd predicate evaluates to true	match-where/MatchWhere5.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	33	[1] Filter node with node label predicate on multi variables with multiple bindings after MATCH and OPTIONAL MATCH	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	55	[2] Filter node with false node label predicate after OPTIONAL MATCH	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	78	[3] Filter node with property predicate on multi variables with multiple bindings after OPTIONAL MATCH	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	101	[4] Do not fail when predicates on optionally matched and missed nodes are invalid	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	120	[5] Matching and optionally matching with unbound nodes and equality predicate in reverse direction	match-where/MatchWhere6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/match-where/MatchWhere6.feature	140	[6] Join nodes on non-equality of properties – OPTIONAL MATCH and WHERE	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	163	[7] Join nodes on non-equality of properties – OPTIONAL MATCH on two relationships and WHERE	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/match-where/MatchWhere6.feature	186	[8] Join nodes on non-equality of properties – Two OPTIONAL MATCH clauses and WHERE	match-where/MatchWhere6.feature	ported_unverified	insert
+tck/features/clauses/merge/Merge1.feature	33	[1] Merge node when no nodes exist	merge/Merge1.feature	ported_unverified	merge_compatibility
+tck/features/clauses/merge/Merge1.feature	46	[2] Merge node with label	merge/Merge1.feature	ported_unverified	merge_compatibility
+tck/features/clauses/merge/Merge1.feature	60	[3] Merge node with label when it exists	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	76	[4] Merge node should create when it doesn't match, properties	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	94	[5] Merge node should create when it doesn't match, properties and label	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	112	[6] Merge node with prop and label	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	128	[7] Merge should work when finding multiple elements	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	141	[8] Merge should handle argument properly	merge/Merge1.feature	ported_unverified	insert,with_scope_translation,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	159	[9] Merge should support updates while merging	merge/Merge1.feature	ported_unverified	insert,with_scope_translation,for_iteration,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	192	[10] Merge must properly handle multiple labels	merge/Merge1.feature	ported_unverified	insert,for_iteration,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	211	[11] Merge should be able to merge using property of bound node	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	233	[12] Merge should be able to merge using property of freshly created node	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	245	[13] Merge should bind a path	merge/Merge1.feature	ported_unverified	merge_compatibility
+tck/features/clauses/merge/Merge1.feature	259	[14] Merges should not be able to match on deleted nodes	merge/Merge1.feature	ported_unverified	insert,merge_compatibility
+tck/features/clauses/merge/Merge1.feature	282	[15] Fail when merge a node that is already bound	merge/Merge1.feature	ported_unverified	merge_compatibility
+tck/features/clauses/merge/Merge1.feature	291	[16] Fail when using parameter as node predicate in MERGE	merge/Merge1.feature	ported_unverified	merge_compatibility,parameters
+tck/features/clauses/merge/Merge1.feature	300	[17] Fail on merging node with null property	merge/Merge1.feature	ported_unverified	merge_compatibility
+tck/features/clauses/merge/Merge2.feature	33	[1] Merge node with label add label on create	merge/Merge2.feature	ported_unverified	for_iteration,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge2.feature	48	[2] ON CREATE on created nodes	merge/Merge2.feature	ported_unverified	merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge2.feature	60	[3] Merge node with label add property on create	merge/Merge2.feature	ported_unverified	merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge2.feature	76	[4] Merge node with label add property on update when it exists	merge/Merge2.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge2.feature	93	[5] Merge should be able to use properties of bound node in ON CREATE	merge/Merge2.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge2.feature	116	[6] Fail when using undefined variable in ON CREATE	merge/Merge2.feature	ported_unverified	merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge3.feature	33	[1] Merge should be able to set labels on match	merge/Merge3.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge3.feature	48	[2] Merge node with label add label on match when it exists	merge/Merge3.feature	ported_unverified	insert,for_iteration,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge3.feature	66	[3] Merge node and set property on match	merge/Merge3.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge3.feature	84	[4] Merge should be able to use properties of bound node in ON MATCH	merge/Merge3.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge3.feature	107	[5] Fail when using undefined variable in ON MATCH	merge/Merge3.feature	ported_unverified	merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge4.feature	33	[1] Merge should be able to set labels on match and on create	merge/Merge4.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge4.feature	51	[2] Merge should be able to use properties of bound node in ON MATCH and ON CREATE	merge/Merge4.feature	ported_unverified	insert,merge_compatibility,merge_actions
+tck/features/clauses/merge/Merge5.feature	33	[1] Creating a relationship	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	51	[2] Matching a relationship	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	69	[3] Matching two relationships	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	88	[4] Using bound variables from other updating clause	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	103	[5] Filtering relationships	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	122	[6] Creating relationship when all matches filtered out	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	142	[7] Matching incoming relationship	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	161	[8] Creating relationship with property	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	180	[9] Creating relationship using merged nodes	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	196	[10] Merge should bind a path	merge/Merge5.feature	ported_unverified	merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	213	[11] Use outgoing direction when unspecified	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	229	[12] Match outgoing relationship when direction unspecified	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	247	[13] Match both incoming and outgoing relationships when direction unspecified	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	267	[14] Using list properties via variable	merge/Merge5.feature	ported_unverified	insert,with_scope_translation,for_iteration,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	287	[15] Matching using list property	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	305	[16] Aliasing of existing nodes 1	merge/Merge5.feature	ported_unverified	insert,with_scope_translation,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	325	[17] Aliasing of existing nodes 2	merge/Merge5.feature	ported_unverified	insert,with_scope_translation,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	344	[18] Double aliasing of existing nodes 1	merge/Merge5.feature	ported_unverified	insert,with_scope_translation,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	368	[19] Double aliasing of existing nodes 2	merge/Merge5.feature	ported_unverified	insert,with_scope_translation,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	391	[20] Do not match on deleted entities	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	421	[21] Do not match on deleted relationships	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	446	[22] Fail when imposing new predicates on a variable that is already bound	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	455	[23] Fail when merging relationship without type	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	464	[24] Fail when merging relationship without type, no colon	merge/Merge5.feature	ported_unverified	merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	473	[25] Fail when merging relationship with more than one type	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	482	[26] Fail when merging relationship that is already bound	merge/Merge5.feature	ported_unverified	merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	491	[27] Fail when using parameter as relationship predicate in MERGE	merge/Merge5.feature	ported_unverified	merge_compatibility,parameters,merge_path
+tck/features/clauses/merge/Merge5.feature	502	[28] Fail when using variable length relationship in MERGE	merge/Merge5.feature	ported_unverified	merge_compatibility,merge_path
+tck/features/clauses/merge/Merge5.feature	512	[29] Fail on merging relationship with null property	merge/Merge5.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge6.feature	33	[1] Using ON CREATE on a node	merge/Merge6.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge6.feature	50	[2] Using ON CREATE on a relationship	merge/Merge6.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge6.feature	70	[3] Updating one property with ON CREATE	merge/Merge6.feature	ported_unverified	insert,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge6.feature	95	[4] Null-setting one property with ON CREATE	merge/Merge6.feature	ported_unverified	insert,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge6.feature	119	[6] Copying properties from node with ON CREATE	merge/Merge6.feature	ported_unverified	insert,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge6.feature	144	[7] Copying properties from literal map with ON CREATE	merge/Merge6.feature	ported_unverified	insert,for_iteration,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge7.feature	33	[1] Using ON MATCH on created node	merge/Merge7.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge7.feature	49	[2] Using ON MATCH on created relationship	merge/Merge7.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge7.feature	65	[3] Using ON MATCH on a relationship	merge/Merge7.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge7.feature	85	[4] Copying properties from node with ON MATCH	merge/Merge7.feature	ported_unverified	insert,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge7.feature	115	[5] Copying properties from literal map with ON MATCH	merge/Merge7.feature	ported_unverified	insert,for_iteration,merge_compatibility,merge_actions,list_comprehension,merge_path
+tck/features/clauses/merge/Merge8.feature	33	[1] Using ON CREATE and ON MATCH	merge/Merge8.feature	ported_unverified	insert,merge_compatibility,merge_actions,merge_path
+tck/features/clauses/merge/Merge9.feature	33	[1] UNWIND with one MERGE	merge/Merge9.feature	ported_unverified	for_iteration,merge_compatibility
+tck/features/clauses/merge/Merge9.feature	48	[2] UNWIND with multiple MERGE	merge/Merge9.feature	ported_unverified	for_iteration,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge9.feature	64	[3] Mixing MERGE with CREATE	merge/Merge9.feature	ported_unverified	insert,merge_compatibility,merge_path
+tck/features/clauses/merge/Merge9.feature	81	[4] MERGE after WITH with predicate and WITH with aggregation	merge/Merge9.feature	ported_unverified	insert,with_scope_translation,for_iteration,merge_compatibility
+tck/features/clauses/remove/Remove1.feature	33	[1] Remove a single node property	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove1.feature	51	[2] Remove multiple node properties	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove1.feature	69	[3] Remove a single relationship property	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove1.feature	87	[4] Remove multiple relationship properties	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove1.feature	105	[5] Ignore null when removing property from a node	remove/Remove1.feature	ported_unverified	semantic_review
+tck/features/clauses/remove/Remove1.feature	118	[6] Ignore null when removing property from a relationship	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove1.feature	136	[7] Remove a missing node property	remove/Remove1.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove2.feature	33	[1] Remove a single label from a node with a single label	remove/Remove2.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove2.feature	51	[2] Remove a single label from a node with two labels	remove/Remove2.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove2.feature	69	[3] Remove two labels from a node with three labels	remove/Remove2.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove2.feature	87	[4] Remove a non-existent node label	remove/Remove2.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove2.feature	104	[5] Ignore null when removing a node label	remove/Remove2.feature	ported_unverified	semantic_review
+tck/features/clauses/remove/Remove3.feature	33	[1] Limiting to zero results after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	51	[2] Skipping all results after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	69	[3] Skipping and limiting to a few results after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	93	[4] Skipping zero results and limiting to all results after removing a property from nodes does not affect the result set nor the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	120	[5] Filtering after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/remove/Remove3.feature	145	[6] Aggregating in `RETURN` after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	167	[7] Aggregating in `WITH` after removing a property from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/remove/Remove3.feature	190	[8] Limiting to zero results after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	208	[9] Skipping all results after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	226	[10] Skipping and limiting to a few results after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	250	[11] Skipping zero result and limiting to all results after removing a label from nodes does not affect the result set nor the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	277	[12] Filtering after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/remove/Remove3.feature	302	[13] Aggregating in `RETURN` after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	324	[14] Aggregating in `WITH` after removing a label from nodes affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/remove/Remove3.feature	347	[15] Limiting to zero results after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	365	[16] Skipping all results after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	383	[17] Skipping and limiting to a few results after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	407	[18] Skipping zero result and limiting to all results after removing a property from relationships does not affect the result set nor the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	434	[19] Filtering after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/remove/Remove3.feature	459	[20] Aggregating in `RETURN` after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert
+tck/features/clauses/remove/Remove3.feature	481	[21] Aggregating in `WITH` after removing a property from relationships affects the result set but not the side effects	remove/Remove3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return/Return1.feature	33	[1] Returning a list property	return/Return1.feature	ported_unverified	insert
+tck/features/clauses/return/Return1.feature	49	[2] Fail when returning an undefined variable	return/Return1.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return2.feature	33	[1] Arithmetic expressions should propagate null values	return/Return2.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return2.feature	44	[2] Returning a node property value	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	60	[3] Missing node property should become null	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	76	[4] Returning a relationship property value	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	92	[5] Missing relationship property should become null	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	108	[6] Adding a property and a literal in projection	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	124	[7] Adding list properties in projection	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	140	[8] Returning label predicate expression	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	157	[9] Returning a projected map	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	172	[10] Return count aggregation over an empty graph	return/Return2.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return2.feature	184	[11] RETURN does not lose precision on large integers	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	200	[12] Projecting a list of nodes and relationships	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	217	[13] Projecting a map of nodes and relationships	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	234	[14] Do not fail when returning type of deleted relationships	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	252	[15] Fail when returning properties of deleted nodes	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	266	[16] Fail when returning labels of deleted nodes	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	280	[17] Fail when returning properties of deleted relationships	return/Return2.feature	ported_unverified	insert
+tck/features/clauses/return/Return2.feature	294	[18] Fail on projecting a non-existent function	return/Return2.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return3.feature	33	[1] Returning multiple expressions	return/Return3.feature	ported_unverified	insert
+tck/features/clauses/return/Return3.feature	49	[2] Returning multiple node property values	return/Return3.feature	ported_unverified	insert
+tck/features/clauses/return/Return3.feature	65	[3] Projecting nodes and relationships	return/Return3.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	33	[1] Honour the column name for RETURN items	return/Return4.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/return/Return4.feature	50	[2] Support column renaming	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	66	[3] Aliasing expressions	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	82	[4] Keeping used expression 1	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	98	[5] Keeping used expression 2	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	114	[6] Keeping used expression 3	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	130	[7] Keeping used expression 4	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	146	[8] Support column renaming for aggregations	return/Return4.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return/Return4.feature	163	[9] Handle subexpression in aggregation also occurring as standalone expression with nested aggregation in a literal map	return/Return4.feature	ported_unverified	insert
+tck/features/clauses/return/Return4.feature	181	[10] Fail when returning multiple columns with same name	return/Return4.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return4.feature	189	[11] Reusing variable names in RETURN	return/Return4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return/Return5.feature	33	[1] DISTINCT inside aggregation should work with lists in maps	return/Return5.feature	ported_unverified	insert
+tck/features/clauses/return/Return5.feature	49	[2] DISTINCT on nullable values	return/Return5.feature	ported_unverified	insert
+tck/features/clauses/return/Return5.feature	66	[3] DISTINCT inside aggregation should work with nested lists in maps	return/Return5.feature	ported_unverified	insert
+tck/features/clauses/return/Return5.feature	82	[4] DISTINCT inside aggregation should work with nested lists of maps in maps	return/Return5.feature	ported_unverified	insert
+tck/features/clauses/return/Return5.feature	98	[5] Aggregate on list values	return/Return5.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	33	[1] Return count aggregation over nodes	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	49	[2] Projecting an arithmetic expression with aggregation	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	65	[3] Aggregating by a list property has a correct definition of equality	return/Return6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return/Return6.feature	82	[4] Support multiple divisions in aggregate function	return/Return6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return/Return6.feature	99	[5] Aggregates inside normal functions	return/Return6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return/Return6.feature	116	[6] Handle aggregates inside non-aggregate expressions	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return6.feature	127	[7] Aggregate on property	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	146	[8] Handle aggregation on functions	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	164	[9] Aggregates with arithmetics	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	180	[10] Multiple aggregates on same variable	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	196	[11] Counting matches	return/Return6.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return/Return6.feature	213	[12] Counting matches per group	return/Return6.feature	ported_unverified	insert
+tck/features/clauses/return/Return6.feature	230	[13] Returning the minimum length of paths	return/Return6.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/return/Return6.feature	251	[14] Aggregates in aggregates	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return6.feature	259	[15] Using `rand()` in aggregations	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return6.feature	267	[16] Aggregation on complex expressions	return/Return6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return/Return6.feature	300	[17] Handle constants and parameters inside an expression which contains an aggregation expression	return/Return6.feature	ported_unverified	parameters
+tck/features/clauses/return/Return6.feature	314	[18] Handle returned variables inside an expression which contains an aggregation expression	return/Return6.feature	ported_unverified	with_scope_translation
+tck/features/clauses/return/Return6.feature	326	[19] Handle returned property accesses inside an expression which contains an aggregation expression	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return6.feature	337	[20] Fail if not returned variables are used inside an expression which contains an aggregation expression	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return6.feature	346	[21] Fail if more complex expressions, even if returned, are used inside expression which contains an aggregation expression	return/Return6.feature	ported_unverified	semantic_review
+tck/features/clauses/return/Return7.feature	33	[1] Return all variables	return/Return7.feature	ported_unverified	insert,return_star
+tck/features/clauses/return/Return7.feature	49	[2] Fail when using RETURN * without variables in scope	return/Return7.feature	ported_unverified	return_star
+tck/features/clauses/return/Return8.feature	33	[1] Return aggregation after With filtering	return/Return8.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	33	[1] ORDER BY should order booleans in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	47	[2] ORDER BY DESC should order booleans in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	61	[3] ORDER BY should order strings in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	77	[4] ORDER BY DESC should order strings in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	93	[5] ORDER BY should order ints in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	108	[6] ORDER BY DESC should order ints in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	123	[7] ORDER BY should order floats in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	138	[8] ORDER BY DESC should order floats in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	153	[9] ORDER BY should order lists in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	173	[10] ORDER BY DESC should order lists in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	193	[11] ORDER BY should order distinct types in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy1.feature	220	[12] ORDER BY DESC should order distinct types in the expected order	return-orderby/ReturnOrderBy1.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	33	[1] ORDER BY should return results in ascending order	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	54	[2] ORDER BY DESC should return results in descending order	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	75	[3] Sort on aggregated function	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	98	[4] Support sort and distinct	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	119	[5] Support ordering by a property after being distinct-ified	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	136	[6] Count star should count everything in scope	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	155	[7] Ordering with aggregation	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	172	[8] Returning all variables with ordering	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert,return_star
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	190	[9] Using aliased DISTINCT expression in ORDER BY	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	208	[10] Returned columns do not change from using ORDER BY	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	226	[11] Aggregates ordered by arithmetics	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	243	[12] Aggregation of named paths	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	266	[13] Fail when sorting on variable removed by DISTINCT	return-orderby/ReturnOrderBy2.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy2.feature	280	[14] Fail on aggregation in ORDER BY after RETURN	return-orderby/ReturnOrderBy2.feature	ported_unverified	semantic_review
+tck/features/clauses/return-orderby/ReturnOrderBy3.feature	33	[1] Sort on aggregate function and normal property	return-orderby/ReturnOrderBy3.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy4.feature	33	[1] ORDER BY of a column introduced in RETURN should return salient results in ascending order	return-orderby/ReturnOrderBy4.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/return-orderby/ReturnOrderBy4.feature	50	[2] Handle projections with ORDER BY	return-orderby/ReturnOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/return-orderby/ReturnOrderBy5.feature	33	[1] Renaming columns before ORDER BY should return results in ascending order	return-orderby/ReturnOrderBy5.feature	ported_unverified	insert
+tck/features/clauses/return-orderby/ReturnOrderBy6.feature	33	[1] Handle constants and parameters inside an order by item which contains an aggregation expression	return-orderby/ReturnOrderBy6.feature	ported_unverified	parameters
+tck/features/clauses/return-orderby/ReturnOrderBy6.feature	48	[2] Handle returned aliases inside an order by item which contains an aggregation expression	return-orderby/ReturnOrderBy6.feature	ported_unverified	semantic_review
+tck/features/clauses/return-orderby/ReturnOrderBy6.feature	60	[3] Handle returned property accesses inside an order by item which contains an aggregation expression	return-orderby/ReturnOrderBy6.feature	ported_unverified	semantic_review
+tck/features/clauses/return-orderby/ReturnOrderBy6.feature	72	[4] Fail if not returned variables are used inside an order by item which contains an aggregation expression	return-orderby/ReturnOrderBy6.feature	ported_unverified	semantic_review
+tck/features/clauses/return-orderby/ReturnOrderBy6.feature	82	[5] Fail if more complex expressions, even if returned, are used inside an order by item which contains an aggregation expression	return-orderby/ReturnOrderBy6.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	33	[1] Start the result from the second row	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	57	[2] Start the result from the second row by param	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	83	[3] SKIP with an expression that does not depend on variables	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	102	[4] Accept skip zero	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	114	[5] SKIP with an expression that depends on variables should fail	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	122	[6] Negative parameter for SKIP should fail	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	139	[7] Negative SKIP should fail	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	154	[8] Floating point parameter for SKIP should fail	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	171	[9] Floating point SKIP should fail	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	186	[10] Fail when using non-constants in SKIP	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit1.feature	196	[11] Fail when using negative value in SKIP	return-skip-limit/ReturnSkipLimit1.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	33	[1] Limit to two hits	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	for_iteration
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	47	[2] Limit to two hits with explicit order	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	70	[3] LIMIT 0 should return an empty result	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	86	[4] Handle ORDER BY with LIMIT 1	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	105	[5] ORDER BY with LIMIT 0 should not generate errors	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	118	[6] LIMIT with an expression that does not depend on variables	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	136	[7] Limit to more rows than actual results 1	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	156	[8] Limit to more rows than actual results 2	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	180	[9] Fail when using non-constants in LIMIT	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	188	[10] Negative parameter for LIMIT should fail	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	205	[11] Negative parameter for LIMIT with ORDER BY should fail	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	222	[12] Fail when using negative value in LIMIT 1	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	232	[13] Fail when using negative value in LIMIT 2	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	247	[14] Floating point parameter for LIMIT should fail	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	264	[15] Floating point parameter for LIMIT with ORDER BY should fail	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert,for_iteration,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	281	[16] Fail when using floating point in LIMIT 1	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	semantic_review
+tck/features/clauses/return-skip-limit/ReturnSkipLimit2.feature	291	[17] Fail when using floating point in LIMIT 2	return-skip-limit/ReturnSkipLimit2.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	33	[1] Get rows in the middle	return-skip-limit/ReturnSkipLimit3.feature	ported_unverified	insert
+tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	57	[2] Get rows in the middle by param	return-skip-limit/ReturnSkipLimit3.feature	ported_unverified	insert,parameters
+tck/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	84	[3] Limiting amount of rows when there are fewer left than the LIMIT argument	return-skip-limit/ReturnSkipLimit3.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/set/Set1.feature	33	[1] Set a property	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	53	[2] Set a property to an expression	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	73	[3] Set a property by selecting the node using a simple expression	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	91	[4] Set a property by selecting the relationship using a simple expression	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	109	[5] Adding a list property	set/Set1.feature	ported_unverified	insert,list_comprehension
+tck/features/clauses/set/Set1.feature	127	[6] Concatenate elements onto a list property	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	142	[7] Concatenate elements in reverse onto a list property	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	157	[8] Ignore null when setting property	set/Set1.feature	ported_unverified	semantic_review
+tck/features/clauses/set/Set1.feature	170	[9] Failing when using undefined variable in SET	set/Set1.feature	ported_unverified	semantic_review
+tck/features/clauses/set/Set1.feature	180	[10] Failing when setting a list of maps as a property	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set1.feature	189	[11] Set multiple node properties	set/Set1.feature	ported_unverified	insert
+tck/features/clauses/set/Set2.feature	33	[1] Setting a node property to null removes the existing property	set/Set2.feature	ported_unverified	insert
+tck/features/clauses/set/Set2.feature	51	[2] Setting a node property to null removes the existing property, but not before SET	set/Set2.feature	ported_unverified	insert
+tck/features/clauses/set/Set2.feature	70	[3] Setting a relationship property to null removes the existing property	set/Set2.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	33	[1] Add a single label to a node with no label	set/Set3.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	51	[2] Adding multiple labels to a node with no label	set/Set3.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	69	[3] Add a single label to a node with an existing label	set/Set3.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	87	[4] Adding multiple labels to a node with an existing label	set/Set3.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	105	[5] Ignore whitespace before colon 1	set/Set3.feature	ported_unverified	insert
+tck/features/clauses/set/Set3.feature	123	[6] Ignore whitespace before colon 2	set/Set3.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/set/Set3.feature	141	[7] Ignore whitespace before colon 3	set/Set3.feature	ported_unverified	insert,for_iteration
+tck/features/clauses/set/Set3.feature	159	[8] Ignore null when setting label	set/Set3.feature	ported_unverified	semantic_review
+tck/features/clauses/set/Set4.feature	33	[1] Set multiple properties with a property map	set/Set4.feature	ported_unverified	insert
+tck/features/clauses/set/Set4.feature	51	[2] Non-existent values in a property map are removed with SET	set/Set4.feature	ported_unverified	insert
+tck/features/clauses/set/Set4.feature	70	[3] Null values in a property map are removed with SET	set/Set4.feature	ported_unverified	insert
+tck/features/clauses/set/Set4.feature	89	[4] All properties are removed if node is set to empty property map	set/Set4.feature	ported_unverified	insert
+tck/features/clauses/set/Set4.feature	107	[5] Ignore null when setting properties using an overriding map	set/Set4.feature	ported_unverified	semantic_review
+tck/features/clauses/set/Set5.feature	33	[1] Ignore null when setting properties using an appending map	set/Set5.feature	ported_unverified	semantic_review
+tck/features/clauses/set/Set5.feature	46	[2] Overwrite values when using +=	set/Set5.feature	ported_unverified	insert
+tck/features/clauses/set/Set5.feature	65	[3] Retain old values when using +=	set/Set5.feature	ported_unverified	insert
+tck/features/clauses/set/Set5.feature	83	[4] Explicit null values in a map remove old values	set/Set5.feature	ported_unverified	insert
+tck/features/clauses/set/Set5.feature	101	[5] Set an empty map when using += has no effect	set/Set5.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	33	[1] Limiting to zero results after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	52	[2] Skipping all results after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	71	[3] Skipping and limiting to a few results after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	96	[4] Skipping zero results and limiting to all results after setting a property on nodes does not affect the result set nor the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	124	[5] Filtering after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/set/Set6.feature	151	[6] Aggregating in `RETURN` after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	174	[7] Aggregating in `WITH` after setting a property on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/set/Set6.feature	198	[8] Limiting to zero results after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	216	[9] Skipping all results after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	234	[10] Skipping and limiting to a few results after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	258	[11] Skipping zero result and limiting to all results after adding a label on nodes does not affect the result set nor the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	285	[12] Filtering after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/set/Set6.feature	310	[13] Aggregating in `RETURN` after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	332	[14] Aggregating in `WITH` after adding a label on nodes affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/set/Set6.feature	355	[15] Limiting to zero results after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	374	[16] Skipping all results after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	393	[17] Skipping and limiting to a few results after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	418	[18] Skipping zero result and limiting to all results after setting a property on relationships does not affect the result set nor the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	446	[19] Filtering after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/set/Set6.feature	473	[20] Aggregating in `RETURN` after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert
+tck/features/clauses/set/Set6.feature	496	[21] Aggregating in `WITH` after setting a property on relationships affects the result set but not the side effects	set/Set6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/union/Union1.feature	33	[1] Two elements, both unique, distinct	union/Union1.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union1.feature	47	[2] Three elements, two unique, distinct	union/Union1.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union1.feature	63	[3] Two single-column inputs, one with duplicates, distinct	union/Union1.feature	ported_unverified	for_iteration,set_composition
+tck/features/clauses/union/Union1.feature	81	[4] Should be able to create text output from union queries	union/Union1.feature	ported_unverified	insert,set_composition
+tck/features/clauses/union/Union1.feature	101	[5] Failing when UNION has different columns	union/Union1.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union2.feature	33	[1] Two elements, both unique, not distinct	union/Union2.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union2.feature	47	[2] Three elements, two unique, not distinct	union/Union2.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union2.feature	64	[3] Two single-column inputs, one with duplicates, not distinct	union/Union2.feature	ported_unverified	for_iteration,set_composition
+tck/features/clauses/union/Union2.feature	84	[4] Should be able to create text output from union all queries	union/Union2.feature	ported_unverified	insert,set_composition
+tck/features/clauses/union/Union2.feature	104	[5] Failing when UNION ALL has different columns	union/Union2.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union3.feature	33	[1] Failing when mixing UNION and UNION ALL	union/Union3.feature	ported_unverified	set_composition
+tck/features/clauses/union/Union3.feature	45	[2] Failing when mixing UNION ALL and UNION	union/Union3.feature	ported_unverified	set_composition
+tck/features/clauses/unwind/Unwind1.feature	33	[1] Unwinding a list	unwind/Unwind1.feature	ported_unverified	for_iteration
+tck/features/clauses/unwind/Unwind1.feature	47	[2] Unwinding a range	unwind/Unwind1.feature	ported_unverified	for_iteration
+tck/features/clauses/unwind/Unwind1.feature	61	[3] Unwinding a concatenation of lists	unwind/Unwind1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/unwind/Unwind1.feature	79	[4] Unwinding a collected unwound expression	unwind/Unwind1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/unwind/Unwind1.feature	94	[5] Unwinding a collected expression	unwind/Unwind1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/unwind/Unwind1.feature	113	[6] Creating nodes from an unwound parameter list	unwind/Unwind1.feature	ported_unverified	insert,for_iteration,merge_compatibility,parameters,merge_path
+tck/features/clauses/unwind/Unwind1.feature	140	[7] Double unwinding a list of lists	unwind/Unwind1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/unwind/Unwind1.feature	159	[8] Unwinding the empty list	unwind/Unwind1.feature	ported_unverified	for_iteration
+tck/features/clauses/unwind/Unwind1.feature	170	[9] Unwinding null	unwind/Unwind1.feature	ported_unverified	for_iteration
+tck/features/clauses/unwind/Unwind1.feature	181	[10] Unwinding list with duplicates	unwind/Unwind1.feature	ported_unverified	for_iteration
+tck/features/clauses/unwind/Unwind1.feature	202	[11] Unwind does not prune context	unwind/Unwind1.feature	ported_unverified	with_scope_translation,for_iteration,return_star
+tck/features/clauses/unwind/Unwind1.feature	217	[12] Unwind does not remove variables from scope	unwind/Unwind1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/unwind/Unwind1.feature	241	[13] Multiple unwinds after each other	unwind/Unwind1.feature	ported_unverified	with_scope_translation,for_iteration,return_star
+tck/features/clauses/unwind/Unwind1.feature	263	[14] Unwind with merge	unwind/Unwind1.feature	ported_unverified	for_iteration,merge_compatibility,parameters
+tck/features/clauses/with/With1.feature	34	[1] Forwarind a node variable 1	with/With1.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with/With1.feature	52	[2] Forwarind a node variable 2	with/With1.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with/With1.feature	71	[3] Forwarding a relationship variable	with/With1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With1.feature	92	[4] Forwarding a path variable	with/With1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With1.feature	109	[5] Forwarding null	with/With1.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with/With1.feature	122	[6] Forwarding a node variable possibly null	with/With1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With2.feature	34	[1] Forwarding a property to express a join	with/With2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With2.feature	55	[2] Forwarding a nested map literal	with/With2.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with/With3.feature	33	[1] Forwarding multiple node and relationship variables	with/With3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With4.feature	34	[1] Aliasing relationship variable	with/With4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With4.feature	53	[2] Aliasing expression to new variable name	with/With4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With4.feature	74	[3] Aliasing expression to existing variable name	with/With4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With4.feature	93	[4] Fail when forwarding multiple aliases with the same name	with/With4.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with/With4.feature	102	[5] Fail when not aliasing expressions in WITH	with/With4.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with/With4.feature	112	[6] Reusing variable names in WITH	with/With4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With4.feature	134	[7] Multiple aliasing and backreferencing	with/With4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With5.feature	33	[1] DISTINCT on an expression	with/With5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With5.feature	53	[2] Handling DISTINCT with lists in maps	with/With5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With6.feature	33	[1] Implicit grouping with single expression as grouping key and single aggregation	with/With6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With6.feature	53	[2] Implicit grouping with single relationship variable as grouping key and single aggregation	with/With6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With6.feature	74	[3] Implicit grouping with multiple node and relationship variables as grouping key and single aggregation	with/With6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With6.feature	95	[4] Implicit grouping with single path variable as grouping key and single aggregation	with/With6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With6.feature	116	[5] Handle constants and parameters inside an expression which contains an aggregation expression	with/With6.feature	ported_unverified	with_scope_translation,return_star,parameters
+tck/features/clauses/with/With6.feature	131	[6] Handle projected variables inside an expression which contains an aggregation expression	with/With6.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with/With6.feature	144	[7] Handle projected property accesses inside an expression which contains an aggregation expression	with/With6.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with/With6.feature	156	[8] Fail if not projected variables are used inside an expression which contains an aggregation expression	with/With6.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with/With6.feature	166	[9] Fail if more complex expression, even if projected, are used inside expression which contains an aggregation expression	with/With6.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with/With7.feature	33	[1] A simple pattern with one bound endpoint	with/With7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with/With7.feature	53	[2] Multiple WITHs using a predicate and aggregation	with/With7.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	35	[1] Sort booleans in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	50	[2] Sort booleans in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	65	[3] Sort integers in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	81	[4] Sort integers in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	97	[5] Sort floats in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	113	[6] Sort floats in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	129	[7] Sort strings in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	145	[8] Sort strings in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	161	[9] Sort lists in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	179	[10] Sort lists in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	197	[11] Sort dates in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	218	[12] Sort dates in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	239	[13] Sort local times in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	260	[14] Sort local times in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	281	[15] Sort times in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	302	[16] Sort times in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	323	[17] Sort local date times in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	344	[18] Sort local date times in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	365	[19] Sort date times in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	386	[20] Sort date times in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	407	[21] Sort distinct types in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	431	[22] Sort distinct types in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	455	[23] Sort by a boolean variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	487	[24] Sort by a boolean variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	517	[25] Sort by an integer variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	549	[26] Sort by an integer variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	580	[27] Sort by a float variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	612	[28] Sort by a float variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	643	[29] Sort by a string variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	675	[30] Sort by a string variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	706	[31] Sort by a list variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	738	[32] Sort by a list variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	769	[33] Sort by a date variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	801	[34] Sort by a date variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	832	[35] Sort by a local time variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	864	[36] Sort by a local time variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	895	[37] Sort by a time variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	927	[38] Sort by a time variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	958	[39] Sort by a local date time variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	990	[40] Sort by a local date time variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1021	[41] Sort by a date time variable projected from a node property in ascending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1053	[42] Sort by a date time variable projected from a node property in descending order	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1084	[43] Sort by a variable that is only partially orderable on a non-distinct binding table	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1105	[44] Sort by a variable that is only partially orderable on a non-distinct binding table, but made distinct	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1125	[45] Sort order should be consistent with comparisons where comparisons are defined #Example: <exampleName>	with-orderBy/WithOrderBy1.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy1.feature	1155	[46] Fail on sorting by an undefined variable #Example: <exampleName>	with-orderBy/WithOrderBy1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	35	[1] Sort by a boolean expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	65	[2] Sort by a boolean expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	95	[3] Sort by an integer expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	126	[4] Sort by an integer expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	156	[5] Sort by a float expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	187	[6] Sort by a float expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	217	[7] Sort by a string expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	248	[8] Sort by a string expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	278	[9] Sort by a list expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	309	[10] Sort by a list expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	339	[11] Sort by a date expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	370	[12] Sort by a date expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	400	[13] Sort by a local time expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	431	[14] Sort by a local time expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	461	[15] Sort by a time expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	492	[16] Sort by a time expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	522	[17] Sort by a local date time expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	553	[18] Sort by a local date time expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	583	[19] Sort by a date time expression in ascending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	614	[20] Sort by a date time expression in descending order	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	644	[21] Sort by an expression that is only partially orderable on a non-distinct binding table	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	673	[22] Sort by an expression that is only partially orderable on a non-distinct binding table, but used as a grouping key	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	701	[23] Sort by an expression that is only partially orderable on a non-distinct binding table, but used in parts as a grouping key	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	729	[24] Sort by an expression that is only partially orderable on a non-distinct binding table, but made distinct	with-orderBy/WithOrderBy2.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with-orderBy/WithOrderBy2.feature	757	[25] Fail on sorting by an aggregation	with-orderBy/WithOrderBy2.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	35	[1] Sort by two expressions, both in ascending order	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	73	[2] Sort by two expressions, first in ascending order, second in descending order	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	108	[3] Sort by two expressions, first in descending order, second in ascending order	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	143	[4] Sort by two expressions, both in descending order	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	176	[5] An expression without explicit sort direction is sorted in ascending order	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	209	[6] An constant expression does not influence the order determined by other expression before and after the constant expression	with-orderBy/WithOrderBy3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	262	[7] The order direction cannot be overwritten	with-orderBy/WithOrderBy3.feature	ported_unverified	with_scope_translation,for_iteration
+tck/features/clauses/with-orderBy/WithOrderBy3.feature	290	[8] Fail on sorting by any number of undefined variables in any position #Example: <exampleName>	with-orderBy/WithOrderBy3.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	35	[1] Sort by a projected expression	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	60	[2] Sort by an alias of a projected expression	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	85	[3] Sort by two projected expressions with order priority being different than projection order	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	110	[4] Sort by one projected expression and one alias of a projected expression with order priority being different than projection order	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	135	[5] Sort by one alias of a projected expression and one projected expression with order priority being different than projection order	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	160	[6] Sort by aliases of two projected expressions with order priority being different than projection order	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	185	[7] Sort by an alias of a projected expression where the alias shadows an existing variable	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	211	[8] Sort by non-projected existing variable	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	237	[9] Sort by an alias of a projected expression containing the variable shadowed by the alias	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	263	[10] Sort by a non-projected expression containing an alias of a projected expression containing the variable shadowed by the alias	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	289	[11] Sort by an aggregate projection	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	313	[12] Sort by an aliased aggregate projection	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	337	[13] Fail on sorting by a non-projected aggregation on a variable	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	358	[14] Fail on sorting by a non-projected aggregation on an expression	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	378	[15] Sort by an aliased aggregate projection does allow subsequent matching	with-orderBy/WithOrderBy4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	401	[16] Handle constants and parameters inside an order by item which contains an aggregation expression	with-orderBy/WithOrderBy4.feature	ported_unverified	with_scope_translation,parameters
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	417	[17] Handle projected variables inside an order by item which contains an aggregation expression	with-orderBy/WithOrderBy4.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	430	[18]  Handle projected property accesses inside an order by item which contains an aggregation expression	with-orderBy/WithOrderBy4.feature	ported_unverified	with_scope_translation
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	443	[19] Fail if not projected variables are used inside an order by item which contains an aggregation expression	with-orderBy/WithOrderBy4.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with-orderBy/WithOrderBy4.feature	454	[20] Fail if more complex expressions, even if projected, are used inside an order by item which contains an aggregation expression	with-orderBy/WithOrderBy4.feature	ported_unverified	with_scope_translation,return_star
+tck/features/clauses/with-skip-limit/WithSkipLimit1.feature	62	[1] Handle dependencies across WITH with SKIP	with-skip-limit/WithSkipLimit1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit1.feature	85	[2] Ordering and skipping on aggregate	with-skip-limit/WithSkipLimit1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit2.feature	62	[1] ORDER BY and LIMIT can be used	with-skip-limit/WithSkipLimit2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit2.feature	84	[2] Handle dependencies across WITH with LIMIT	with-skip-limit/WithSkipLimit2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit2.feature	106	[3] Connected components succeeding WITH with LIMIT	with-skip-limit/WithSkipLimit2.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with-skip-limit/WithSkipLimit2.feature	126	[4] Ordering and limiting on aggregate	with-skip-limit/WithSkipLimit2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit3.feature	62	[1] Get rows in the middle	with-skip-limit/WithSkipLimit3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-skip-limit/WithSkipLimit3.feature	87	[2] Get rows in the middle by param	with-skip-limit/WithSkipLimit3.feature	ported_unverified	insert,with_scope_translation,parameters
+tck/features/clauses/with-skip-limit/WithSkipLimit3.feature	115	[3] Limiting amount of rows when there are fewer left than the LIMIT argument	with-skip-limit/WithSkipLimit3.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/with-where/WithWhere1.feature	33	[1] Filter node with property predicate on a single variable with multiple bindings	with-where/WithWhere1.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere1.feature	53	[2] Filter node with property predicate on a single variable with multiple distinct bindings	with-where/WithWhere1.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with-where/WithWhere1.feature	73	[3] Filter for an unbound relationship variable	with-where/WithWhere1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/with-where/WithWhere1.feature	92	[4] Filter for an unbound node variable	with-where/WithWhere1.feature	ported_unverified	insert,with_scope_translation,for_iteration
+tck/features/clauses/with-where/WithWhere2.feature	33	[1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings	with-where/WithWhere2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere2.feature	59	[2] Filter node with conjunctive multi-part property predicates on multi variables with multiple bindings	with-where/WithWhere2.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere3.feature	33	[1] Join between node identities	with-where/WithWhere3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere3.feature	52	[2] Join between node properties of disconnected nodes	with-where/WithWhere3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere3.feature	73	[3] Join between node properties of adjacent nodes	with-where/WithWhere3.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere4.feature	33	[1] Join nodes on inequality	with-where/WithWhere4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere4.feature	52	[2] Join with disjunctive multi-part predicates including patterns	with-where/WithWhere4.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere5.feature	33	[1] Filter out on null	with-where/WithWhere5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere5.feature	55	[2] Filter out on null if the AND'd predicate evaluates to false	with-where/WithWhere5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere5.feature	77	[3] Filter out on null if the AND'd predicate evaluates to true	with-where/WithWhere5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere5.feature	99	[4] Do not filter out on null if the OR'd predicate evaluates to true	with-where/WithWhere5.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere6.feature	33	[1] Filter a single aggregate	with-where/WithWhere6.feature	ported_unverified	insert,with_scope_translation
+tck/features/clauses/with-where/WithWhere7.feature	33	[1] WHERE sees a variable bound before but not after WITH	with-where/WithWhere7.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with-where/WithWhere7.feature	53	[2] WHERE sees a variable bound after but not before WITH	with-where/WithWhere7.feature	ported_unverified	insert,with_scope_translation,return_star
+tck/features/clauses/with-where/WithWhere7.feature	73	[3] WHERE sees both, variable bound before but not after WITH and variable bound after but not before WITH	with-where/WithWhere7.feature	ported_unverified	insert,with_scope_translation,return_star

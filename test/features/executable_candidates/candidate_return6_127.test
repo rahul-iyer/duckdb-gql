@@ -1,0 +1,39 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return6_127.test
+# Source: tck/features/clauses/return/Return6.feature:127 [7] Aggregate on property
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 33, ''),
+        ('n2', 33, ''),
+        ('n3', 42, '')
+    ) fixture(":ID(GqlFixture_candidate_return6_127)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_return6_127_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_return6_127)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_return6_127)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_return6_127_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_return6_127 ANY
+
+statement ok
+COPY GRAPH candidate_return6_127 FROM (
+    VERTICES '__TEST_DIR__/candidate_return6_127_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_return6_127_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_return6_127
+
+query II rowsort
+MATCH (n)
+RETURN n.num, count(*)
+----
+33	2
+42	1

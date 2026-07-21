@@ -1,0 +1,39 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return2_76.test
+# Source: tck/features/clauses/return/Return2.feature:76 [4] Returning a relationship property value
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', ''),
+        ('n2', '')
+    ) fixture(":ID(GqlFixture_candidate_return2_76)", ":LABEL")
+) TO '__TEST_DIR__/candidate_return2_76_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'T', 1)
+    ) fixture(":START_ID(GqlFixture_candidate_return2_76)", ":END_ID(GqlFixture_candidate_return2_76)", ":TYPE", "num:long")
+) TO '__TEST_DIR__/candidate_return2_76_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_return2_76 ANY
+
+statement ok
+COPY GRAPH candidate_return2_76 FROM (
+    VERTICES '__TEST_DIR__/candidate_return2_76_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_return2_76_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_return2_76
+
+query I rowsort
+MATCH ()-[r]->()
+RETURN r.num
+----
+1

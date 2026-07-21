@@ -4,6 +4,20 @@
 
 require gql
 
+# Removed compatibility entry points must not be reintroduced accidentally.
+statement error
+SELECT * FROM gql_register_graph_tables(
+    'legacy', 'vertices', 'id', 'label',
+    'edges', 'id', 'source', 'target', 'type', true
+)
+----
+<REGEX>:.*gql_register_graph_tables does not exist.*
+
+statement error
+SELECT * FROM gql_load_graph('legacy', 'nodes.csv', 'edges.csv', 'csv')
+----
+<REGEX>:.*gql_load_graph does not exist.*
+
 query IT
 CREATE GRAPH social ANY
 ----

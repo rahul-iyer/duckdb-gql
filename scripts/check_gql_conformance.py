@@ -3,6 +3,8 @@
 import argparse
 import csv
 import re
+import subprocess
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -63,6 +65,17 @@ def main() -> int:
             f"OpenGQL grammar rule count changed: expected {EXPECTED_GRAMMAR_RULES}, found {actual_rule_count}; "
             "review the grammar delta and conformance manifest together"
         )
+
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gql_fixture_adapter.py"), "--self-test"],
+        cwd=ROOT,
+        check=True,
+    )
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_gql_feature_corpus.py")],
+        cwd=ROOT,
+        check=True,
+    )
 
     incomplete = [row["feature_id"] for row in rows if row["status"] not in {"implemented", "not_applicable"}]
     if args.release and incomplete:

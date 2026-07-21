@@ -1,0 +1,158 @@
+# name: test/sql/gql_native_merge.test
+# description: Cypher-compatible vertex MERGE over managed native graph tables
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', 42, 'Person;Engineer'),
+        ('p2', 'Grace', 37, 'Person')
+    ) nodes("external_id:ID(People)", "name:string", "age:int", ":LABEL")
+) TO '__TEST_DIR__/gql_native_merge_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE")
+) TO '__TEST_DIR__/gql_native_merge_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH native_merge ANY
+
+statement ok
+COPY GRAPH native_merge FROM (
+    VERTICES '__TEST_DIR__/gql_native_merge_nodes.csv',
+    EDGES '__TEST_DIR__/gql_native_merge_edges.csv'
+) FORMAT NEO4J
+
+statement error
+MERGE (:Person {external_id: 'not-selected'})
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before mutation.*
+
+statement ok
+SESSION SET GRAPH native_merge
+
+# A full label/property match is a no-op.
+statement ok
+MERGE (person:Person {external_id: 'p1', name: 'Ada', age: 42})
+
+statement ok
+MERGE (person:Person&Engineer {external_id: 'p1', name: 'Ada', age: 42})
+
+query I
+MATCH (person:Person&Engineer)
+RETURN count(*)
+----
+1
+
+query I
+MATCH (person:Person)
+RETURN count(*)
+----
+2
+
+# A miss inserts one row into the managed wide DuckDB table. Repeating the
+# command matches the inserted row and remains idempotent.
+statement ok
+MERGE (person:Person {external_id: 'p3', name: 'Linus', age: 31})
+
+statement ok
+MERGE (:Person {external_id: 'p3', name: 'Linus', age: 31})
+
+query IT
+MATCH (person:Person) WHERE person.external_id = 'p3'
+RETURN person.name, person.age
+----
+Linus	31
+
+# Label-only and property-only forms are supported. An unlabeled property
+# pattern matches the property regardless of the stored label.
+statement ok
+MERGE (:Person)
+
+statement ok
+MERGE ({external_id: 'p2'})
+
+query I
+MATCH (person:Person)
+RETURN count(*)
+----
+3
+
+# A create-branch conversion failure does not leave a partially inserted row.
+statement error
+MERGE (:Person {external_id: 'bad', name: 'Bad', age: 'not an integer'})
+----
+<REGEX>:.*Could not convert string.*
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'bad'
+RETURN count(*)
+----
+0
+
+# MERGE participates in the caller transaction. Sequence values may have gaps
+# after rollback, but no graph row survives.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+MERGE (:Person {external_id: 'rollback', name: 'Transient', age: 1})
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'rollback'
+RETURN count(*)
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'rollback'
+RETURN count(*)
+----
+0
+
+# The compatibility parser does not intercept DuckDB's native SQL MERGE INTO.
+statement ok
+CREATE TABLE ordinary_merge(id INTEGER PRIMARY KEY, value VARCHAR)
+
+statement ok
+INSERT INTO ordinary_merge VALUES (1, 'old')
+
+statement ok
+MERGE INTO ordinary_merge AS target
+USING (SELECT 1 AS id, 'new' AS value) AS source
+ON target.id = source.id
+WHEN MATCHED THEN UPDATE SET value = source.value
+
+query T
+SELECT value FROM ordinary_merge
+----
+new
+
+# Unsupported compatibility surface and invalid target mappings fail loudly.
+statement error
+MERGE (:Person {external_id: 'p4'}) ON CREATE SET person.name = 'New'
+----
+<REGEX>:.*ON CREATE, ON MATCH, paths, and trailing clauses are not yet supported.*
+
+statement error
+MERGE (:Person {unknown_property: 'value'})
+----
+<REGEX>:.*Property 'unknown_property' is not mapped.*
+
+statement error
+MERGE (person)
+----
+<REGEX>:.*requires a label or at least one property.*
+
+statement error
+MERGE (:Person {external_id: 'x', external_id: 'y'})
+----
+<REGEX>:.*duplicate MERGE property 'external_id'.*

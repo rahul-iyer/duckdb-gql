@@ -1,0 +1,66 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match5_206.test
+# Source: tck/features/clauses/match/Match5.feature:206 [9] Handling symmetrically bounded variable length match, bounds are one
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n0', 'A'),
+        ('n2', 'n00', 'B'),
+        ('n3', 'n01', 'B'),
+        ('n4', 'n000', 'C'),
+        ('n5', 'n001', 'C'),
+        ('n6', 'n010', 'C'),
+        ('n7', 'n011', 'C'),
+        ('n8', 'n0000', 'D'),
+        ('n9', 'n0001', 'D'),
+        ('n10', 'n0010', 'D'),
+        ('n11', 'n0011', 'D'),
+        ('n12', 'n0100', 'D'),
+        ('n13', 'n0101', 'D'),
+        ('n14', 'n0110', 'D'),
+        ('n15', 'n0111', 'D')
+    ) fixture(":ID(GqlFixture_candidate_match5_206)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_match5_206_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'LIKES'),
+        ('n1', 'n3', 'LIKES'),
+        ('n2', 'n4', 'LIKES'),
+        ('n2', 'n5', 'LIKES'),
+        ('n3', 'n6', 'LIKES'),
+        ('n3', 'n7', 'LIKES'),
+        ('n4', 'n8', 'LIKES'),
+        ('n4', 'n9', 'LIKES'),
+        ('n5', 'n10', 'LIKES'),
+        ('n5', 'n11', 'LIKES'),
+        ('n6', 'n12', 'LIKES'),
+        ('n6', 'n13', 'LIKES'),
+        ('n7', 'n14', 'LIKES'),
+        ('n7', 'n15', 'LIKES')
+    ) fixture(":START_ID(GqlFixture_candidate_match5_206)", ":END_ID(GqlFixture_candidate_match5_206)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match5_206_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match5_206 ANY
+
+statement ok
+COPY GRAPH candidate_match5_206 FROM (
+    VERTICES '__TEST_DIR__/candidate_match5_206_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match5_206_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match5_206
+
+query T rowsort
+MATCH (a:A)-[:LIKES]->{1,1}(c)
+RETURN c.name
+----
+n00
+n01

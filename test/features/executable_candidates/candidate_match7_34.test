@@ -1,0 +1,34 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_34.test
+# Source: tck/features/clauses/match/Match7.feature:34 [1] Simple OPTIONAL MATCH on empty graph
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":LABEL" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match7_34_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match7_34_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match7_34 ANY
+
+statement ok
+COPY GRAPH candidate_match7_34 FROM (
+    VERTICES '__TEST_DIR__/candidate_match7_34_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match7_34_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match7_34
+
+query T rowsort
+OPTIONAL MATCH (n)
+RETURN n
+----
+NULL

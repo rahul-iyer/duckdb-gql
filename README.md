@@ -1,18 +1,20 @@
 # DuckDB ISO GQL extension
 
-`gql` is a C++17 DuckDB extension whose product target is full ISO GQL support. The current implementation is an early, explicitly incomplete checkpoint: it parses GQL directly, keeps canonical data in normalized DuckDB tables, lowers fixed patterns to DuckDB relational plans, and provides a versioned in-memory CSR snapshot for explicit traversal APIs.
+`gql` is a C++17 DuckDB extension targeting ISO GQL. The current implementation uses one canonical storage model: graph-owned native DuckDB vertex and edge tables. There is no normalized EAV compatibility backend and no manual table-registration API.
 
-It does not store graph properties as JSON. Labels and property keys are dictionary encoded, while values use a named DuckDB `UNION` of native scalar types.
+## Current workflow
 
-## Current implementation checkpoint
+Create an empty graph, bulk-load Neo4j-header CSV or Parquet files, select the graph, and query it:
 
 ```sql
 CREATE GRAPH social ANY;
-SESSION SET GRAPH social;
 
-INSERT (:Person {name: 'Ada', age: 42})
-       -[:KNOWS {since: 2020}]->
-       (:Person {name: 'Grace'});
+COPY GRAPH social FROM (
+    VERTICES 'nodes.csv',
+    EDGES 'relationships.csv'
+) FORMAT NEO4J;
+
+SESSION SET GRAPH social;
 
 MATCH (a:Person)-[e:KNOWS]->(b:Person)
 WHERE e.since >= 2020
@@ -21,104 +23,127 @@ RETURN a.name AS source_name,
        b.name AS target_name;
 ```
 
-Implemented:
+`CREATE GRAPH` creates an `EMPTY` catalog entry. `COPY GRAPH` performs vectorized CSV/Parquet scans and CTAS operations, creates one managed wide vertex table and one managed wide edge table, records their mappings, and atomically moves the graph to `TABLE_BACKED`. `DROP GRAPH` removes both the metadata and the graph-owned tables.
 
-- `CREATE GRAPH [IF NOT EXISTS] <name> ANY`
-- `DROP GRAPH [IF EXISTS] <name>`
-- `SESSION SET GRAPH <name>`
-- Single-vertex and directed, chained path `INSERT`
-- Boolean, integer, decimal, double, and string property literals
-- Multiple comma-separated fixed `MATCH` patterns, including arbitrary explicit multi-hop paths with per-edge left/right direction, exact anonymous edge quantifiers `{1}` through `{64}`, finite ranges such as `{1,3}`, and one-factor unbounded paths using `*`, `+`, or `{n,}`; repeated variables share one binding and anonymous elements receive internal bindings
-- Simple `OPTIONAL MATCH`, including one null-extended row when no match exists
-- `:` and `IS` label constraints, `element_id(...)`, typed property projections, and aliases
-- Graph-pattern `WHERE` and linear `FILTER` over fixed `MATCH`, with comparison, arithmetic, Boolean, and null predicates
-- `RETURN DISTINCT`, grouping and `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` aggregates, plus `ORDER BY`, static `OFFSET`, and static `LIMIT`
-- Common scalar functions lowered to DuckDB operators: `LOWER`, `UPPER`, `LEFT`, `RIGHT`, `TRIM`, `LTRIM`, `RTRIM`, `CHAR_LENGTH`, `ABS`, `MOD`, `SQRT`, `FLOOR`, and `CEIL`, plus string concatenation with `||`
-- Match-and-modify pipelines for multi-item property/label `SET` and `REMOVE`, whole-map replacement, dynamic property expressions, edge or isolated-node `DELETE`, and node `DETACH DELETE`
-- Atomic Neo4j-header bulk import from CSV or Parquet through native DuckDB scans
-- Native SQL alongside GQL
+## Implemented query surface
 
-The OpenGQL parse tree is transformed immediately into an owned, source-located C++ AST. `MATCH` queries pass through a scope-aware binder and storage-independent `MATCH -> FILTER* -> PROJECT` logical IR. Each permitted finite positive length is expanded by the binder into an ordinary fixed pattern; finite ranges become native `UNION ALL` branches so distinct matches are not deduplicated. A single unbounded anonymous edge factor lowers to a native DuckDB recursive CTE. Its zero-hop vertex anchor implements `*`, its depth predicate implements `+` and `{n,}`, and its ordered used-edge list enforces terminating different-edge/trail semantics on cyclic graphs while preserving distinct parallel-edge paths. Endpoint label/property joins, filters, projections, optional null-extension, aggregation, distinctness, ordering, paging, and matched mutations stay in native DuckDB plans. Property predicates extract the required member from the persistent typed `UNION`; dynamic property projections are converted transiently to DuckDB `VARIANT`. The planner does not retain ANTLR nodes or reparse source text. Recognized unsupported forms fail explicitly rather than silently changing semantics. Current unbounded-path limitations are composition with additional pattern factors or comma-separated patterns, quantified group variables, and explicit path modes/searches. Other major gaps include compound optional-query composition, general undirected matching, the complete expression and function systems, match-and-insert, full element values, procedures, and typed graph schemas.
+- Fixed directed `MATCH` patterns, including multiple comma-separated patterns and explicit multi-hop paths.
+- `OPTIONAL MATCH`, `WHERE`, and linear `FILTER`.
+- Label/type constraints, `element_id(...)`, mapped property access, aliases, and typed predicates.
+- `DISTINCT`, grouping, aggregates, ordering, static offset, and static limit.
+- Exact and ranged anonymous edge quantifiers plus one anonymous unbounded directed `*`, `+`, or `{n,}` factor.
+- Native variable-length execution through DuckDB recursive CTEs with different-edge/trail semantics.
+- Common numeric and string functions lowered to DuckDB expressions.
+- Optional prepared CSR execution for eligible unbounded paths through `MATCH /*+ CSR */`.
 
-## Storage and CSR
+Native DuckDB relations are authoritative. Fixed MATCH and the default variable-length path implementation lower to ordinary DuckDB scans, joins, filters, projections, aggregation, ordering, and recursive CTE operators.
 
-Canonical persistent storage lives in the private `gql_internal` schema:
+Matched property `SET`, `REMOVE`, edge/node `DELETE`, and `DETACH DELETE` lower directly to managed native DuckDB tables. They use one pre-mutation MATCH snapshot, participate in explicit caller transactions, and retain command-level atomicity in autocommit. Standalone `INSERT`, whole-map replacement, and schema evolution for previously unmapped properties remain pending.
 
-- `objects` stores stable IDs and vertex/edge topology.
-- `labels` plus `object_labels` dictionary-encode label membership.
-- `property_keys` plus `object_properties` store one native typed value per object/key.
-- `graphs.graph_version` changes atomically with each successful GQL mutation.
-
-CSR is derived and rebuildable. It is not used by the current `MATCH` backend; all implemented query semantics execute through native DuckDB operators. `gql_neighbors` and `gql_csr_stats` build CSR lazily only for explicit traversal and inspection. A snapshot maps stable vertex IDs to dense ordinals and contains separate outgoing and incoming `offsets`, neighbor IDs, and edge IDs. Adjacency is deterministic; parallel edges and self-loops are preserved. A graph-version mismatch invalidates the snapshot automatically. CSR may become an optional physical alternative only after native query coverage and differential parity tests are complete.
-
-The current cache is connection-local. A database-wide memory-budgeted LRU remains a hardening milestone. Matched `SET`/`REMOVE`/`DELETE` statements lower to DuckDB DML on the caller connection, support comma-separated items, dynamically typed property expressions, and whole-property-map replacement, and participate in explicit caller `BEGIN`/`ROLLBACK` transactions. MATCH bindings and SET values are materialized once per command. In autocommit mode, the generated native statements are wrapped in one transaction and any intermediate failure rolls back the complete GQL command. Standalone `INSERT` still executes through an internal connection and does not yet participate in the caller transaction.
-
-SQL interoperability functions are available:
+The project also provides a deliberately separate Cypher-compatible vertex
+upsert extension:
 
 ```sql
-SELECT * FROM gql_graphs();
-SELECT * FROM gql_vertices();
-SELECT * FROM gql_edges();
-SELECT * FROM gql_properties();
-SELECT * FROM gql_neighbors('social', 1, 'out');
-SELECT * FROM gql_csr_stats('social');
+MERGE (person:Person {person_id: 'p3', name: 'Linus'});
 ```
+
+This initial `MERGE` form accepts one vertex with an optional variable, at most
+one label, and a literal property map. It matches on every supplied label and
+property and inserts into the managed native vertex table when no row matches.
+It is not an ISO GQL conformance claim: ISO/IEC 39075:2024 has `INSERT`, `SET`,
+`REMOVE`, and `DELETE`, but no `MERGE` statement. Edge/path patterns and
+`ON CREATE`/`ON MATCH` actions remain pending.
+
+## Managed table layout
+
+For graph ID `N`, `COPY GRAPH` currently creates:
+
+- `gql_data.graph_N_vertices`
+  - `__gql_id UBIGINT`
+  - `__gql_external_id VARCHAR`
+  - `__gql_label VARCHAR`
+  - one typed DuckDB column per imported property
+- `gql_data.graph_N_edges`
+  - `__gql_edge_id UBIGINT`
+  - `__gql_source_id UBIGINT`
+  - `__gql_target_id UBIGINT`
+  - `__gql_type VARCHAR`
+  - one typed DuckDB column per imported property
+
+The private `gql_internal` schema stores graph and mapping metadata only:
+
+- `graphs` and `graph_storage`
+- `graph_element_tables`
+- `graph_edge_endpoints`
+- `graph_label_mappings`
+- `graph_property_mappings`
+
+It does not store graph vertices, edges, labels, or properties as EAV rows.
 
 ## Neo4j-format bulk import
 
-Create an empty graph, then load one node file and an optional relationship file with the same call:
-
-```sql
-CREATE GRAPH social ANY;
-
-SELECT *
-FROM gql_load_graph(
-    'social',
-    'nodes.csv',
-    'relationships.csv',
-    'csv'
-);
-```
-
-Use `'parquet'` as the last argument for Parquet files, or pass `NULL` as the relationship path for a node-only import. CSV and Parquet use the same [Neo4j field-header convention](https://neo4j.com/docs/operations-manual/current/import/):
+Vertex input:
 
 ```text
 personId:ID(People),name:string,age:int,:LABEL
-p1,Ada,42,Person;Researcher
+p1,Ada,42,Person
 p2,Grace,37,Person
 ```
+
+Edge input:
 
 ```text
 :START_ID(People),:END_ID(People),:TYPE,since:int
 p1,p2,KNOWS,2020
 ```
 
-The importer currently supports one embedded-header node file, one embedded-header relationship file, one node `:ID` column, optional `:ID` groups, any number of `:LABEL` columns, one relationship `:TYPE`, and scalar properties. A named ID such as `personId:ID` is also persisted as the `personid` property; an anonymous `:ID` is import-only. GQL identifiers are normalized to lowercase, including imported label/type values and property names.
+The format is inferred independently from `.csv`, `.csv.gz`, `.csv.zst`, or `.parquet`. The loader supports one embedded-header vertex file, one edge file, one node ID, optional ID groups, at most one scalar node label, one relationship type, and scalar properties.
 
-The target graph must already exist and be empty. Duplicate or missing node IDs, missing relationship endpoints, bad property casts, and unsupported types abort the complete command. Nodes, relationships, dictionaries, properties, and the single `graph_version` increment commit atomically.
+Validation is enabled by default and checks duplicate/missing node IDs and missing endpoints. Trusted inputs can skip those scans:
 
-Not yet supported by this initial compatibility slice: multiple files per category, separate CSV headers, Parquet name-mapping header files, composite IDs, incremental `:ACTION` imports, list properties, points, and durations.
+```sql
+COPY GRAPH social FROM (
+    VERTICES 'nodes.csv',
+    EDGES 'relationships.csv'
+) FORMAT NEO4J OPTIONS (VALIDATE FALSE);
+```
+
+## CSR
+
+Native DuckDB execution is the correctness default. CSR construction is explicit and offline:
+
+```sql
+SELECT * FROM gql_build_csr('social');
+
+MATCH /*+ CSR */ (a:Person)-[:KNOWS]->+(b:Person)
+WHERE a.name = 'Ada'
+RETURN b.name;
+```
+
+The CSR cache is connection-local. Rebuild it after direct SQL topology changes. Explicit caller transactions are currently ineligible because transaction-local CSR deltas are not implemented.
+
+Inspection functions:
+
+```sql
+SELECT * FROM gql_graphs();
+SELECT * FROM gql_build_csr('social');
+SELECT * FROM gql_neighbors('social', 1, 'out');
+SELECT * FROM gql_csr_stats('social');
+```
 
 ## Build and test
 
-The repository pins DuckDB v1.5.4, OpenGQL grammar v1.9.0, ANTLR 4.13.2, and its vcpkg baseline. The frontend and runtime are C++17. Generated C++ parser sources are checked in, so Java is not required to build or use the extension. Java 11+ is needed only to regenerate them.
+The repository pins DuckDB v1.5.4, OpenGQL grammar v1.9.0, and ANTLR 4.13.2.
 
 ```sh
-make debug VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake"
-```
-
-For a focused incremental build and test run:
-
-```sh
-cmake --build build/debug --target unittest gql_loadable_extension -j2
+make debug
 ./build/debug/test/unittest "test/sql/gql*"
 python3 scripts/check_gql_conformance.py
 ```
 
-Regenerate the parser with:
+The conformance check also validates the source-pinned 93-file, 827-scenario
+[GQL clause feature corpus](test/features/README.md). Those scenarios are a
+porting inventory until individually promoted from `ported_unverified` to
+`executable`; they do not inflate the ISO implementation status.
 
-```sh
-./scripts/regenerate_parser.sh
-```
-
-See [the implementation plan](docs/gql-implementation-plan.md) for the current compiler and conformance delivery checkpoints. [The native table-backed graph architecture](docs/table-backed-graph-architecture.md) defines the target storage, loading, native execution, mutation, and optional CSR design. [The conformance program](docs/iso-gql-conformance.md) defines what “full ISO GQL support” means and records current coverage without overclaiming it.
+See [the implementation plan](docs/gql-implementation-plan.md), [the native graph architecture](docs/table-backed-graph-architecture.md), and the benchmark reports in [docs/benchmarks](docs/benchmarks).

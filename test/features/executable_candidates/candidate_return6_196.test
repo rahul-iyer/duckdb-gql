@@ -1,0 +1,135 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return6_196.test
+# Source: tck/features/clauses/return/Return6.feature:196 [11] Counting matches
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', ''),
+        ('n2', ''),
+        ('n3', ''),
+        ('n4', ''),
+        ('n5', ''),
+        ('n6', ''),
+        ('n7', ''),
+        ('n8', ''),
+        ('n9', ''),
+        ('n10', ''),
+        ('n11', ''),
+        ('n12', ''),
+        ('n13', ''),
+        ('n14', ''),
+        ('n15', ''),
+        ('n16', ''),
+        ('n17', ''),
+        ('n18', ''),
+        ('n19', ''),
+        ('n20', ''),
+        ('n21', ''),
+        ('n22', ''),
+        ('n23', ''),
+        ('n24', ''),
+        ('n25', ''),
+        ('n26', ''),
+        ('n27', ''),
+        ('n28', ''),
+        ('n29', ''),
+        ('n30', ''),
+        ('n31', ''),
+        ('n32', ''),
+        ('n33', ''),
+        ('n34', ''),
+        ('n35', ''),
+        ('n36', ''),
+        ('n37', ''),
+        ('n38', ''),
+        ('n39', ''),
+        ('n40', ''),
+        ('n41', ''),
+        ('n42', ''),
+        ('n43', ''),
+        ('n44', ''),
+        ('n45', ''),
+        ('n46', ''),
+        ('n47', ''),
+        ('n48', ''),
+        ('n49', ''),
+        ('n50', ''),
+        ('n51', ''),
+        ('n52', ''),
+        ('n53', ''),
+        ('n54', ''),
+        ('n55', ''),
+        ('n56', ''),
+        ('n57', ''),
+        ('n58', ''),
+        ('n59', ''),
+        ('n60', ''),
+        ('n61', ''),
+        ('n62', ''),
+        ('n63', ''),
+        ('n64', ''),
+        ('n65', ''),
+        ('n66', ''),
+        ('n67', ''),
+        ('n68', ''),
+        ('n69', ''),
+        ('n70', ''),
+        ('n71', ''),
+        ('n72', ''),
+        ('n73', ''),
+        ('n74', ''),
+        ('n75', ''),
+        ('n76', ''),
+        ('n77', ''),
+        ('n78', ''),
+        ('n79', ''),
+        ('n80', ''),
+        ('n81', ''),
+        ('n82', ''),
+        ('n83', ''),
+        ('n84', ''),
+        ('n85', ''),
+        ('n86', ''),
+        ('n87', ''),
+        ('n88', ''),
+        ('n89', ''),
+        ('n90', ''),
+        ('n91', ''),
+        ('n92', ''),
+        ('n93', ''),
+        ('n94', ''),
+        ('n95', ''),
+        ('n96', ''),
+        ('n97', ''),
+        ('n98', ''),
+        ('n99', ''),
+        ('n100', '')
+    ) fixture(":ID(GqlFixture_candidate_return6_196)", ":LABEL")
+) TO '__TEST_DIR__/candidate_return6_196_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_return6_196)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_return6_196)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_return6_196_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_return6_196 ANY
+
+statement ok
+COPY GRAPH candidate_return6_196 FROM (
+    VERTICES '__TEST_DIR__/candidate_return6_196_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_return6_196_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_return6_196
+
+query I rowsort
+MATCH ()
+RETURN count(*)
+----
+100

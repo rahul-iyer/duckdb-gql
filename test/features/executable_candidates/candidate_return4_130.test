@@ -1,0 +1,36 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return4_130.test
+# Source: tck/features/clauses/return/Return4.feature:130 [7] Keeping used expression 4
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', '')
+    ) fixture(":ID(GqlFixture_candidate_return4_130)", ":LABEL")
+) TO '__TEST_DIR__/candidate_return4_130_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_return4_130)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_return4_130)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_return4_130_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_return4_130 ANY
+
+statement ok
+COPY GRAPH candidate_return4_130 FROM (
+    VERTICES '__TEST_DIR__/candidate_return4_130_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_return4_130_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_return4_130
+
+query T rowsort
+MATCH p = (n)-[]->(b)
+RETURN aVg(    n.aGe     )
+----
+NULL

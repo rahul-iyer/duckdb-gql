@@ -1,0 +1,46 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match1_97.test
+# Source: tck/features/clauses/match/Match1.feature:97 [5] Use multiple MATCH clauses to do a Cartesian product
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 1, ''),
+        ('n2', 2, ''),
+        ('n3', 3, '')
+    ) fixture(":ID(GqlFixture_candidate_match1_97)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_match1_97_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_match1_97)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_match1_97)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match1_97_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match1_97 ANY
+
+statement ok
+COPY GRAPH candidate_match1_97 FROM (
+    VERTICES '__TEST_DIR__/candidate_match1_97_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match1_97_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match1_97
+
+query II rowsort
+MATCH (n), (m)
+RETURN n.num AS n, m.num AS m
+----
+1	1
+1	2
+1	3
+2	1
+2	2
+2	3
+3	1
+3	2
+3	3

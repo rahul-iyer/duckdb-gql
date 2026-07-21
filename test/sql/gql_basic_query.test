@@ -5,16 +5,34 @@
 require gql
 
 statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'Ada', 42, 'Person'),
+        ('2', 'Grace', 35, 'Person'),
+        ('3', 'Ada', 30, 'Person')
+    ) vertices(":ID", "name:string", "age:int", ":LABEL")
+) TO '__TEST_DIR__/gql_basic_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'KNOWS'),
+        ('2', '3', 'KNOWS')
+    )
+    edges(":START_ID", ":END_ID", ":TYPE")
+) TO '__TEST_DIR__/gql_basic_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
 CREATE GRAPH basic_queries ANY
 
 statement ok
+COPY GRAPH basic_queries FROM (
+    VERTICES '__TEST_DIR__/gql_basic_vertices.csv',
+    EDGES '__TEST_DIR__/gql_basic_edges.csv'
+) FORMAT NEO4J
+
+statement ok
 SESSION SET GRAPH basic_queries
-
-statement ok
-INSERT (:Person {name: 'Ada', age: 42})-[:KNOWS]->(:Person {name: 'Grace', age: 35})
-
-statement ok
-INSERT (:Person {name: 'Ada', age: 30})
 
 query T rowsort
 MATCH (person:Person)
@@ -64,6 +82,35 @@ RETURN person.name AS name
 Ada
 Ada
 Grace
+
+query TT
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(middle)-[]->(destination)
+RETURN middle.name AS middle_name, destination.name AS destination_name
+----
+Grace	Ada
+
+query TT
+MATCH (source:Person) WHERE source.age = 35
+OPTIONAL MATCH (source)-[]->(middle)-[]->(destination)
+RETURN middle.name AS middle_name, destination.name AS destination_name
+----
+NULL	NULL
+
+query TT
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(middle), (middle)-[]->(destination)
+RETURN middle.name AS middle_name, destination.name AS destination_name
+----
+Grace	Ada
+
+query TT
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(middle)
+OPTIONAL MATCH (middle)-[]->(destination) WHERE destination.age > 100
+RETURN middle.name AS middle_name, destination.name AS destination_name
+----
+Grace	NULL
 
 query I
 MATCH (person:Person)

@@ -79,6 +79,9 @@ static void SerializeNode(const GqlBoundExpression &expression, GqlExpressionPro
 	case GqlExpressionType::IS_NULL:
 		operation = expression.negated ? 1 : 0;
 		break;
+	case GqlExpressionType::LABELED:
+		operation = expression.negated ? 1 : 0;
+		break;
 	case GqlExpressionType::VARIABLE_REFERENCE:
 	case GqlExpressionType::PROPERTY_REFERENCE:
 	case GqlExpressionType::ELEMENT_ID:

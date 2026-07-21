@@ -1,5 +1,8 @@
 #include "gql_import.hpp"
 
+#include "gql_catalog.hpp"
+#include "gql_storage.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -33,35 +36,13 @@ struct Neo4jSchema {
 	bool has_end_id = false;
 };
 
-struct Neo4jImportBindData : TableFunctionData {
-	Neo4jImportBindData(string graph_name_p, string node_path_p, string relationship_path_p, string format_p,
-	                    bool has_relationships_p)
-	    : graph_name(std::move(graph_name_p)), node_path(std::move(node_path_p)),
-	      relationship_path(std::move(relationship_path_p)), format(std::move(format_p)),
-	      has_relationships(has_relationships_p) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<Neo4jImportBindData>(graph_name, node_path, relationship_path, format, has_relationships);
-	}
-
-	bool Equals(const FunctionData &other_p) const override {
-		auto other = dynamic_cast<const Neo4jImportBindData *>(&other_p);
-		return other && graph_name == other->graph_name && node_path == other->node_path &&
-		       relationship_path == other->relationship_path && format == other->format &&
-		       has_relationships == other->has_relationships;
-	}
-
-	string graph_name;
-	string node_path;
-	string relationship_path;
-	string format;
-	bool has_relationships;
-};
-
-struct Neo4jImportState : GlobalTableFunctionState {
+struct CopyGraphState : GlobalTableFunctionState {
 	bool done = false;
 };
+
+static unique_ptr<GlobalTableFunctionState> CopyGraphInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<CopyGraphState>();
+}
 
 static string QuoteLiteral(const string &value) {
 	string result = "'";
@@ -268,234 +249,267 @@ static string ExternalId(const string &alias, const Neo4jField &field) {
 	return "CAST(" + Column(alias, field) + " AS VARCHAR)";
 }
 
-static void ValidateNodeIds(Connection &connection, const string &table_name, const Neo4jField &id) {
-	auto id_expression = ExternalId("n", id);
-	if (ScalarCount(connection, "SELECT count(*) FROM " + QuoteIdentifier(table_name) + " n WHERE " + id_expression +
-	                                " IS NULL OR trim(" + id_expression + ") = ''") != 0) {
-		throw InvalidInputException("Neo4j node :ID values must be non-null and non-empty");
-	}
-	if (ScalarCount(connection, "SELECT count(*) FROM (SELECT " + id_expression + " FROM " +
-	                                QuoteIdentifier(table_name) + " n GROUP BY ALL HAVING count(*) > 1) duplicates") !=
-	    0) {
-		throw InvalidInputException("Neo4j node :ID values must be unique");
-	}
-}
-
-static string ValueExpression(const Neo4jField &field, const string &alias) {
-	auto source = Column(alias, field);
-	auto type = StringUtil::Lower(field.declared_type);
-	if (EndsWith(type, "[]")) {
-		throw InvalidInputException("Neo4j list property '%s' is not supported yet", field.property_name);
-	}
-	if (!type.empty()) {
-		if (type == "boolean" || type == "bool") {
-			return "union_value(bool_value := CAST(" + source + " AS BOOLEAN))";
-		}
-		if (type == "byte" || type == "short" || type == "int" || type == "integer" || type == "long") {
-			return "union_value(int_value := CAST(" + source + " AS BIGINT))";
-		}
-		if (type == "float" || type == "double") {
-			return "union_value(double_value := CAST(" + source + " AS DOUBLE))";
-		}
-		if (type == "string" || type == "char") {
-			return "union_value(string_value := CAST(" + source + " AS VARCHAR))";
-		}
-		if (type == "date") {
-			return "union_value(date_value := CAST(" + source + " AS DATE))";
-		}
-		if (type == "localtime") {
-			return "union_value(time_value := CAST(" + source + " AS TIME))";
-		}
-		if (type == "localdatetime") {
-			return "union_value(timestamp_value := CAST(" + source + " AS TIMESTAMP))";
-		}
-		if (type == "datetime") {
-			return "union_value(timestamptz_value := CAST(" + source + " AS TIMESTAMPTZ))";
-		}
-		throw InvalidInputException("Neo4j property type '%s' is not supported yet", field.declared_type);
+struct CopyGraphBindData : TableFunctionData {
+	CopyGraphBindData(string graph_name_p, string vertex_path_p, string edge_path_p, bool validate_p)
+	    : graph_name(std::move(graph_name_p)), vertex_path(std::move(vertex_path_p)), edge_path(std::move(edge_path_p)),
+	      validate(validate_p) {
 	}
 
-	switch (field.source_type.id()) {
-	case LogicalTypeId::BOOLEAN:
-		return "union_value(bool_value := CAST(" + source + " AS BOOLEAN))";
-	case LogicalTypeId::TINYINT:
-	case LogicalTypeId::SMALLINT:
-	case LogicalTypeId::INTEGER:
-	case LogicalTypeId::BIGINT:
-	case LogicalTypeId::HUGEINT:
-		return "union_value(int_value := CAST(" + source + " AS BIGINT))";
-	case LogicalTypeId::UTINYINT:
-	case LogicalTypeId::USMALLINT:
-	case LogicalTypeId::UINTEGER:
-	case LogicalTypeId::UBIGINT:
-	case LogicalTypeId::UHUGEINT:
-		return "union_value(uint_value := CAST(" + source + " AS UBIGINT))";
-	case LogicalTypeId::DECIMAL:
-		return "union_value(decimal_value := CAST(" + source + " AS DECIMAL(38,18)))";
-	case LogicalTypeId::FLOAT:
-	case LogicalTypeId::DOUBLE:
-		return "union_value(double_value := CAST(" + source + " AS DOUBLE))";
-	case LogicalTypeId::DATE:
-		return "union_value(date_value := CAST(" + source + " AS DATE))";
-	case LogicalTypeId::TIME:
-	case LogicalTypeId::TIME_NS:
-		return "union_value(time_value := CAST(" + source + " AS TIME))";
-	case LogicalTypeId::TIMESTAMP_SEC:
-	case LogicalTypeId::TIMESTAMP_MS:
-	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIMESTAMP_NS:
-		return "union_value(timestamp_value := CAST(" + source + " AS TIMESTAMP))";
-	case LogicalTypeId::TIMESTAMP_TZ:
-		return "union_value(timestamptz_value := CAST(" + source + " AS TIMESTAMPTZ))";
-	case LogicalTypeId::INTERVAL:
-		return "union_value(interval_value := CAST(" + source + " AS INTERVAL))";
-	case LogicalTypeId::BLOB:
-		return "union_value(blob_value := CAST(" + source + " AS BLOB))";
-	case LogicalTypeId::CHAR:
-	case LogicalTypeId::VARCHAR:
-		return "union_value(string_value := CAST(" + source + " AS VARCHAR))";
-	default:
-		throw InvalidInputException("Neo4j property '%s' has unsupported DuckDB type %s", field.property_name,
-		                            field.source_type.ToString());
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<CopyGraphBindData>(graph_name, vertex_path, edge_path, validate);
 	}
-}
 
-static void InsertProperties(Connection &connection, const string &graph_id, const string &raw_table,
-                             const string &map_table, const vector<Neo4jField> &properties) {
-	if (properties.empty()) {
-		return;
+	bool Equals(const FunctionData &other_p) const override {
+		auto other = dynamic_cast<const CopyGraphBindData *>(&other_p);
+		return other && graph_name == other->graph_name && vertex_path == other->vertex_path &&
+		       edge_path == other->edge_path && validate == other->validate;
 	}
-	for (const auto &property : properties) {
-		Query(connection, "INSERT INTO gql_internal.property_keys (graph_id, key_name) VALUES (" + graph_id + ", " +
-		                      QuoteLiteral(property.property_name) + ") ON CONFLICT DO NOTHING");
-		auto source = Column("r", property);
-		Query(connection, "INSERT INTO gql_internal.object_properties (graph_id, object_id, key_id, value) SELECT " +
-		                      graph_id + ", m.object_id, k.key_id, CAST(" + ValueExpression(property, "r") +
-		                      " AS gql_internal.property_value) FROM " + QuoteIdentifier(raw_table) + " r JOIN " +
-		                      QuoteIdentifier(map_table) + " m USING (" + QuoteIdentifier(IMPORT_ROW_ID) +
-		                      ") JOIN gql_internal.property_keys k ON k.graph_id = " + graph_id + " AND k.key_name = " +
-		                      QuoteLiteral(property.property_name) + " WHERE " + source + " IS NOT NULL");
-	}
-}
 
-static void InsertLabels(Connection &connection, const string &graph_id, const string &raw_table,
-                         const string &map_table, const Neo4jField &field, bool split_values) {
-	auto cast_value = "CAST(" + Column("r", field) + " AS VARCHAR)";
-	auto values = split_values ? "unnest(string_split(" + cast_value + ", ';'))" : "unnest([" + cast_value + "])";
-	Query(connection,
-	      "INSERT INTO gql_internal.labels (graph_id, label_name) SELECT DISTINCT " + graph_id +
-	          ", lower(trim(label_name)) FROM " + QuoteIdentifier(raw_table) + " r, " + values +
-	          " labels(label_name) WHERE label_name IS NOT NULL AND trim(label_name) <> '' ON CONFLICT DO NOTHING");
-	Query(connection, "INSERT INTO gql_internal.object_labels (graph_id, object_id, label_id) SELECT DISTINCT " +
-	                      graph_id + ", m.object_id, l.label_id FROM " + QuoteIdentifier(raw_table) + " r JOIN " +
-	                      QuoteIdentifier(map_table) + " m USING (" + QuoteIdentifier(IMPORT_ROW_ID) + "), " + values +
-	                      " labels(label_name) JOIN gql_internal.labels l ON l.graph_id = " + graph_id +
-	                      " AND l.label_name = lower(trim(labels.label_name)) WHERE labels.label_name IS NOT NULL AND "
-	                      "trim(labels.label_name) <> ''");
-}
+	string graph_name;
+	string vertex_path;
+	string edge_path;
+	bool validate;
+};
 
-static unique_ptr<FunctionData> Neo4jImportBind(ClientContext &, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
-	if (input.inputs.size() != 4 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[3].IsNull()) {
-		throw BinderException("gql_load_graph requires graph_name, node_path, optional relationship_path, and format");
+static unique_ptr<FunctionData> CopyGraphBind(ClientContext &, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 4 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
+	    input.inputs[3].IsNull()) {
+		throw BinderException("COPY GRAPH requires a graph, vertex file, edge file, and validation mode");
 	}
 	auto graph_name = input.inputs[0].GetValue<string>();
-	auto node_path = input.inputs[1].GetValue<string>();
-	auto has_relationships = !input.inputs[2].IsNull() && !input.inputs[2].GetValue<string>().empty();
-	auto relationship_path = has_relationships ? input.inputs[2].GetValue<string>() : string();
-	auto format = StringUtil::Lower(input.inputs[3].GetValue<string>());
-	if (format != "csv" && format != "parquet") {
-		throw BinderException("gql_load_graph format must be 'csv' or 'parquet'");
-	}
-	if (graph_name.empty() || node_path.empty()) {
-		throw BinderException("gql_load_graph graph_name and node_path must be non-empty");
+	auto vertex_path = input.inputs[1].GetValue<string>();
+	auto edge_path = input.inputs[2].GetValue<string>();
+	if (graph_name.empty() || vertex_path.empty() || edge_path.empty()) {
+		throw BinderException("COPY GRAPH graph and file names cannot be empty");
 	}
 	names = {"success", "graph_name", "vertex_count", "edge_count"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT};
-	return make_uniq<Neo4jImportBindData>(graph_name, node_path, relationship_path, format, has_relationships);
+	return make_uniq<CopyGraphBindData>(graph_name, vertex_path, edge_path, input.inputs[3].GetValue<bool>());
 }
 
-static unique_ptr<GlobalTableFunctionState> Neo4jImportInit(ClientContext &, TableFunctionInitInput &) {
-	return make_uniq<Neo4jImportState>();
+static string InferFileFormat(const string &path) {
+	auto lower = StringUtil::Lower(path);
+	if (EndsWith(lower, ".parquet")) {
+		return "parquet";
+	}
+	if (EndsWith(lower, ".csv") || EndsWith(lower, ".csv.gz") || EndsWith(lower, ".csv.zst")) {
+		return "csv";
+	}
+	throw InvalidInputException("COPY GRAPH cannot infer the format of '%s'; expected CSV, CSV.GZ, CSV.ZST, or "
+	                            "Parquet",
+	                            path);
 }
 
-static void Neo4jImport(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
-	auto &state = input.global_state->Cast<Neo4jImportState>();
+static string NativeValueExpression(const Neo4jField &field, const string &alias) {
+	auto source = Column(alias, field);
+	auto type = StringUtil::Lower(field.declared_type);
+	if (EndsWith(type, "[]")) {
+		auto element_type = type.substr(0, type.size() - 2);
+		string target_type;
+		if (element_type == "boolean" || element_type == "bool") {
+			target_type = "BOOLEAN";
+		} else if (element_type == "byte" || element_type == "short" || element_type == "int" ||
+		           element_type == "integer" || element_type == "long") {
+			target_type = "BIGINT";
+		} else if (element_type == "float" || element_type == "double") {
+			target_type = "DOUBLE";
+		} else if (element_type == "string" || element_type == "char") {
+			target_type = "VARCHAR";
+		} else {
+			throw InvalidInputException("COPY GRAPH list property type '%s' is not supported yet",
+			                            field.declared_type);
+		}
+		if (field.source_type.id() == LogicalTypeId::LIST) {
+			return "CAST(" + source + " AS " + target_type + "[])";
+		}
+		return "CASE WHEN " + source + " IS NULL THEN NULL WHEN " + source + " = '' THEN []::" + target_type +
+		       "[] ELSE list_transform(string_split(" + source + ", ';'), item -> CAST(item AS " + target_type +
+		       ")) END";
+	}
+	if (type.empty()) {
+		return "CAST(" + source + " AS " + field.source_type.ToString() + ")";
+	}
+	if (type == "boolean" || type == "bool") {
+		return "CAST(" + source + " AS BOOLEAN)";
+	}
+	if (type == "byte" || type == "short" || type == "int" || type == "integer" || type == "long") {
+		return "CAST(" + source + " AS BIGINT)";
+	}
+	if (type == "float" || type == "double") {
+		return "CAST(" + source + " AS DOUBLE)";
+	}
+	if (type == "string" || type == "char") {
+		return "CAST(" + source + " AS VARCHAR)";
+	}
+	if (type == "variant") {
+		auto payload = "substring(" + source + ", 3)";
+		return "CASE WHEN " + source + " IS NULL THEN NULL WHEN left(" + source +
+		       ", 2) = 'i:' THEN CAST(CAST(" + payload + " AS BIGINT) AS VARIANT) WHEN left(" + source +
+		       ", 2) = 'd:' THEN CAST(CAST(" + payload + " AS DOUBLE) AS VARIANT) WHEN left(" + source +
+		       ", 2) = 'b:' THEN CAST(CAST(" + payload + " AS BOOLEAN) AS VARIANT) WHEN left(" + source +
+		       ", 2) = 's:' THEN CAST(" + payload + " AS VARIANT) ELSE error('Invalid COPY GRAPH VARIANT encoding') END";
+	}
+	if (type == "date") {
+		return "CAST(" + source + " AS DATE)";
+	}
+	if (type == "localtime") {
+		return "CAST(" + source + " AS TIME_NS)";
+	}
+	if (type == "localdatetime") {
+		return "CAST(" + source + " AS TIMESTAMP_NS)";
+	}
+	if (type == "datetime") {
+		return "CAST(" + source + " AS TIMESTAMPTZ)";
+	}
+	throw InvalidInputException("COPY GRAPH property type '%s' is not supported yet", field.declared_type);
+}
+
+static void ValidateNativeProperties(const vector<Neo4jField> &properties, const char *kind) {
+	unordered_set<string> names;
+	for (const auto &property : properties) {
+		if (StringUtil::StartsWith(property.property_name, "__gql_")) {
+			throw InvalidInputException("COPY GRAPH %s property '%s' uses the reserved __gql_ prefix", kind,
+			                            property.property_name);
+		}
+		if (!names.insert(property.property_name).second) {
+			throw InvalidInputException("COPY GRAPH %s property '%s' is declared more than once", kind,
+			                            property.property_name);
+		}
+	}
+}
+
+static string NativePropertyProjection(const vector<Neo4jField> &properties, const string &alias) {
+	string result;
+	for (const auto &property : properties) {
+		result += ", " + NativeValueExpression(property, alias) + " AS " + QuoteIdentifier(property.property_name);
+	}
+	return result;
+}
+
+static string NativeLabelExpression(const Neo4jSchema &schema, const string &alias) {
+	if (schema.labels.empty()) {
+		return "CAST('' AS VARCHAR)";
+	}
+	auto label = "CAST(" + Column(alias, schema.labels[0]) + " AS VARCHAR)";
+	return "array_to_string(list_transform(string_split(" + label +
+	       ", ';'), item -> lower(trim(item))), ';')";
+}
+
+static void ValidateNativeInput(Connection &connection, const Neo4jSchema &nodes, const Neo4jSchema &edges) {
+	if (nodes.labels.size() > 1) {
+		throw InvalidInputException("COPY GRAPH currently supports at most one node :LABEL column");
+	}
+	auto node_id = ExternalId("n", nodes.id);
+	auto node_validation = Query(connection, "SELECT count(*), count(*) FILTER (WHERE " + node_id +
+	                                             " IS NULL OR trim(" + node_id + ") = ''), count(DISTINCT " + node_id +
+	                                             ") FROM gql_copy_nodes n");
+	auto node_count = node_validation->GetValue(0, 0).GetValue<int64_t>();
+	if (node_validation->GetValue(1, 0).GetValue<int64_t>() != 0) {
+		throw InvalidInputException("Neo4j node :ID values must be non-null and non-empty");
+	}
+	if (node_validation->GetValue(2, 0).GetValue<int64_t>() != node_count) {
+		throw InvalidInputException("Neo4j node :ID values must be unique");
+	}
+	auto relationship_type = ExternalId("r", edges.types[0]);
+	auto start_id = ExternalId("r", edges.start_id);
+	auto end_id = ExternalId("r", edges.end_id);
+	auto edge_validation = Query(
+	    connection, "SELECT count(*) FILTER (WHERE " + relationship_type + " IS NULL OR trim(" + relationship_type +
+	                    ") = ''), count(*) FILTER (WHERE " + start_id + " IS NULL OR " + end_id + " IS NULL OR n." +
+	                    QuoteIdentifier(IMPORT_ROW_ID) + " IS NULL OR n2." + QuoteIdentifier(IMPORT_ROW_ID) +
+	                    " IS NULL) FROM gql_copy_edges r LEFT JOIN gql_copy_nodes n ON " + start_id + " = " + node_id +
+	                    " LEFT JOIN gql_copy_nodes n2 ON " + end_id + " = " + ExternalId("n2", nodes.id));
+	if (edge_validation->GetValue(0, 0).GetValue<int64_t>() != 0) {
+		throw InvalidInputException("COPY GRAPH relationship :TYPE values must be non-null and non-empty");
+	}
+	if (edge_validation->GetValue(1, 0).GetValue<int64_t>() != 0) {
+		throw InvalidInputException("COPY GRAPH relationship endpoints must reference imported node :ID values");
+	}
+}
+
+static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<CopyGraphState>();
 	if (state.done) {
 		return;
 	}
-	auto &data = input.bind_data->Cast<Neo4jImportBindData>();
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("COPY GRAPH is not eligible inside an explicit transaction");
+	}
+	auto &data = input.bind_data->Cast<CopyGraphBindData>();
 	Connection connection(*context.db);
+	GqlEnsureStorage(connection);
 	idx_t vertex_count = 0;
 	idx_t edge_count = 0;
+	string qualified_vertex;
+	string qualified_edge;
 	connection.BeginTransaction();
 	try {
-		auto graph = Query(connection, "SELECT graph_id FROM gql_internal.graphs WHERE graph_name = " +
+		auto graph = Query(connection, "SELECT g.graph_id, gs.storage_mode, "
+		                               "(SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = "
+		                               "g.graph_id) FROM gql_internal.graphs g JOIN gql_internal.graph_storage gs "
+		                               "USING (graph_id) WHERE g.graph_name = " +
 		                                   QuoteLiteral(data.graph_name));
 		if (graph->RowCount() == 0) {
-			throw InvalidInputException("Graph '%s' does not exist; create it before importing", data.graph_name);
+			throw InvalidInputException("Graph '%s' does not exist; create it before COPY GRAPH", data.graph_name);
 		}
-		auto graph_id = graph->GetValue(0, 0).ToString();
-		if (ScalarCount(connection, "SELECT count(*) FROM gql_internal.objects WHERE graph_id = " + graph_id) != 0) {
-			throw InvalidInputException(
-			    "Graph '%s' is not empty; the initial Neo4j importer only supports full imports", data.graph_name);
+		if (graph->GetValue(1, 0).GetValue<string>() != "EMPTY" ||
+		    graph->GetValue(2, 0).GetValue<int64_t>() != 0) {
+			throw InvalidInputException("Graph '%s' must be empty before COPY GRAPH", data.graph_name);
 		}
-
-		CreateRawTable(connection, "gql_neo4j_nodes", data.node_path, data.format);
-		auto node_schema = ReadSchema(connection, "gql_neo4j_nodes", false);
-		ValidateNodeIds(connection, "gql_neo4j_nodes", node_schema.id);
-		vertex_count = ScalarCount(connection, "SELECT count(*) FROM gql_neo4j_nodes");
-		Query(connection,
-		      "CREATE TEMP TABLE gql_neo4j_node_map AS SELECT " + QuoteIdentifier(IMPORT_ROW_ID) + ", CAST(" +
-		          QuoteIdentifier(node_schema.id.column_name) +
-		          " AS VARCHAR) AS external_id, nextval('gql_internal.object_id_seq')::UBIGINT AS object_id "
-		          "FROM gql_neo4j_nodes");
-		Query(connection,
-		      "INSERT INTO gql_internal.objects (object_id, graph_id, kind, source_id, target_id) SELECT object_id, " +
-		          graph_id + ", 0, NULL, NULL FROM gql_neo4j_node_map");
-		for (const auto &label : node_schema.labels) {
-			InsertLabels(connection, graph_id, "gql_neo4j_nodes", "gql_neo4j_node_map", label, true);
+		auto graph_id = graph->GetValue(0, 0).GetValue<uint64_t>();
+		CreateRawTable(connection, "gql_copy_nodes", data.vertex_path, InferFileFormat(data.vertex_path));
+		CreateRawTable(connection, "gql_copy_edges", data.edge_path, InferFileFormat(data.edge_path));
+		auto nodes = ReadSchema(connection, "gql_copy_nodes", false);
+		auto edges = ReadSchema(connection, "gql_copy_edges", true);
+		if (edges.start_id.id_group != nodes.id.id_group || edges.end_id.id_group != nodes.id.id_group) {
+			throw InvalidInputException("COPY GRAPH relationship ID groups must match the node :ID group");
 		}
-		InsertProperties(connection, graph_id, "gql_neo4j_nodes", "gql_neo4j_node_map", node_schema.properties);
-
-		if (data.has_relationships) {
-			CreateRawTable(connection, "gql_neo4j_relationships", data.relationship_path, data.format);
-			auto relationship_schema = ReadSchema(connection, "gql_neo4j_relationships", true);
-			if (relationship_schema.start_id.id_group != node_schema.id.id_group ||
-			    relationship_schema.end_id.id_group != node_schema.id.id_group) {
-				throw InvalidInputException("Neo4j relationship ID groups must match the node :ID group");
-			}
-			auto start_id = ExternalId("r", relationship_schema.start_id);
-			auto end_id = ExternalId("r", relationship_schema.end_id);
-			auto relationship_type = ExternalId("r", relationship_schema.types[0]);
-			if (ScalarCount(connection, "SELECT count(*) FROM gql_neo4j_relationships r WHERE " + relationship_type +
-			                                " IS NULL OR trim(" + relationship_type + ") = ''") != 0) {
-				throw InvalidInputException("Neo4j relationship :TYPE values must be non-null and non-empty");
-			}
-			if (ScalarCount(connection,
-			                "SELECT count(*) FROM gql_neo4j_relationships r LEFT JOIN gql_neo4j_node_map s ON " +
-			                    start_id + " = s.external_id LEFT JOIN gql_neo4j_node_map t ON " + end_id +
-			                    " = t.external_id WHERE " + start_id + " IS NULL OR " + end_id +
-			                    " IS NULL OR s.object_id IS NULL OR t.object_id IS NULL") != 0) {
-				throw InvalidInputException("Neo4j relationship endpoints must reference imported node :ID values");
-			}
-			edge_count = ScalarCount(connection, "SELECT count(*) FROM gql_neo4j_relationships");
-			Query(connection,
-			      "CREATE TEMP TABLE gql_neo4j_relationship_map AS SELECT r." + QuoteIdentifier(IMPORT_ROW_ID) +
-			          ", nextval('gql_internal.object_id_seq')::UBIGINT AS object_id, s.object_id AS source_id, "
-			          "t.object_id AS target_id FROM gql_neo4j_relationships r JOIN gql_neo4j_node_map s ON " +
-			          start_id + " = s.external_id JOIN gql_neo4j_node_map t ON " + end_id + " = t.external_id");
-			Query(connection, "INSERT INTO gql_internal.objects (object_id, graph_id, kind, source_id, target_id) "
-			                  "SELECT object_id, " +
-			                      graph_id + ", 1, source_id, target_id FROM gql_neo4j_relationship_map");
-			InsertLabels(connection, graph_id, "gql_neo4j_relationships", "gql_neo4j_relationship_map",
-			             relationship_schema.types[0], false);
-			InsertProperties(connection, graph_id, "gql_neo4j_relationships", "gql_neo4j_relationship_map",
-			                 relationship_schema.properties);
+		if (nodes.labels.size() > 1) {
+			throw InvalidInputException("COPY GRAPH currently supports at most one node :LABEL column");
+		}
+		ValidateNativeProperties(nodes.properties, "vertex");
+		ValidateNativeProperties(edges.properties, "edge");
+		if (data.validate) {
+			ValidateNativeInput(connection, nodes, edges);
 		}
 
-		Query(connection,
-		      "UPDATE gql_internal.graphs SET graph_version = graph_version + 1 WHERE graph_id = " + graph_id);
+		Query(connection, "CREATE SCHEMA IF NOT EXISTS gql_data");
+		auto vertex_table = "graph_" + to_string(graph_id) + "_vertices";
+		auto edge_table = "graph_" + to_string(graph_id) + "_edges";
+		auto current_catalog = Query(connection, "SELECT current_database()")->GetValue(0, 0).GetValue<string>();
+		qualified_vertex = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(vertex_table);
+		qualified_edge = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(edge_table);
+
+		Query(connection, "CREATE TABLE " + qualified_vertex + " AS SELECT row_number() OVER ()::UBIGINT AS " +
+		                      QuoteIdentifier("__gql_id") + ", " + ExternalId("n", nodes.id) + " AS " +
+		                      QuoteIdentifier("__gql_external_id") + ", " + NativeLabelExpression(nodes, "n") + " AS " +
+		                      QuoteIdentifier("__gql_label") + NativePropertyProjection(nodes.properties, "n") +
+		                      " FROM gql_copy_nodes n");
+		vertex_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_vertex);
+		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
+		                                                                     "_vertex_id_seq") +
+		                      " START " + to_string(vertex_count + 1));
+
+		auto start_id = ExternalId("r", edges.start_id);
+		auto end_id = ExternalId("r", edges.end_id);
+		auto relationship_type = ExternalId("r", edges.types[0]);
+		Query(connection, "CREATE TABLE " + qualified_edge + " AS SELECT row_number() OVER ()::UBIGINT AS " +
+		                      QuoteIdentifier("__gql_edge_id") + ", s." + QuoteIdentifier("__gql_id") + " AS " +
+		                      QuoteIdentifier("__gql_source_id") + ", t." + QuoteIdentifier("__gql_id") + " AS " +
+		                      QuoteIdentifier("__gql_target_id") + ", lower(trim(" + relationship_type + ")) AS " +
+		                      QuoteIdentifier("__gql_type") + NativePropertyProjection(edges.properties, "r") +
+		                      " FROM gql_copy_edges r LEFT JOIN " + qualified_vertex + " s ON " + start_id + " = s." +
+		                      QuoteIdentifier("__gql_external_id") + " LEFT JOIN " + qualified_vertex + " t ON " +
+		                      end_id + " = t." + QuoteIdentifier("__gql_external_id"));
+		edge_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_edge);
+		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
+		                                                                     "_edge_id_seq") +
+		                      " START " + to_string(edge_count + 1));
+
+		GqlAttachManagedGraphTables(connection, data.graph_name, qualified_vertex, "__gql_id", "__gql_label",
+		                            qualified_edge, "__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type",
+		                            false);
 		connection.Commit();
 	} catch (...) {
 		if (connection.HasActiveTransaction()) {
@@ -503,7 +517,6 @@ static void Neo4jImport(ClientContext &context, TableFunctionInput &input, DataC
 		}
 		throw;
 	}
-
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	output.SetValue(1, 0, Value(data.graph_name));
@@ -512,12 +525,12 @@ static void Neo4jImport(ClientContext &context, TableFunctionInput &input, DataC
 	state.done = true;
 }
 
-TableFunction GqlGraphImportFunction() {
-	TableFunction function("gql_load_graph",
-	                       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                       Neo4jImport);
-	function.bind = Neo4jImportBind;
-	function.init_global = Neo4jImportInit;
+TableFunction GqlCopyGraphFunction() {
+	TableFunction function("gql_copy_graph_native",
+	                       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN},
+	                       CopyGraph);
+	function.bind = CopyGraphBind;
+	function.init_global = CopyGraphInit;
 	return function;
 }
 

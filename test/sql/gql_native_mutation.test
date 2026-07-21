@@ -1,0 +1,200 @@
+# name: test/sql/gql_native_mutation.test
+# description: Native-table SET, REMOVE, DELETE, and DETACH DELETE
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', 42, 'London', 'Person'),
+        ('p2', 'Grace', 37, 'New York', 'Person'),
+        ('p3', 'Solo', 10, 'Paris', 'Person')
+    ) nodes("external_id:ID(People)", "name:string", "age:int", "city:string", ":LABEL")
+) TO '__TEST_DIR__/gql_native_mutation_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS', 2020)
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE", "since:int")
+) TO '__TEST_DIR__/gql_native_mutation_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH native_mutations ANY
+
+statement ok
+COPY GRAPH native_mutations FROM (
+    VERTICES '__TEST_DIR__/gql_native_mutation_nodes.csv',
+    EDGES '__TEST_DIR__/gql_native_mutation_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH native_mutations
+
+# Multiple SET items share one pre-mutation snapshot. Expressions remain
+# ordinary typed DuckDB expressions over the managed wide table.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = person.age + 1, person.city = 'Cambridge'
+
+query IT
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age, person.city
+----
+43	Cambridge
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+REMOVE person.city
+
+query T
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.city
+----
+NULL
+
+# Labels share one native VARCHAR cell as a semicolon-delimited set. SET adds a
+# missing member idempotently and REMOVE deletes only the requested member.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person:Temporary
+
+query II
+MATCH (person:Person&Temporary)
+RETURN count(*), count(DISTINCT person.name)
+----
+1	1
+
+statement ok
+MATCH (person:Person&Temporary) WHERE person.name = 'Solo'
+SET person:Temporary
+
+query I
+MATCH (person:Person&Temporary)
+RETURN count(*)
+----
+1
+
+statement ok
+MATCH (person:Temporary) WHERE person.name = 'Solo'
+REMOVE person:Temporary
+
+query I
+MATCH (person:Temporary)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN count(*)
+----
+1
+
+# All generated statements participate in the caller transaction.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = 99
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age
+----
+99
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age
+----
+43
+
+# A later generated DML failure rolls the earlier item back in autocommit.
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.city = 'Should Roll Back', person.age = 'not an integer'
+----
+<REGEX>:.*Could not convert string.*
+
+query IT
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age, person.city
+----
+43	NULL
+
+# Plain node deletion rejects incident edges.
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+DELETE person
+----
+<REGEX>:.*use DETACH DELETE.*
+
+query I
+MATCH (person:Person)
+RETURN count(*)
+----
+3
+
+# Edge deletion is a direct DuckDB DELETE from the managed edge table.
+statement ok
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+DELETE edge
+
+query I
+MATCH (:Person)-[:KNOWS]->(:Person)
+RETURN count(*)
+----
+0
+
+# Restore one edge through SQL, then verify DETACH DELETE removes it and the
+# target vertex atomically.
+statement ok
+INSERT INTO gql_data.graph_1_edges VALUES (2, 1, 2, 'knows', 2021)
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+DETACH DELETE person
+
+query I
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN count(*)
+----
+0
+
+query I
+MATCH (:Person)-[:KNOWS]->(:Person)
+RETURN count(*)
+----
+0
+
+# An isolated node delete is rollback-safe inside an explicit transaction.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+DELETE person
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN count(*)
+----
+0
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN count(*)
+----
+1
+
+statement ok
+DROP GRAPH native_mutations

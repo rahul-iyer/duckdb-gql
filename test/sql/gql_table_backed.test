@@ -1,0 +1,347 @@
+# name: test/sql/gql_table_backed.test
+# description: Native MATCH, VLP, and CSR over COPY GRAPH managed tables
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'airport', 'ATL', 'Atlanta'),
+        ('2', 'airport', 'AUS', 'Austin'),
+        ('3', 'country', 'US', 'United States')
+    ) vertices("external_id:ID", ":LABEL", "code:string", "city:string")
+) TO '__TEST_DIR__/gql_native_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'route', 809),
+        ('2', '1', 'route', 809)
+    ) edges(":START_ID", ":END_ID", ":TYPE", "distance:int")
+) TO '__TEST_DIR__/gql_native_edges.csv' (FORMAT CSV, HEADER)
+
+query IT
+CREATE GRAPH table_native ANY
+----
+true	table_native
+
+query ITII
+COPY GRAPH table_native FROM (
+    VERTICES '__TEST_DIR__/gql_native_vertices.csv',
+    EDGES '__TEST_DIR__/gql_native_edges.csv'
+) FORMAT NEO4J
+----
+true	table_native	3	2
+
+# COPY GRAPH stores graph data in managed native DuckDB tables.
+query TI
+SELECT storage_mode,
+       (SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = g.graph_id)
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_storage gs USING (graph_id)
+WHERE graph_name = 'table_native'
+----
+TABLE_BACKED	2
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_property_mappings pm
+JOIN gql_internal.graph_element_tables et USING (element_table_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE graph_name = 'table_native'
+----
+4
+
+query II
+SELECT vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'table_native'
+----
+3	2
+
+query IT
+SESSION SET GRAPH table_native
+----
+true	table_native
+
+# INSERT remains pending. Core matched mutations lower directly to the managed
+# native tables and never fall back to removed EAV DML.
+statement error
+INSERT (:airport {code: 'LAX'})
+----
+<REGEX>:.*GQL INSERT on native graph tables is not implemented yet.*
+
+statement ok
+MATCH (a:airport) SET a.city = 'Changed'
+
+query T
+MATCH (a:airport) WHERE a.code = 'ATL'
+RETURN a.city
+----
+Changed
+
+statement ok
+MATCH (a:airport) WHERE a.code = 'ATL'
+SET a.city = 'Atlanta'
+
+# Labels, endpoints, typed properties, filters, and projections use the wide tables.
+query TTI
+MATCH (a:airport)-[r:route]->(b:airport)
+WHERE a.code = 'ATL' AND r.distance >= 800
+RETURN a.code, b.code, r.distance
+----
+ATL	AUS	809
+
+query TT rowsort
+MATCH (a:airport)<-[r:route]-(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code, a.city
+----
+AUS	Atlanta
+
+# Writes through ordinary SQL are visible to later GQL without graph re-import.
+statement ok
+INSERT INTO gql_data.graph_1_vertices VALUES (4, '4', 'airport', '4', 'SFO', 'San Francisco')
+
+statement ok
+INSERT INTO gql_data.graph_1_edges VALUES (3, 1, 4, 'route', 2139)
+
+query II
+SELECT vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'table_native'
+----
+4	3
+
+query TI
+MATCH (a:airport)-[r:route]->(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code, r.distance
+ORDER BY r.distance
+----
+AUS	809
+SFO	2139
+
+# Native recursive DuckDB execution remains the default. It preserves ordered
+# different-edge/trail paths, labels, direction, minimum depth, and zero-hop
+# star semantics without requiring a CSR snapshot.
+query T rowsort
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+AUS
+SFO
+SFO
+
+# Projecting the recursive source keeps its authoritative outer table join.
+query TT rowsort
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL'
+RETURN a.code, b.code
+----
+ATL	ATL
+ATL	AUS
+ATL	SFO
+ATL	SFO
+
+query T rowsort
+MATCH (a:airport)-[:route]->{2,}(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+SFO
+
+query I
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL' AND b.code = 'SFO'
+RETURN COUNT(*)
+----
+2
+
+query T rowsort
+MATCH (a:airport)<-[:route]-+(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+AUS
+
+query T rowsort
+MATCH (a:airport)-[:route]->*(a)
+RETURN a.code
+----
+ATL
+ATL
+AUS
+AUS
+SFO
+
+# Star keeps its zero-hop row even when recursive expansion finds no edge.
+query T
+MATCH (a:airport)-[:missing]->*(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+
+# A table-backed CSR is built explicitly outside query execution, then an
+# eligible hint reuses it for the same different-edge/trail semantics.
+
+statement error
+MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+has not been built on this connection
+
+query III
+SELECT vertex_count, edge_count, build_count
+FROM gql_build_csr('table_native')
+----
+4	3	1
+
+query T rowsort
+MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+AUS
+SFO
+SFO
+
+query III
+SELECT vertex_count, edge_count, cached
+FROM gql_csr_stats('table_native')
+----
+4	3	true
+
+query II rowsort
+SELECT * FROM gql_neighbors('table_native', 1, 'out')
+----
+2	1
+4	3
+
+query T rowsort
+MATCH /*+ CSR */ (a:airport)-[:route]->{2,}(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+SFO
+
+query T rowsort
+MATCH /*+ CSR */ (a:airport)<-[:route]-+(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+AUS
+
+query T rowsort
+MATCH /*+ CSR */ (a:airport)-[:route]->*(a)
+RETURN a.code
+----
+ATL
+ATL
+AUS
+AUS
+SFO
+
+# Star keeps its zero-hop row even when the requested edge type is absent.
+query T
+MATCH /*+ CSR */ (a:airport)-[:missing]->*(b:airport)
+WHERE a.code = 'ATL'
+RETURN b.code
+----
+ATL
+
+# Direct SQL topology changes become visible after the explicitly managed
+# offline snapshot is rebuilt.
+query I
+MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'SFO'
+RETURN COUNT(*)
+----
+0
+
+statement ok
+INSERT INTO gql_data.graph_1_edges VALUES (4, 4, 2, 'route', 1500)
+
+# Native recursion sees direct SQL topology changes immediately, independently
+# of the explicitly managed CSR snapshot.
+query T rowsort
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'SFO'
+RETURN b.code
+----
+ATL
+AUS
+AUS
+SFO
+
+query III
+SELECT vertex_count, edge_count, build_count
+FROM gql_build_csr('table_native')
+----
+4	4	2
+
+query T
+MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'SFO'
+RETURN b.code
+ORDER BY b.code
+----
+ATL
+AUS
+AUS
+SFO
+
+# Hints never silently change ineligible query shapes or transaction semantics.
+statement error
+MATCH /*+ CSR */ (a:airport)-[:route]->(b:airport)
+RETURN b.code
+----
+CSR execution hint currently requires one anonymous unbounded directed path factor
+
+statement error
+MATCH /*+ UNKNOWN */ (a:airport) RETURN a.code
+----
+Unknown GQL execution hint
+
+statement ok
+BEGIN
+
+statement error
+MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
+RETURN b.code
+----
+CSR execution hint is not eligible inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+# Reading an absent graph property yields NULL for every matched element.
+query T rowsort
+MATCH (a:airport) RETURN a.missing
+----
+NULL
+NULL
+NULL
+
+# Managed graph tables are graph-owned and removed with the graph.
+query IT
+DROP GRAPH table_native
+----
+true	table_native
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'gql_data' AND table_name LIKE 'graph_1_%'
+----
+0

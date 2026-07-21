@@ -1,0 +1,135 @@
+# name: test/sql/gql_feature_merge.test
+# description: Runnable SQLLogicTest ports of supported openCypher MERGE scenarios
+# group: [gql]
+#
+# Source corpus: tck/features/clauses/merge/Merge1.feature at
+# openCypher revision 677cbafabb8c3c5eed458fd3b1ec0daec8d67d23.
+#
+# The source scenarios use an empty in-memory graph, GQL INSERT setup, and a
+# trailing RETURN on MERGE. This port uses one isolated managed graph loaded by
+# COPY GRAPH, assigns disjoint labels/properties to each scenario, and checks
+# the post-state with a separate MATCH query. Those adaptations preserve the
+# MERGE match-versus-create behavior and side-effect assertions exercised here.
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('anchor', 0, 'Anchor'),
+        ('label42', 42, 'TheLabel'),
+        ('x1', 1, 'X'),
+        ('x2', 2, 'X'),
+        ('other42', 42, 'Other')
+    ) nodes("external_id:ID(MergePort)", "num:int", ":LABEL")
+) TO '__TEST_DIR__/gql_feature_merge_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('anchor', 'anchor', 'IGNORE')
+    ) relationships(":START_ID(MergePort)", ":END_ID(MergePort)", ":TYPE")
+) TO '__TEST_DIR__/gql_feature_merge_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH feature_merge ANY
+
+statement ok
+COPY GRAPH feature_merge FROM (
+    VERTICES '__TEST_DIR__/gql_feature_merge_nodes.csv',
+    EDGES '__TEST_DIR__/gql_feature_merge_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH feature_merge
+
+# Source: tck/features/clauses/merge/Merge1.feature:46 scenario [2]
+# A label absent from the graph takes MERGE's create branch exactly once.
+query I
+MATCH (:FreshLabel)
+RETURN count(*)
+----
+0
+
+statement ok
+MERGE (:FreshLabel)
+
+query I
+MATCH (:FreshLabel)
+RETURN count(*)
+----
+1
+
+# Source: tck/features/clauses/merge/Merge1.feature:60 scenario [3]
+# An existing label match preserves the existing node and its property.
+statement ok
+MERGE (:TheLabel)
+
+query I
+MATCH (node:TheLabel)
+RETURN node.num
+----
+42
+
+query I
+MATCH (:TheLabel)
+RETURN count(*)
+----
+1
+
+# Source: tck/features/clauses/merge/Merge1.feature:76 scenario [4]
+# A property-only miss creates a node with that property.
+query I
+MATCH (node) WHERE node.num = 43
+RETURN count(*)
+----
+0
+
+statement ok
+MERGE ({num: 43})
+
+query I
+MATCH (node) WHERE node.num = 43
+RETURN count(*)
+----
+1
+
+# Source: tck/features/clauses/merge/Merge1.feature:94 scenario [5]
+# The existing unlabeled num=43 node does not satisfy the label-and-property
+# pattern, so this creates a distinct TheLabel node.
+statement ok
+MERGE (:TheLabel {num: 43})
+
+query I
+MATCH (node) WHERE node.num = 43
+RETURN count(*)
+----
+2
+
+query I
+MATCH (node:TheLabel) WHERE node.num = 43
+RETURN count(*)
+----
+1
+
+# Source: tck/features/clauses/merge/Merge1.feature:112 scenario [6]
+# An existing label-and-property match has no side effects.
+statement ok
+MERGE (:TheLabel {num: 42})
+
+query I
+MATCH (node:TheLabel) WHERE node.num = 42
+RETURN count(*)
+----
+1
+
+# Source: tck/features/clauses/merge/Merge1.feature:128 scenario [7]
+# MERGE succeeds without creating a node when multiple nodes match the label.
+statement ok
+MERGE (:X)
+
+query I
+MATCH (:X)
+RETURN count(*)
+----
+2

@@ -4,6 +4,6 @@
 
 namespace duckdb {
 
-TableFunction GqlGraphImportFunction();
+TableFunction GqlCopyGraphFunction();
 
 } // namespace duckdb

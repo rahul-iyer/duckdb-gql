@@ -5,7 +5,8 @@
 namespace duckdb {
 
 TableFunction GqlNeighborsFunction();
+TableFunction GqlBuildCsrFunction();
 TableFunction GqlCsrStatsFunction();
-TableFunction GqlMatchFunction();
+TableFunction GqlCsrPathFunction();
 
 } // namespace duckdb

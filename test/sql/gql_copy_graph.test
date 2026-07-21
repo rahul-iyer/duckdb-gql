@@ -1,0 +1,236 @@
+# name: test/sql/gql_copy_graph.test
+# description: Managed native wide-table loading through COPY GRAPH
+# group: [gql]
+
+require gql
+
+require parquet
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', '42', 'Person'),
+        ('p2', 'Grace', '37', 'Person')
+    ) nodes("external_id:ID(People)", "name:string", "age:int", ":LABEL")
+) TO '__TEST_DIR__/gql_copy_graph_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS', '2020')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE", "since:int")
+) TO '__TEST_DIR__/gql_copy_graph_edges.csv' (FORMAT CSV, HEADER)
+
+query IT
+CREATE GRAPH managed_native ANY
+----
+true	managed_native
+
+query ITII
+COPY GRAPH managed_native FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
+) FORMAT NEO4J OPTIONS (VALIDATE TRUE)
+----
+true	managed_native	2	1
+
+query TI
+SELECT storage_mode,
+       (SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = g.graph_id)
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_storage gs USING (graph_id)
+WHERE graph_name = 'managed_native'
+----
+TABLE_BACKED	2
+
+query TT rowsort
+SELECT element_kind, ownership
+FROM gql_internal.graph_element_tables et
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE graph_name = 'managed_native'
+----
+EDGE	MANAGED
+VERTEX	MANAGED
+
+query II
+SELECT vertex_count, edge_count
+FROM gql_graphs()
+WHERE graph_name = 'managed_native'
+----
+2	1
+
+query IT
+SESSION SET GRAPH managed_native
+----
+true	managed_native
+
+query TTII
+MATCH (a:Person)-[e:KNOWS]->(b:Person)
+RETURN a.name, b.name, a.age, e.since
+----
+Ada	Grace	42	2020
+
+# Managed native tables use the same recursive DuckDB VLP lowering.
+query TT rowsort
+MATCH (a:Person)-[:KNOWS]->*(b:Person)
+WHERE a.name = 'Ada'
+RETURN a.name, b.name
+----
+Ada	Ada
+Ada	Grace
+
+# COPY GRAPH properties remain ordinary typed DuckDB columns.
+query TT rowsort
+SELECT pm.property_name, pm.gql_type
+FROM gql_internal.graph_property_mappings pm
+JOIN gql_internal.graph_element_tables et USING (element_table_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE graph_name = 'managed_native'
+----
+age	BIGINT
+external_id	VARCHAR
+name	VARCHAR
+since	BIGINT
+
+# COPY GRAPH is a full-load operation and cannot overwrite an existing graph.
+statement error
+COPY GRAPH managed_native FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
+) FORMAT NEO4J
+----
+<REGEX>:.*must be empty before COPY GRAPH.*
+
+# Strict validation failures roll back both owned tables and catalog metadata.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('missing', 'p2', 'KNOWS')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE")
+) TO '__TEST_DIR__/gql_copy_graph_bad_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH failed_native ANY
+
+statement error
+COPY GRAPH failed_native FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_bad_edges.csv'
+) FORMAT NEO4J OPTIONS (VALIDATE TRUE)
+----
+<REGEX>:.*relationship endpoints must reference imported node.*
+
+query TII
+SELECT storage_mode,
+       (SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = g.graph_id),
+       (SELECT count(*) FROM information_schema.tables WHERE table_schema = 'gql_data' AND table_name LIKE 'graph_2_%')
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_storage gs USING (graph_id)
+WHERE graph_name = 'failed_native'
+----
+EMPTY	0	0
+
+# Strict validation also rejects duplicate external IDs before endpoint joins.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', 'Person'),
+        ('p1', 'Duplicate', 'Person')
+    ) nodes("external_id:ID(People)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/gql_copy_graph_duplicate_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH duplicate_native ANY
+
+statement error
+COPY GRAPH duplicate_native FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_duplicate_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
+) FORMAT NEO4J
+----
+<REGEX>:.*node :ID values must be unique.*
+
+query TI
+SELECT storage_mode,
+       (SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = g.graph_id)
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_storage gs USING (graph_id)
+WHERE graph_name = 'duplicate_native'
+----
+EMPTY	0
+
+# Managed tables are graph-owned and are removed with the graph.
+statement ok
+DROP GRAPH managed_native
+
+query I
+SELECT count(*)
+FROM information_schema.tables
+WHERE table_schema = 'gql_data' AND table_name LIKE 'graph_1_%'
+----
+0
+
+query I
+SELECT count(*) FROM gql_graphs() WHERE graph_name = 'managed_native'
+----
+0
+
+# The loader is autocommit-only until it can participate in caller transactions.
+statement ok
+CREATE GRAPH explicit_copy ANY
+
+statement ok
+BEGIN
+
+statement error
+COPY GRAPH explicit_copy FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
+) FORMAT NEO4J
+----
+<REGEX>:.*not eligible inside an explicit transaction.*
+
+statement ok
+ROLLBACK
+
+# Parquet uses the same semantic headers and preserves native property types.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (10, 'Compiler', 2024, 'Artifact'),
+        (20, 'Database', 2025, 'Artifact')
+    ) nodes("external_id:ID", name, created, ":LABEL")
+) TO '__TEST_DIR__/gql_copy_graph_nodes.parquet' (FORMAT PARQUET)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (10, 20, 'DEPENDS_ON', 0.75::DOUBLE)
+    ) relationships(":START_ID", ":END_ID", ":TYPE", weight)
+) TO '__TEST_DIR__/gql_copy_graph_edges.parquet' (FORMAT PARQUET)
+
+statement ok
+CREATE GRAPH managed_parquet ANY
+
+statement ok
+COPY GRAPH managed_parquet FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.parquet',
+    EDGES '__TEST_DIR__/gql_copy_graph_edges.parquet'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH managed_parquet
+
+query IRT
+MATCH (a:Artifact)-[e:DEPENDS_ON]->(b:Artifact)
+RETURN a.created, e.weight, b.name
+----
+2024	0.75	Database
+
+# COPY GRAPH has its own strict parser and rejects incomplete syntax.
+statement error
+COPY GRAPH explicit_copy FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv'
+)
+----
+<REGEX>:.*COPY GRAPH parser error.*

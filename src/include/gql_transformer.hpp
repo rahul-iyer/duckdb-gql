@@ -28,6 +28,7 @@ private:
 	bool TransformMutation(GQLParser::PrimitiveDataModifyingStatementContext &context, GqlMatchStatement &match);
 	bool TransformMatchElement(GQLParser::ElementPatternFillerContext *filler, GqlPatternElementType type,
 	                           GqlPatternElement &result);
+	bool TransformLabelExpression(GQLParser::LabelExpressionContext &context, vector<GqlIdentifier> &labels);
 	bool TransformProjection(GQLParser::ReturnItemContext *item, GqlProjection &result);
 	bool TransformSearchCondition(GQLParser::SearchConditionContext &context, shared_ptr<GqlExpression> &result);
 	bool TransformExpression(GQLParser::ValueExpressionContext &context, shared_ptr<GqlExpression> &result);

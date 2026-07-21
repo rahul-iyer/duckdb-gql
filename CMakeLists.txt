@@ -19,6 +19,7 @@ include_directories(
 
 set(EXTENSION_SOURCES
     src/gql_extension.cpp
+    src/gql_catalog.cpp
     src/gql_parser.cpp
     src/gql_transformer.cpp
     src/gql_binder.cpp

@@ -1,0 +1,93 @@
+# name: test/sql/gql_feature_fixture_adapter.test
+# description: End-to-end native COPY GRAPH output produced by gql_fixture_adapter.py
+# group: [gql]
+
+require gql
+
+# Generated from:
+# INSERT (a:Person:Engineer {name: 'Alice', age: 42,
+#                   mixed: 'forty-two',
+#                   birthday: date({year: 1984, month: 10, day: 11})}),
+#        (b:Person {name: 'Bob', scores: [1, 2, 3]}),
+#        (a)-[:KNOWS {since: 2020}]->(b),
+#        (:City {name: 'Paris', founded: a.age, mixed: 42,
+#                opened: localtime({hour: 12, minute: 31, second: 14,
+#                                   nanosecond: 645876123}),
+#                recorded: localdatetime({year: 2026, month: 7, day: 20,
+#                                         hour: 9, minute: 10,
+#                                         nanosecond: 12})})
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 42, '1984-10-11', CAST(NULL AS BIGINT), 's:forty-two', 'Alice', CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), 'Person;Engineer'),
+        ('n2', CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), 'Bob', CAST(NULL AS VARCHAR), CAST(NULL AS VARCHAR), '1;2;3', 'Person'),
+        ('n3', CAST(NULL AS BIGINT), CAST(NULL AS VARCHAR), 42, 'i:42', 'Paris', '12:31:14.645876123', '2026-07-20T09:10:00.000000012', CAST(NULL AS VARCHAR), 'City')
+    ) fixture(":ID(GqlFixture_feature_fixture_adapter)", "age:long", "birthday:date", "founded:long", "mixed:variant", "name:string", "opened:localtime", "recorded:localdatetime", "scores:long[]", ":LABEL")
+) TO '__TEST_DIR__/feature_fixture_adapter_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'KNOWS', 2020)
+    ) fixture(":START_ID(GqlFixture_feature_fixture_adapter)", ":END_ID(GqlFixture_feature_fixture_adapter)", ":TYPE", "since:long")
+) TO '__TEST_DIR__/feature_fixture_adapter_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH feature_fixture_adapter ANY
+
+statement ok
+COPY GRAPH feature_fixture_adapter FROM (
+    VERTICES '__TEST_DIR__/feature_fixture_adapter_nodes.csv',
+    EDGES '__TEST_DIR__/feature_fixture_adapter_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH feature_fixture_adapter
+
+query TITI
+MATCH (alice:Person)-[relationship:KNOWS]->(bob:Person)
+RETURN alice.name, alice.age, bob.name, relationship.since
+----
+Alice	42	Bob	2020
+
+query TI
+MATCH (city:City)
+RETURN city.name, city.founded
+----
+Paris	42
+
+query T
+MATCH (person:Person) WHERE person.name = 'Bob'
+RETURN person.scores
+----
+[1, 2, 3]
+
+query T
+MATCH (person:Person) WHERE person.name = 'Alice'
+RETURN person.birthday
+----
+1984-10-11
+
+query TT
+MATCH (city:City)
+RETURN city.opened, city.recorded
+----
+12:31:14.645876123	2026-07-20 09:10:00.000000012
+
+query IT
+MATCH (city:City), (person:Person) WHERE person.name = 'Alice'
+RETURN city.mixed + 1, person.mixed
+----
+43	forty-two
+
+query T
+MATCH (person:Person&Engineer)
+RETURN person.name
+----
+Alice
+
+query I
+MATCH (node)
+RETURN count(*)
+----
+3

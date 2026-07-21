@@ -1,0 +1,41 @@
+# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere6_101.test
+# Source: tck/features/clauses/match-where/MatchWhere6.feature:101 [4] Do not fail when predicates on optionally matched and missed nodes are invalid
+# Generated candidate; semantic review required before promotion.
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', CAST(NULL AS VARCHAR), ''),
+        ('n2', 'Mark', '')
+    ) fixture(":ID(GqlFixture_candidate_matchwhere6_101)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/candidate_matchwhere6_101_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'T')
+    ) fixture(":START_ID(GqlFixture_candidate_matchwhere6_101)", ":END_ID(GqlFixture_candidate_matchwhere6_101)", ":TYPE")
+) TO '__TEST_DIR__/candidate_matchwhere6_101_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_matchwhere6_101 ANY
+
+statement ok
+COPY GRAPH candidate_matchwhere6_101 FROM (
+    VERTICES '__TEST_DIR__/candidate_matchwhere6_101_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_matchwhere6_101_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_matchwhere6_101
+
+query T rowsort
+MATCH (n)-[]->(x0)
+OPTIONAL MATCH (x0)-[]->(x1)
+WHERE x1.name = 'bar'
+RETURN x0.name
+----
+Mark
