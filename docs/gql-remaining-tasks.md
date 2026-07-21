@@ -13,9 +13,9 @@ manifest rows, and run the verification commands at the end of this document.
 - Branch: `rewrite/native-tables`
 - Native DuckDB wide-table graph storage; no EAV fallback
 - Vectorized CSV and Parquet loading through `COPY GRAPH`
-- 859 assertions passing across 11 GQL test cases
+- 883 assertions passing across 11 GQL test cases
 - 93 imported clause feature files and 827 source scenarios
-- 60 verified executable source scenarios; 767 unreviewed
+- 63 verified executable source scenarios; 764 unreviewed
 - 532 of 548 fixture setups adapted
 - ISO manifest: 22 partial and 14 planned feature families
 - Full release conformance gate does not pass yet
@@ -24,8 +24,8 @@ manifest rows, and run the verification commands at the end of this document.
 
 ### Repository checkpoint
 
-- [ ] Commit the native-table rewrite and current compatibility suite.
-- [ ] Confirm the committed checkout passes the complete GQL test suite.
+- [x] Commit the native-table rewrite and current compatibility suite (`1e206a5`).
+- [x] Confirm the checkpoint passes the complete GQL test suite.
 
 ### Native INSERT
 
@@ -38,11 +38,11 @@ manifest rows, and run the verification commands at the end of this document.
 
 ### Element and path values
 
-- [ ] Return nodes as typed values.
-- [ ] Return edges as typed values.
+- [x] Return nodes as typed DuckDB `STRUCT` values.
+- [x] Return edges as typed DuckDB `STRUCT` values.
 - [ ] Return paths as typed values.
-- [ ] Define stable DuckDB result representations for node, edge, and path
-      values.
+- [x] Define stable DuckDB result representations for node and edge values.
+- [ ] Define the stable DuckDB result representation for path values.
 - [ ] Extend the compatibility candidate generator to validate element and path
       result cells.
 
@@ -120,7 +120,7 @@ manifest rows, and run the verification commands at the end of this document.
 ### Compatibility corpus
 
 - [ ] Adapt the remaining 16 fixture setups.
-- [ ] Classify all 767 currently unreviewed source scenarios.
+- [ ] Classify all 764 currently unreviewed source scenarios.
 - [ ] Promote every passing source-equivalent scenario into the active suite.
 - [ ] Keep unsupported scenarios explicit and tied to concrete implementation
       gaps.
@@ -249,11 +249,10 @@ manifest rows, and run the verification commands at the end of this document.
 
 ## Recommended next sequence
 
-1. Checkpoint the current native-table milestone.
-2. Implement node, edge, and path value projection.
-3. Implement native GQL `INSERT`.
-4. Implement element type, label, source, and destination functions.
-5. Regenerate and promote compatibility candidates.
+1. Implement path value projection and extend result-cell adaptation.
+2. Implement native GQL `INSERT`.
+3. Implement element type, label, source, and destination functions.
+4. Regenerate and promote compatibility candidates.
 
 ## Verification commands
 

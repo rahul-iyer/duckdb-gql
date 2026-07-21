@@ -169,6 +169,17 @@ OpenGQL parse tree
 
 Fixed patterns lower to one scan alias per vertex/edge occurrence plus equality predicates for endpoints. Label and property predicates address mapped columns directly. DuckDB remains responsible for predicate pushdown, join ordering, aggregation, sorting, limits, parallel scans, and physical operator selection.
 
+Direct node and edge projections are native DuckDB `STRUCT` values rather than
+formatted graph strings. A node contains `__gql_id`, `__gql_labels`, and every
+mapped property column. An edge contains `__gql_id`, `__gql_type`,
+`__gql_source`, `__gql_target`, and every mapped property column. Property
+fields are ordered case-insensitively by GQL property name so the struct type is
+deterministic; values retain their native DuckDB types. An unmatched optional
+binding produces SQL `NULL` for the complete struct. The `__gql_` prefix is
+reserved by the managed-table importer, preventing property-name collisions.
+Path projection remains explicit unsupported work until its ordered node/edge
+representation and recursive materialization are implemented.
+
 An unbounded anonymous directed factor lowers to a recursive CTE. Its state contains start identity, current endpoint, depth, and ordered used-edge identity. The edge list enforces different-edge/trail semantics and preserves distinct parallel-edge paths. Source-only restrictions can be pushed into the anchor.
 
 There is deliberately no normalized fallback. Binding a MATCH against an `EMPTY` graph fails with a `COPY GRAPH` instruction.
@@ -249,6 +260,7 @@ Required native coverage includes:
 - create/load/select/drop lifecycle and rollback on load failure;
 - CSV and Parquet typed-property preservation;
 - fixed MATCH, predicates, projection, optional, grouping, ordering, and limits;
+- node/edge struct projection, including null optional bindings;
 - native recursive VLP on cycles, parallel edges, reverse direction, and zero-hop paths;
 - explicit CSR build, reuse, refresh, and ineligible-hint diagnostics;
 - persistence and crash/reopen behavior;
@@ -259,8 +271,8 @@ The active SQL tests use `CREATE GRAPH` and `COPY GRAPH`. Tests that depended on
 
 ## Near-term execution order
 
-1. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
-2. Add native graph DDL for explicit element-table schemas instead of manual registration.
-3. Expand the native conformance suite across expressions, optional matching, aggregation, and finite paths.
-4. Add transaction-local write/version tracking for CSR invalidation.
-5. Introduce cost-based native-versus-CSR planning after both paths have comparable semantics.
+1. Complete path-value materialization and result-cell adaptation.
+2. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
+3. Add native graph DDL for explicit element-table schemas instead of manual registration.
+4. Expand the native conformance suite across expressions, optional matching, aggregation, and finite paths.
+5. Add transaction-local write/version tracking for CSR invalidation, then introduce cost-based native-versus-CSR planning after both paths have comparable semantics.

@@ -43,7 +43,7 @@ CREATE PROPERTY GRAPH property_spelling ANY
 statement error
 MATCH (n) RETURN n
 ----
-<REGEX>:.*GQL node, edge, and path value projection.*
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
 query IT
 DROP GRAPH mixed

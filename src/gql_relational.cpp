@@ -743,12 +743,90 @@ static bool ContainsAggregate(const GqlExpressionProgram &program) {
   return false;
 }
 
+static void AppendStructField(vector<unique_ptr<ParsedExpression>> &fields,
+                              unique_ptr<ParsedExpression> expression,
+                              const string &name) {
+  expression->SetAlias(name);
+  fields.push_back(std::move(expression));
+}
+
+static unique_ptr<ParsedExpression>
+GraphElementValue(const GqlExpressionProgram &program,
+                  const GqlTableGraphBinding &graph,
+                  const vector<GqlPatternElementType> &binding_types,
+                  const vector<RelationalIdentityAccess> &identities) {
+  if (program.node_types.empty() ||
+      static_cast<GqlExpressionType>(program.node_types[0]) !=
+          GqlExpressionType::VARIABLE_REFERENCE) {
+    throw NotImplementedException(
+        "GQL graph values currently require a direct element variable");
+  }
+  auto binding_index = NumericCast<idx_t>(program.binding_indices[0]);
+  if (binding_index >= identities.size() ||
+      binding_index >= binding_types.size()) {
+    throw InternalException("GQL graph-value binding is missing");
+  }
+  auto type = static_cast<GqlTypeId>(program.result_types[0]);
+  auto expected = type == GqlTypeId::NODE ? GqlPatternElementType::VERTEX
+                  : type == GqlTypeId::EDGE ? GqlPatternElementType::EDGE
+                                            : throw InternalException(
+                                                  "Invalid GQL graph-value type");
+  if (binding_types[binding_index] != expected) {
+    throw InternalException("GQL graph-value binding type is inconsistent");
+  }
+
+  const auto &table = expected == GqlPatternElementType::VERTEX
+                          ? graph.vertex
+                          : graph.edge;
+  const auto &alias = identities[binding_index].table_alias;
+  vector<unique_ptr<ParsedExpression>> fields;
+  AppendStructField(fields, Column(alias, table.key_column), "__gql_id");
+  if (expected == GqlPatternElementType::VERTEX) {
+    AppendStructField(fields,
+                      table.label_column.empty()
+                          ? Constant(Value())
+                          : Column(alias, table.label_column),
+                      "__gql_labels");
+  } else {
+    AppendStructField(fields,
+                      table.label_column.empty()
+                          ? Constant(Value())
+                          : Column(alias, table.label_column),
+                      "__gql_type");
+    AppendStructField(fields, Column(alias, graph.edge_source_column),
+                      "__gql_source");
+    AppendStructField(fields, Column(alias, graph.edge_target_column),
+                      "__gql_target");
+  }
+  vector<pair<string, string>> properties(table.property_columns.begin(),
+                                          table.property_columns.end());
+  std::sort(properties.begin(), properties.end(),
+            [](const auto &left, const auto &right) {
+              return StringUtil::CILessThan(left.first, right.first);
+            });
+  for (const auto &property : properties) {
+    AppendStructField(fields, Column(alias, property.second), property.first);
+  }
+
+  auto packed = Function("struct_pack", std::move(fields));
+  auto result = make_uniq<CaseExpression>();
+  CaseCheck missing;
+  missing.when_expr = make_uniq<OperatorExpression>(
+      ExpressionType::OPERATOR_IS_NULL, Column(alias, table.key_column));
+  missing.then_expr = Constant(Value());
+  result->case_checks.push_back(std::move(missing));
+  result->else_expr = std::move(packed);
+  return std::move(result);
+}
+
 static void
 AppendProjections(SelectNode &select,
                   const vector<GqlExpressionProgram> &projections,
                   const vector<string> &projection_names,
                   const RelationalPropertyMap &property_aliases,
-                  const vector<RelationalIdentityAccess> &identities) {
+                  const vector<RelationalIdentityAccess> &identities,
+                  const GqlTableGraphBinding &graph,
+                  const vector<GqlPatternElementType> &binding_types) {
   bool has_aggregate = false;
   for (const auto &projection : projections) {
     has_aggregate = has_aggregate || ContainsAggregate(projection);
@@ -759,8 +837,15 @@ AppendProjections(SelectNode &select,
         StringUtil::StartsWith(projection_names[index], "gql_mutation_value_");
     auto desired_type =
         mutation_value ? GqlTypeId::PROPERTY_VALUE : GqlTypeId::UNKNOWN;
-    auto expression = LowerExpression(projections[index], property_aliases,
-                                      identities, desired_type);
+    auto projection_type =
+        static_cast<GqlTypeId>(projections[index].result_types[0]);
+    auto expression = projection_type == GqlTypeId::NODE ||
+                              projection_type == GqlTypeId::EDGE
+                          ? GraphElementValue(projections[index], graph,
+                                              binding_types, identities)
+                          : LowerExpression(projections[index],
+                                            property_aliases, identities,
+                                            desired_type);
     if (has_aggregate && !ContainsAggregate(projections[index])) {
       grouping_set.insert(select.groups.group_expressions.size());
       select.groups.group_expressions.push_back(expression->Copy());
@@ -1197,7 +1282,11 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 	auto select = make_uniq<SelectNode>();
 	select->from_table = std::move(from);
 	select->where_clause = And(std::move(filters));
-	AppendProjections(*select, match.projections, match.projection_names, property_aliases, identities);
+	vector<GqlPatternElementType> binding_types(match.binding_count,
+	                                           GqlPatternElementType::VERTEX);
+	binding_types[match.edge_binding] = GqlPatternElementType::EDGE;
+	AppendProjections(*select, match.projections, match.projection_names,
+	                  property_aliases, identities, graph, binding_types);
 	return FinalizeMatchSelect(std::move(select), match.projections, match.projection_names, match.modifiers, false);
 }
 
@@ -1289,7 +1378,11 @@ static unique_ptr<TableRef> TableBackedCsrRecursiveMatch(ClientContext &context,
 	auto select = make_uniq<SelectNode>();
 	select->from_table = std::move(from);
 	select->where_clause = And(std::move(filters));
-	AppendProjections(*select, match.projections, match.projection_names, property_aliases, identities);
+	vector<GqlPatternElementType> binding_types(match.binding_count,
+	                                           GqlPatternElementType::VERTEX);
+	binding_types[match.edge_binding] = GqlPatternElementType::EDGE;
+	AppendProjections(*select, match.projections, match.projection_names,
+	                  property_aliases, identities, graph, binding_types);
 	return FinalizeMatchSelect(std::move(select), match.projections, match.projection_names, match.modifiers, false);
 }
 
@@ -1618,7 +1711,7 @@ TableBackedMatch(const GqlTableGraphBinding &graph,
   select->from_table = std::move(from);
   select->where_clause = And(std::move(filters));
   AppendProjections(*select, match.projections, match.projection_names,
-                    property_aliases, identities);
+                    property_aliases, identities, graph, match.binding_types);
   return FinalizeMatchSelect(std::move(select), match.projections,
                              match.projection_names, match.modifiers, false);
 }

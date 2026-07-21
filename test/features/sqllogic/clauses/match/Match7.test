@@ -12,8 +12,10 @@
 # fixture adaptation and semantic assertions have been reviewed.
 
 # Source: tck/features/clauses/match/Match7.feature:34 [1] Simple OPTIONAL MATCH on empty graph
-# Port status: pending
+# Port status: executable
 # Translation review flags: semantic_review
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Null node result translated to ISO GQL and verified against its adapted native-table fixture
 #
 # GQL-adapted source specification:
 #   Scenario: [1] Simple OPTIONAL MATCH on empty graph
@@ -346,8 +348,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:161 [8] Longer pattern with bound nodes without matches
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Null optional node result translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -1297,8 +1301,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:520 [25] Optionally matching self-loops without matches
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Null optional edge results translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

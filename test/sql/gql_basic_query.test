@@ -41,6 +41,25 @@ RETURN DISTINCT person.name AS name
 Ada
 Grace
 
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN person
+----
+{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}
+
+query T rowsort
+MATCH (source:Person)-[relationship:KNOWS]->(target:Person)
+RETURN relationship
+----
+{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}
+{'__gql_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3}
+
+query T
+OPTIONAL MATCH (person:Missing)
+RETURN person
+----
+NULL
+
 query TI
 MATCH (person:Person)
 RETURN person.name AS name, element_id(person) AS person_id

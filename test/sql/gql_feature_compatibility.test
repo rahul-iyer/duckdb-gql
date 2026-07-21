@@ -1366,6 +1366,127 @@ n0101
 n0110
 n0111
 
+# Source: tck/features/clauses/match/Match7.feature:34 [1] Simple OPTIONAL MATCH on empty graph
+# Generated candidate; semantic review required before promotion.
+
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":LABEL" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match7_34_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT CAST(NULL AS VARCHAR) AS ":START_ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":END_ID(GqlFixture_candidate_match7_34)", CAST(NULL AS VARCHAR) AS ":TYPE" WHERE FALSE
+) TO '__TEST_DIR__/candidate_match7_34_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match7_34 ANY
+
+statement ok
+COPY GRAPH candidate_match7_34 FROM (
+    VERTICES '__TEST_DIR__/candidate_match7_34_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match7_34_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match7_34
+
+query T rowsort
+OPTIONAL MATCH (n)
+RETURN n
+----
+NULL
+
+# Source: tck/features/clauses/match/Match7.feature:161 [8] Longer pattern with bound nodes without matches
+# Generated candidate; semantic review required before promotion.
+
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', CAST(NULL AS BIGINT), 'Single'),
+        ('n2', 42, 'A'),
+        ('n3', 46, 'B'),
+        ('n4', CAST(NULL AS BIGINT), 'C')
+    ) fixture(":ID(GqlFixture_candidate_match7_161)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_match7_161_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'REL'),
+        ('n1', 'n3', 'REL'),
+        ('n2', 'n4', 'REL'),
+        ('n3', 'n3', 'LOOP')
+    ) fixture(":START_ID(GqlFixture_candidate_match7_161)", ":END_ID(GqlFixture_candidate_match7_161)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match7_161_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match7_161 ANY
+
+statement ok
+COPY GRAPH candidate_match7_161 FROM (
+    VERTICES '__TEST_DIR__/candidate_match7_161_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match7_161_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match7_161
+
+query T rowsort
+MATCH (a:A), (c:C)
+OPTIONAL MATCH (a)-[]->(b)-[]->(c)
+RETURN b
+----
+NULL
+
+# Source: tck/features/clauses/match/Match7.feature:520 [25] Optionally matching self-loops without matches
+# Generated candidate; semantic review required before promotion.
+
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', CAST(NULL AS BIGINT), 'Single'),
+        ('n2', 42, 'A'),
+        ('n3', 46, 'B'),
+        ('n4', CAST(NULL AS BIGINT), 'C')
+    ) fixture(":ID(GqlFixture_candidate_match7_520)", "num:long", ":LABEL")
+) TO '__TEST_DIR__/candidate_match7_520_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('n1', 'n2', 'REL'),
+        ('n1', 'n3', 'REL'),
+        ('n2', 'n4', 'REL'),
+        ('n3', 'n3', 'LOOP')
+    ) fixture(":START_ID(GqlFixture_candidate_match7_520)", ":END_ID(GqlFixture_candidate_match7_520)", ":TYPE")
+) TO '__TEST_DIR__/candidate_match7_520_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH candidate_match7_520 ANY
+
+statement ok
+COPY GRAPH candidate_match7_520 FROM (
+    VERTICES '__TEST_DIR__/candidate_match7_520_nodes.csv',
+    EDGES '__TEST_DIR__/candidate_match7_520_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH candidate_match7_520
+
+query T rowsort
+MATCH (a)
+WHERE NOT (a:B)
+OPTIONAL MATCH (a)-[r]->(a)
+RETURN r
+----
+NULL
+NULL
+NULL
+
 # Source: tck/features/clauses/match/Match7.feature:615 [29] Satisfies the open world assumption, relationships between same nodes
 # Generated candidate; semantic review required before promotion.
 

@@ -543,9 +543,8 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 				throw InternalException("GQL MATCH contains an empty projection");
 			}
 			auto expression = BindExpression(*projection.expression);
-			if (expression->result_type.id == GqlTypeId::NODE || expression->result_type.id == GqlTypeId::EDGE ||
-			    expression->result_type.id == GqlTypeId::PATH) {
-				throw NotImplementedException("GQL node, edge, and path value projection");
+			if (expression->result_type.id == GqlTypeId::PATH) {
+				throw NotImplementedException("GQL path value projection");
 			}
 			GqlBoundProjection bound_projection;
 			bound_projection.name = ProjectionName(projection, *expression);

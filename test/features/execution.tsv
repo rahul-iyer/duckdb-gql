@@ -21,6 +21,9 @@ tck/features/clauses/match/Match5.feature	397	executable	test/sql/gql_feature_co
 tck/features/clauses/match/Match5.feature	412	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/match/Match5.feature	427	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/match/Match5.feature	446	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	34	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	161	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
+tck/features/clauses/match/Match7.feature	520	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/match/Match7.feature	615	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/match/Match7.feature	634	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
 tck/features/clauses/match/Match7.feature	652	executable	test/sql/gql_feature_compatibility.test	Scalar-result source scenario translated to ISO GQL and verified against its adapted native-table fixture
