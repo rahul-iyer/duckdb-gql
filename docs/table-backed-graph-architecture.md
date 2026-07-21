@@ -177,8 +177,14 @@ fields are ordered case-insensitively by GQL property name so the struct type is
 deterministic; values retain their native DuckDB types. An unmatched optional
 binding produces SQL `NULL` for the complete struct. The `__gql_` prefix is
 reserved by the managed-table importer, preventing property-name collisions.
-Path projection remains explicit unsupported work until its ordered node/edge
-representation and recursive materialization are implemented.
+
+A named fixed path projects as `STRUCT(nodes LIST<STRUCT>, edges LIST<STRUCT>)`.
+Both lists preserve pattern traversal order, while an edge struct retains its
+physical source and target identities even when the pattern traverses it in
+reverse. A missing optional path is SQL `NULL`; a one-node path has an empty
+edge list. Quantified/VLP path projection remains explicitly unsupported until
+the recursive and CSR operators materialize every traversed node and edge,
+rather than only endpoints and used-edge identities.
 
 An unbounded anonymous directed factor lowers to a recursive CTE. Its state contains start identity, current endpoint, depth, and ordered used-edge identity. The edge list enforces different-edge/trail semantics and preserves distinct parallel-edge paths. Source-only restrictions can be pushed into the anchor.
 
@@ -261,6 +267,7 @@ Required native coverage includes:
 - CSV and Parquet typed-property preservation;
 - fixed MATCH, predicates, projection, optional, grouping, ordering, and limits;
 - node/edge struct projection, including null optional bindings;
+- fixed-path struct projection in forward, reverse, node-only, and optional forms;
 - native recursive VLP on cycles, parallel edges, reverse direction, and zero-hop paths;
 - explicit CSR build, reuse, refresh, and ineligible-hint diagnostics;
 - persistence and crash/reopen behavior;
@@ -271,7 +278,7 @@ The active SQL tests use `CREATE GRAPH` and `COPY GRAPH`. Tests that depended on
 
 ## Near-term execution order
 
-1. Complete path-value materialization and result-cell adaptation.
+1. Extend result-cell adaptation for non-null node, edge, and path values; then materialize quantified path values from recursive/CSR execution.
 2. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
 3. Add native graph DDL for explicit element-table schemas instead of manual registration.
 4. Expand the native conformance suite across expressions, optional matching, aggregation, and finite paths.

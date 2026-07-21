@@ -29,7 +29,7 @@ test/features/clauses/match/Match3.feature	test/features/sqllogic/clauses/match/
 test/features/clauses/match/Match4.feature	test/features/sqllogic/clauses/match/Match4.test	10	0	10	10	9	1
 test/features/clauses/match/Match5.feature	test/features/sqllogic/clauses/match/Match5.test	29	16	13	29	24	5
 test/features/clauses/match/Match6.feature	test/features/sqllogic/clauses/match/Match6.test	25	0	25	20	20	0
-test/features/clauses/match/Match7.feature	test/features/sqllogic/clauses/match/Match7.test	31	6	25	29	29	0
+test/features/clauses/match/Match7.feature	test/features/sqllogic/clauses/match/Match7.test	31	8	23	29	29	0
 test/features/clauses/match/Match8.feature	test/features/sqllogic/clauses/match/Match8.test	3	0	3	3	3	0
 test/features/clauses/match/Match9.feature	test/features/sqllogic/clauses/match/Match9.test	9	0	9	9	9	0
 test/features/clauses/merge/Merge1.feature	test/features/sqllogic/clauses/merge/Merge1.test	17	6	11	9	9	0
@@ -56,7 +56,7 @@ test/features/clauses/return-skip-limit/ReturnSkipLimit3.feature	test/features/s
 test/features/clauses/return/Return1.feature	test/features/sqllogic/clauses/return/Return1.test	2	0	2	1	1	0
 test/features/clauses/return/Return2.feature	test/features/sqllogic/clauses/return/Return2.test	18	8	10	15	15	0
 test/features/clauses/return/Return3.feature	test/features/sqllogic/clauses/return/Return3.test	3	1	2	3	3	0
-test/features/clauses/return/Return4.feature	test/features/sqllogic/clauses/return/Return4.test	11	3	8	10	10	0
+test/features/clauses/return/Return4.feature	test/features/sqllogic/clauses/return/Return4.test	11	4	7	10	10	0
 test/features/clauses/return/Return5.feature	test/features/sqllogic/clauses/return/Return5.test	5	1	4	5	5	0
 test/features/clauses/return/Return6.feature	test/features/sqllogic/clauses/return/Return6.test	21	5	16	13	13	0
 test/features/clauses/return/Return7.feature	test/features/sqllogic/clauses/return/Return7.test	2	0	2	1	1	0

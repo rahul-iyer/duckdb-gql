@@ -751,22 +751,22 @@ static void AppendStructField(vector<unique_ptr<ParsedExpression>> &fields,
 }
 
 static unique_ptr<ParsedExpression>
-GraphElementValue(const GqlExpressionProgram &program,
-                  const GqlTableGraphBinding &graph,
-                  const vector<GqlPatternElementType> &binding_types,
-                  const vector<RelationalIdentityAccess> &identities) {
-  if (program.node_types.empty() ||
-      static_cast<GqlExpressionType>(program.node_types[0]) !=
+GraphElementValueAt(const GqlExpressionProgram &program, idx_t node,
+                    const GqlTableGraphBinding &graph,
+                    const vector<GqlPatternElementType> &binding_types,
+                    const vector<RelationalIdentityAccess> &identities) {
+  if (node >= program.node_types.size() ||
+      static_cast<GqlExpressionType>(program.node_types[node]) !=
           GqlExpressionType::VARIABLE_REFERENCE) {
     throw NotImplementedException(
         "GQL graph values currently require a direct element variable");
   }
-  auto binding_index = NumericCast<idx_t>(program.binding_indices[0]);
+  auto binding_index = NumericCast<idx_t>(program.binding_indices[node]);
   if (binding_index >= identities.size() ||
       binding_index >= binding_types.size()) {
     throw InternalException("GQL graph-value binding is missing");
   }
-  auto type = static_cast<GqlTypeId>(program.result_types[0]);
+  auto type = static_cast<GqlTypeId>(program.result_types[node]);
   auto expected = type == GqlTypeId::NODE ? GqlPatternElementType::VERTEX
                   : type == GqlTypeId::EDGE ? GqlPatternElementType::EDGE
                                             : throw InternalException(
@@ -819,6 +819,86 @@ GraphElementValue(const GqlExpressionProgram &program,
   return std::move(result);
 }
 
+static unique_ptr<ParsedExpression>
+GraphElementValue(const GqlExpressionProgram &program,
+                  const GqlTableGraphBinding &graph,
+                  const vector<GqlPatternElementType> &binding_types,
+                  const vector<RelationalIdentityAccess> &identities) {
+  if (program.node_types.empty()) {
+    throw InternalException("GQL graph-value expression is empty");
+  }
+  return GraphElementValueAt(program, 0, graph, binding_types, identities);
+}
+
+static unique_ptr<ParsedExpression>
+GraphPathValue(const GqlExpressionProgram &program,
+               const GqlTableGraphBinding &graph,
+               const vector<GqlPatternElementType> &binding_types,
+               const vector<RelationalIdentityAccess> &identities) {
+  if (program.node_types.empty() ||
+      static_cast<GqlExpressionType>(program.node_types[0]) !=
+          GqlExpressionType::FUNCTION ||
+      program.values[0] != "__gql_path" ||
+      program.child_counts[0] + 1 != program.node_types.size()) {
+    throw NotImplementedException(
+        "GQL path values currently require a named fixed path");
+  }
+
+  vector<unique_ptr<ParsedExpression>> nodes;
+  vector<unique_ptr<ParsedExpression>> edges;
+  vector<unique_ptr<ParsedExpression>> missing_elements;
+  for (idx_t node = 1; node < program.node_types.size(); node++) {
+    if (program.child_counts[node] != 0) {
+      throw InternalException("GQL fixed path contains a nested expression");
+    }
+    auto binding_index = NumericCast<idx_t>(program.binding_indices[node]);
+    if (binding_index >= binding_types.size() ||
+        binding_index >= identities.size()) {
+      throw InternalException("GQL fixed path binding is missing");
+    }
+    const auto &table = binding_types[binding_index] ==
+                                GqlPatternElementType::EDGE
+                            ? graph.edge
+                            : graph.vertex;
+    missing_elements.push_back(make_uniq<OperatorExpression>(
+        ExpressionType::OPERATOR_IS_NULL,
+        Column(identities[binding_index].table_alias, table.key_column)));
+    auto value = GraphElementValueAt(program, node, graph, binding_types,
+                                     identities);
+    if (binding_types[binding_index] == GqlPatternElementType::EDGE) {
+      edges.push_back(std::move(value));
+    } else {
+      nodes.push_back(std::move(value));
+    }
+  }
+  if (nodes.empty()) {
+    throw InternalException("GQL fixed path has no nodes");
+  }
+
+  vector<unique_ptr<ParsedExpression>> fields;
+  AppendStructField(fields, Function("list_value", std::move(nodes)), "nodes");
+  auto edge_list = edges.empty()
+                       ? Constant(Value::LIST(LogicalType::SQLNULL, {}))
+                       : Function("list_value", std::move(edges));
+  AppendStructField(fields, std::move(edge_list), "edges");
+  auto packed = Function("struct_pack", std::move(fields));
+
+  unique_ptr<ParsedExpression> missing;
+  if (missing_elements.size() == 1) {
+    missing = std::move(missing_elements[0]);
+  } else {
+    missing = make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_OR,
+                                               std::move(missing_elements));
+  }
+  auto result = make_uniq<CaseExpression>();
+  CaseCheck missing_path;
+  missing_path.when_expr = std::move(missing);
+  missing_path.then_expr = Constant(Value());
+  result->case_checks.push_back(std::move(missing_path));
+  result->else_expr = std::move(packed);
+  return std::move(result);
+}
+
 static void
 AppendProjections(SelectNode &select,
                   const vector<GqlExpressionProgram> &projections,
@@ -839,13 +919,18 @@ AppendProjections(SelectNode &select,
         mutation_value ? GqlTypeId::PROPERTY_VALUE : GqlTypeId::UNKNOWN;
     auto projection_type =
         static_cast<GqlTypeId>(projections[index].result_types[0]);
-    auto expression = projection_type == GqlTypeId::NODE ||
-                              projection_type == GqlTypeId::EDGE
-                          ? GraphElementValue(projections[index], graph,
-                                              binding_types, identities)
-                          : LowerExpression(projections[index],
-                                            property_aliases, identities,
-                                            desired_type);
+    unique_ptr<ParsedExpression> expression;
+    if (projection_type == GqlTypeId::NODE ||
+        projection_type == GqlTypeId::EDGE) {
+      expression = GraphElementValue(projections[index], graph, binding_types,
+                                     identities);
+    } else if (projection_type == GqlTypeId::PATH) {
+      expression = GraphPathValue(projections[index], graph, binding_types,
+                                  identities);
+    } else {
+      expression = LowerExpression(projections[index], property_aliases,
+                                   identities, desired_type);
+    }
     if (has_aggregate && !ContainsAggregate(projections[index])) {
       grouping_set.insert(select.groups.group_expressions.size());
       select.groups.group_expressions.push_back(expression->Copy());

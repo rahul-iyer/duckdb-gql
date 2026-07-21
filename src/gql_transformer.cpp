@@ -277,9 +277,9 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 			return false;
 		}
 		for (auto path : paths) {
-		if (path->pathVariableDeclaration() || path->pathPatternPrefix()) {
-			return false;
-		}
+			if (path->pathPatternPrefix()) {
+				return false;
+			}
 		auto path_expression = dynamic_cast<GQLParser::PpePathTermContext *>(path->pathPatternExpression());
 		if (!path_expression) {
 			return false;
@@ -293,6 +293,9 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		ast_pattern.optional = optional;
 		ast_pattern.optional_stage = optional_stage;
 		ast_pattern.source = SourceRange(*path);
+		if (auto declaration = path->pathVariableDeclaration()) {
+			ast_pattern.variable = TransformIdentifier(*declaration->pathVariable());
+		}
 		for (idx_t index = 0; index < factors.size(); index++) {
 			GQLParser::PathPrimaryContext *path_primary = nullptr;
 			GQLParser::GraphPatternQuantifierContext *quantifier = nullptr;

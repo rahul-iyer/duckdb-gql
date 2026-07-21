@@ -60,6 +60,32 @@ RETURN person
 ----
 NULL
 
+query T
+MATCH p = (source:Person)-[relationship:KNOWS]->(target:Person)
+WHERE source.age = 42
+RETURN p
+----
+{'nodes': [{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}, {'__gql_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
+
+query T
+OPTIONAL MATCH p = (source:Missing)-[relationship]->(target)
+RETURN p
+----
+NULL
+
+query T
+MATCH p = (person:Person) WHERE person.age = 42
+RETURN p
+----
+{'nodes': [{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': []}
+
+query T
+MATCH p = (destination:Person)<-[relationship:KNOWS]-(source:Person)
+WHERE destination.age = 35
+RETURN p
+----
+{'nodes': [{'__gql_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}, {'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
+
 query TI
 MATCH (person:Person)
 RETURN person.name AS name, element_id(person) AS person_id
@@ -165,6 +191,18 @@ OPTIONAL MATCH (person:Missing)
 RETURN person.name AS name
 LIMIT 0
 ----
+
+statement error
+MATCH p = (source)-[]->+(target)
+RETURN p
+----
+<REGEX>:.*GQL quantified path value projection.*
+
+statement error
+MATCH person = (person)
+RETURN person
+----
+<REGEX>:.*GQL binding variable 'person' is already defined.*
 
 statement ok
 DROP GRAPH basic_queries

@@ -775,8 +775,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:325 [16] Optionally matching named paths - null result
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Null named-path result translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok
@@ -889,8 +891,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/match/Match7.feature:367 [18] Named paths inside optional matches with node predicates
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Null optional named-path result translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

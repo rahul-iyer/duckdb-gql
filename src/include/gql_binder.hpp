@@ -16,6 +16,7 @@ private:
 
 	vector<GqlBinding> bindings;
 	unordered_map<string, idx_t> binding_map;
+	unordered_map<string, vector<GqlBoundPatternElement>> path_bindings;
 };
 
 } // namespace duckdb

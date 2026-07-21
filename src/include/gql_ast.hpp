@@ -74,6 +74,7 @@ struct GqlPatternElement {
 
 struct GqlPattern {
   vector<GqlPatternElement> elements;
+  GqlIdentifier variable;
   bool optional = false;
   idx_t optional_stage = 0;
   GqlSourceRange source;

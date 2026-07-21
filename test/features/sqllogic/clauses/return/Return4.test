@@ -294,8 +294,10 @@
 #     And no side effects
 
 # Source: tck/features/clauses/return/Return4.feature:130 [7] Keeping used expression 4
-# Port status: pending
+# Port status: executable
 # Translation review flags: insert
+# Executable test: test/sql/gql_feature_compatibility.test
+# Review notes: Named fixed path binding translated to ISO GQL and verified against its adapted native-table fixture
 # INSERT fixture adaptation: ready
 # SQLLogic fixture setup:
 # statement ok

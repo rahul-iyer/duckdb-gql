@@ -126,6 +126,26 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 		return result;
 	case GqlExpressionType::VARIABLE_REFERENCE: {
 		auto &binding = Resolve(expression.variable);
+		if (binding.type.id == GqlTypeId::PATH) {
+			auto path = path_bindings.find(expression.variable.value);
+			if (path == path_bindings.end()) {
+				throw InternalException("GQL path binding is missing its elements");
+			}
+			result->expression_type = GqlExpressionType::FUNCTION;
+			result->function_name = "__gql_path";
+			for (const auto &element : path->second) {
+				auto argument = make_shared_ptr<GqlBoundExpression>();
+				argument->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
+				argument->binding_index = element.binding_index;
+				argument->result_type = {
+				    element.type == GqlPatternElementType::VERTEX ? GqlTypeId::NODE : GqlTypeId::EDGE,
+				    binding.type.nullable};
+				argument->source = element.source;
+				result->arguments.push_back(std::move(argument));
+			}
+			result->result_type = binding.type;
+			return result;
+		}
 		result->binding_index = binding.index;
 		result->result_type = binding.type;
 		return result;
@@ -385,6 +405,7 @@ vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &stat
 GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 	bindings.clear();
 	binding_map.clear();
+	path_bindings.clear();
 	auto match = make_shared_ptr<GqlLogicalMatch>();
 	idx_t next_binding_index = 0;
 	for (const auto &pattern : statement.patterns) {
@@ -459,6 +480,24 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 					bind_element(intermediate, true);
 				}
 			}
+		}
+		if (!pattern.variable.IsEmpty()) {
+			if (binding_map.find(pattern.variable.value) != binding_map.end()) {
+				throw BinderException("GQL binding variable '%s' is already defined", pattern.variable.value);
+			}
+			for (const auto &element : bound_pattern.elements) {
+				if (element.quantified) {
+					throw NotImplementedException("GQL quantified path value projection");
+				}
+			}
+			GqlBinding binding;
+			binding.name = pattern.variable.value;
+			binding.index = DConstants::INVALID_INDEX;
+			binding.type = {GqlTypeId::PATH, pattern.optional};
+			binding.source = pattern.variable.source;
+			binding_map.emplace(binding.name, bindings.size());
+			bindings.push_back(std::move(binding));
+			path_bindings.emplace(pattern.variable.value, bound_pattern.elements);
 		}
 		match->patterns.push_back(std::move(bound_pattern));
 	}
@@ -543,9 +582,6 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 				throw InternalException("GQL MATCH contains an empty projection");
 			}
 			auto expression = BindExpression(*projection.expression);
-			if (expression->result_type.id == GqlTypeId::PATH) {
-				throw NotImplementedException("GQL path value projection");
-			}
 			GqlBoundProjection bound_projection;
 			bound_projection.name = ProjectionName(projection, *expression);
 			bound_projection.expression = std::move(expression);
