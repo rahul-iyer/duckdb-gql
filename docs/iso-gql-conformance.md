@@ -38,7 +38,7 @@ python3 scripts/check_gql_conformance.py --release
 |---|---|---|
 | Program/session/transactions | Partial | All session set/reset/close, parameters, transaction modes, commit/rollback, multi-statement flow |
 | Catalog and graph types | Partial | Schema, graph, graph type, typed/open/closed/copy forms, qualification and replacement semantics |
-| Data modification | Partial | Core matched property set/remove and edge/node/detach delete use native DuckDB DML; insert, whole-map replacement, open-graph schema evolution, and complete label-set semantics remain |
+| Data modification | Partial | Standalone node/directed-path insert and core matched property set/remove and edge/node/detach delete use native DuckDB DML; match-driven/multi-path/undirected insert, whole-map replacement, open-graph schema evolution, and complete label-set semantics remain |
 | Query clauses | Partial | Match/optional, let, for, filter, calls, select/return/finish, grouping, ordering/paging, composition |
 | Graph patterns and paths | Partial | Complete pattern algebra, all directions, predicates, quantifiers, modes, searches, shortest paths/groups |
 | Expressions and types | Partial | Full value system, operators, predicates, functions, casts, coercion, null/unknown semantics |

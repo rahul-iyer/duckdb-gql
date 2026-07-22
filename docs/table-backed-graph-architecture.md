@@ -225,12 +225,24 @@ The former EAV mutation implementation has been replaced for the core matched fo
 
 The native mutation lowering currently implements:
 
+- standalone node and directed fixed-path `INSERT` -> sequence-backed inserts
+  into the mapped vertex and edge tables;
 - `SET n.property = expression` -> typed DuckDB `UPDATE`;
 - `REMOVE n.property` -> nullable-column update or schema-defined absence handling;
 - `DELETE edge` -> delete from the mapped edge table;
 - `DELETE vertex` -> reject when incident edges exist;
 - `DETACH DELETE vertex` -> delete incident edges then vertices atomically;
 - caller-transaction rollback and an autocommit command envelope across multiple generated statements.
+
+For one `INSERT` path, the lowerer allocates every vertex and edge identity in
+one temporary single-row relation. Each generated DuckDB `MERGE INTO` then
+inserts one element from that row, so edges use the exact keys allocated for
+their endpoints. The temporary relation, all element writes, and the graph
+version update share the mutation command envelope. Consequently, a failure
+while converting or inserting a later element rolls back earlier elements in
+autocommit, while an explicit caller transaction retains normal
+read-your-writes and rollback behavior. The current INSERT boundary is one
+fixed path with literal mapped properties and directed edges.
 
 As a separate Cypher-compatibility surface, standalone single-vertex `MERGE`
 lowers to DuckDB's native `MERGE INTO` operator. The match key is the complete
@@ -246,7 +258,11 @@ manifest. Its current boundary is one vertex, zero or one label, mapped scalar
 literal properties, and no `ON CREATE` or `ON MATCH` actions. Paths, edges,
 action clauses, and schema evolution for unknown properties remain pending.
 
-Remaining ISO mutation work is standalone and match-driven `INSERT`, whole-map replacement, writable-column metadata enforcement, native schema evolution for open graphs, multiple-label storage, and complete ISO diagnostics. Compatibility `MERGE` still needs edges/paths and `ON CREATE`/`ON MATCH` actions.
+Remaining ISO mutation work includes match-driven and multi-path `INSERT`,
+undirected edge insertion, whole-map replacement, writable-column metadata
+enforcement, native schema evolution for open graphs, richer label storage,
+and complete ISO diagnostics. Compatibility `MERGE` still needs edges/paths
+and `ON CREATE`/`ON MATCH` actions.
 
 ## Transactions and ownership
 
@@ -279,7 +295,10 @@ The active SQL tests use `CREATE GRAPH` and `COPY GRAPH`. Tests that depended on
 
 ## Near-term execution order
 
-1. Complete native mutation coverage: matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to managed tables; `INSERT`, whole-map replacement, and broader label-set storage remain.
+1. Complete native mutation coverage: standalone directed-path `INSERT` and
+   matched `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` now lower directly to
+   managed tables; match-driven/multi-path/undirected `INSERT`, whole-map
+   replacement, and broader label-set storage remain.
 2. Materialize quantified path values from recursive/CSR execution.
 3. Add native graph DDL for explicit element-table schemas instead of manual registration.
 4. Expand the native conformance suite across expressions, optional matching, aggregation, and finite paths.

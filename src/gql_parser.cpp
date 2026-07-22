@@ -679,6 +679,7 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
   StringUtil::Trim(normalized);
   normalized = StringUtil::Upper(normalized);
   if (!StartsWithMergePattern(query) &&
+      !StringUtil::StartsWith(normalized, "INSERT (") &&
       !StringUtil::StartsWith(normalized, "MATCH") &&
       !StringUtil::StartsWith(normalized, "OPTIONAL MATCH")) {
     return ParserOverrideResult();
@@ -693,6 +694,16 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
   }
 
   try {
+    if (gql_ptr->statement->type == GqlStatementType::INSERT) {
+      auto statements =
+          GqlLowerInsert(gql_ptr->statement->Cast<GqlInsertStatement>());
+      for (auto &statement : statements) {
+        statement->query = query;
+        statement->stmt_location = 0;
+        statement->stmt_length = query.size();
+      }
+      return ParserOverrideResult(std::move(statements));
+    }
     if (gql_ptr->statement->type == GqlStatementType::MERGE) {
       auto statements =
           GqlLowerMerge(gql_ptr->statement->Cast<GqlMergeStatement>());

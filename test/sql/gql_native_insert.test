@@ -1,0 +1,157 @@
+# name: test/sql/gql_native_insert.test
+# description: ISO GQL INSERT over managed native graph tables
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', 42, 'Person;Engineer'),
+        ('p2', 'Grace', 37, 'Person')
+    ) nodes("external_id:ID(People)", "name:string", "age:int", ":LABEL")
+) TO '__TEST_DIR__/gql_native_insert_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS', 2020)
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE", "since:int")
+) TO '__TEST_DIR__/gql_native_insert_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH native_insert ANY
+
+statement ok
+COPY GRAPH native_insert FROM (
+    VERTICES '__TEST_DIR__/gql_native_insert_nodes.csv',
+    EDGES '__TEST_DIR__/gql_native_insert_edges.csv'
+) FORMAT NEO4J
+
+statement error
+INSERT (:Person {external_id: 'not-selected', name: 'Nobody', age: 0})
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before mutation.*
+
+statement ok
+SESSION SET GRAPH native_insert
+
+# A single node gets a sequence-backed native key, labels, and typed properties.
+statement ok
+INSERT (person:Person&Engineer {external_id: 'p3', name: 'Linus', age: 31})
+
+query ITT
+MATCH (person:Person&Engineer) WHERE person.external_id = 'p3'
+RETURN person.age, person.name, person.external_id
+----
+31	Linus	p3
+
+# A directed path creates both endpoint nodes and the edge as one command.
+statement ok
+INSERT (source:Person {external_id: 'p4', name: 'Margaret', age: 35})
+       -[relationship:KNOWS {since: 2024}]->
+       (target:Person {external_id: 'p5', name: 'Barbara', age: 29})
+
+query TTI
+MATCH (source:Person)-[relationship:KNOWS]->(target:Person)
+WHERE source.external_id = 'p4' AND target.external_id = 'p5'
+RETURN source.name, target.name, relationship.since
+----
+Margaret	Barbara	2024
+
+# Left-pointing syntax stores the endpoints in the arrow direction.
+statement ok
+INSERT (target:Person {external_id: 'p6', name: 'Edsger', age: 40})
+       <-[relationship:KNOWS {since: 2025}]-
+       (source:Person {external_id: 'p7', name: 'Donald', age: 41})
+
+query TT
+MATCH (source:Person)-[:KNOWS]->(target:Person)
+WHERE source.external_id = 'p7' AND target.external_id = 'p6'
+RETURN source.name, target.name
+----
+Donald	Edsger
+
+# Every element in a longer fixed path uses the same preallocated id row.
+statement ok
+INSERT (:Person {external_id: 'p8', name: 'A', age: 1})
+       -[:KNOWS {since: 2021}]->
+       (:Person {external_id: 'p9', name: 'B', age: 2})
+       -[:KNOWS {since: 2022}]->
+       (:Person {external_id: 'p10', name: 'C', age: 3})
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)
+WHERE a.external_id = 'p8' AND c.external_id = 'p10'
+RETURN count(*)
+----
+1
+
+# A later conversion failure rolls back vertices already written by the same
+# autocommit command.
+statement error
+INSERT (:Person {external_id: 'atomic-a', name: 'First', age: 1})
+       -[:KNOWS {since: 2030}]->
+       (:Person {external_id: 'atomic-b', name: 'Second', age: 'bad'})
+----
+<REGEX>:.*Could not convert string.*
+
+query I
+MATCH (person:Person)
+WHERE person.external_id = 'atomic-a' OR person.external_id = 'atomic-b'
+RETURN count(*)
+----
+0
+
+# INSERT participates in an explicit caller transaction and supports
+# read-your-writes without owning the transaction boundary.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT (:Person {external_id: 'rollback', name: 'Transient', age: 1})
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'rollback'
+RETURN count(*)
+----
+1
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'rollback'
+RETURN count(*)
+----
+0
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT (:Person {external_id: 'committed', name: 'Persistent', age: 2})
+
+statement ok
+COMMIT
+
+query I
+MATCH (person:Person) WHERE person.external_id = 'committed'
+RETURN count(*)
+----
+1
+
+statement error
+INSERT (:Person {external_id: 'unknown', missing_property: 1})
+----
+<REGEX>:.*Property 'missing_property' is not mapped.*
+
+statement error
+INSERT (:Person {external_id: 'duplicate', age: 1, age: 2})
+----
+<REGEX>:.*Duplicate GQL INSERT property 'age'.*
+
+statement error
+INSERT (:Person)~[:KNOWS]~(:Person)
+----
+<REGEX>:.*undirected edge INSERT patterns.*

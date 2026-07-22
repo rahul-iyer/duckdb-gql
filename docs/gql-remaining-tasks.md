@@ -13,11 +13,11 @@ manifest rows, and run the verification commands at the end of this document.
 - Branch: `rewrite/native-tables`
 - Native DuckDB wide-table graph storage; no EAV fallback
 - Vectorized CSV and Parquet loading through `COPY GRAPH`
-- 1,117 assertions passing across 11 GQL test cases
+- 1,154 assertions passing across 12 GQL test cases
 - 93 imported clause feature files and 827 source scenarios
 - 93 verified executable source scenarios; 734 unreviewed
 - 532 of 548 fixture setups adapted
-- ISO manifest: 22 partial and 14 planned feature families
+- ISO manifest: 23 partial and 13 planned feature families
 - Full release conformance gate does not pass yet
 
 ## P0 — Correct and complete the core
@@ -29,12 +29,13 @@ manifest rows, and run the verification commands at the end of this document.
 
 ### Native INSERT
 
-- [ ] Implement native node `INSERT` over managed graph tables.
-- [ ] Implement directed and undirected native edge `INSERT`.
-- [ ] Support multiple elements in one insert graph pattern.
+- [x] Implement native node `INSERT` over managed graph tables.
+- [ ] Implement directed and undirected native edge `INSERT`. Directed fixed
+      paths are implemented; undirected edges remain.
+- [x] Support multiple elements in one insert graph pattern.
 - [ ] Support match-and-insert pipelines.
-- [ ] Make generated insert operations command-atomic in autocommit mode.
-- [ ] Verify read-your-writes and rollback inside caller transactions.
+- [x] Make generated insert operations command-atomic in autocommit mode.
+- [x] Verify read-your-writes and rollback inside caller transactions.
 
 ### Element and path values
 
@@ -250,9 +251,9 @@ manifest rows, and run the verification commands at the end of this document.
 
 ## Recommended next sequence
 
-1. Implement native GQL `INSERT`.
-2. Implement element type, label, source, and destination functions.
-3. Materialize quantified/VLP path values.
+1. Implement element type, label, source, and destination functions.
+2. Materialize quantified/VLP path values.
+3. Complete match-driven, multi-path, and undirected `INSERT`.
 4. Regenerate and promote compatibility candidates.
 
 ## Verification commands

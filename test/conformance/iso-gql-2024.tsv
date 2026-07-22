@@ -7,7 +7,7 @@ GQL-10	variables	graph, binding-table, and value variable definitions	planned	pa
 GQL-11	expressions	graph, binding-table, and object expressions	planned	parser,binder,types,execution
 GQL-12	catalog	schema, graph, and graph-type create/drop/copy/replace	partial	parser,binder,execution,persistence
 GQL-13	modification	insert, set, remove, delete, detach, and modification pipelines	partial	parser,binder,execution,transactions
-GQL-13.2	modification	insert statement and match-and-insert pipelines	planned	parser,binder,execution,transactions
+GQL-13.2	modification	insert statement and match-and-insert pipelines	partial	parser,binder,execution,transactions
 GQL-13.3	modification	set properties, property maps, and labels	partial	parser,binder,types,execution,transactions
 GQL-13.4	modification	remove properties and labels	partial	parser,binder,execution,transactions
 GQL-13.5	modification	delete edges, delete isolated nodes, and detach delete	partial	parser,binder,execution,transactions

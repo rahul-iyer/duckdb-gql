@@ -65,12 +65,16 @@ SESSION SET GRAPH table_native
 ----
 true	table_native
 
-# INSERT remains pending. Core matched mutations lower directly to the managed
-# native tables and never fall back to removed EAV DML.
-statement error
+# INSERT lowers to native managed-table DML. Core matched mutations also lower
+# directly to the managed native tables and never fall back to removed EAV DML.
+statement ok
 INSERT (:airport {code: 'LAX'})
+
+query T
+MATCH (a:airport) WHERE a.code = 'LAX'
+RETURN a.code
 ----
-<REGEX>:.*GQL INSERT on native graph tables is not implemented yet.*
+LAX
 
 statement ok
 MATCH (a:airport) SET a.city = 'Changed'
@@ -102,17 +106,17 @@ AUS	Atlanta
 
 # Writes through ordinary SQL are visible to later GQL without graph re-import.
 statement ok
-INSERT INTO gql_data.graph_1_vertices VALUES (4, '4', 'airport', '4', 'SFO', 'San Francisco')
+INSERT INTO gql_data.graph_1_vertices VALUES (5, '5', 'airport', '5', 'SFO', 'San Francisco')
 
 statement ok
-INSERT INTO gql_data.graph_1_edges VALUES (3, 1, 4, 'route', 2139)
+INSERT INTO gql_data.graph_1_edges VALUES (3, 1, 5, 'route', 2139)
 
 query II
 SELECT vertex_count, edge_count
 FROM gql_graphs()
 WHERE graph_name = 'table_native'
 ----
-4	3
+5	3
 
 query TI
 MATCH (a:airport)-[r:route]->(b:airport)
@@ -178,6 +182,7 @@ ATL
 ATL
 AUS
 AUS
+LAX
 SFO
 
 # Star keeps its zero-hop row even when recursive expansion finds no edge.
@@ -202,7 +207,7 @@ query III
 SELECT vertex_count, edge_count, build_count
 FROM gql_build_csr('table_native')
 ----
-4	3	1
+5	3	1
 
 query T rowsort
 MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
@@ -218,13 +223,13 @@ query III
 SELECT vertex_count, edge_count, cached
 FROM gql_csr_stats('table_native')
 ----
-4	3	true
+5	3	true
 
 query II rowsort
 SELECT * FROM gql_neighbors('table_native', 1, 'out')
 ----
 2	1
-4	3
+5	3
 
 query T rowsort
 MATCH /*+ CSR */ (a:airport)-[:route]->{2,}(b:airport)
@@ -250,6 +255,7 @@ ATL
 ATL
 AUS
 AUS
+LAX
 SFO
 
 # Star keeps its zero-hop row even when the requested edge type is absent.
@@ -270,7 +276,7 @@ RETURN COUNT(*)
 0
 
 statement ok
-INSERT INTO gql_data.graph_1_edges VALUES (4, 4, 2, 'route', 1500)
+INSERT INTO gql_data.graph_1_edges VALUES (4, 5, 2, 'route', 1500)
 
 # Native recursion sees direct SQL topology changes immediately, independently
 # of the explicitly managed CSR snapshot.
@@ -288,7 +294,7 @@ query III
 SELECT vertex_count, edge_count, build_count
 FROM gql_build_csr('table_native')
 ----
-4	4	2
+5	4	2
 
 query T
 MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
@@ -329,6 +335,7 @@ ROLLBACK
 query T rowsort
 MATCH (a:airport) RETURN a.missing
 ----
+NULL
 NULL
 NULL
 NULL

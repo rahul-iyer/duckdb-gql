@@ -537,6 +537,102 @@ TableFunction GqlMutationGraphFunction() {
 }
 
 static unique_ptr<TableRef>
+InsertTargetBindReplace(ClientContext &context, TableFunctionBindInput &input) {
+  if (input.inputs.size() != 2 || input.inputs[0].IsNull() ||
+      input.inputs[1].IsNull()) {
+    throw BinderException(
+        "GQL INSERT target requires an element kind and property-name list");
+  }
+  auto graph = LoadSelectedGraph(context);
+  auto kind = input.inputs[0].GetValue<string>();
+  const auto &table = kind == "EDGE" ? graph.edge
+                      : kind == "VERTEX"
+                          ? graph.vertex
+                          : throw BinderException("Invalid GQL element kind");
+  auto expected_key = kind == "EDGE" ? "__gql_edge_id" : "__gql_id";
+  auto expected_label = kind == "EDGE" ? "__gql_type" : "__gql_label";
+  if (!StringUtil::CIEquals(table.key_column, expected_key) ||
+      !StringUtil::CIEquals(table.label_column, expected_label)) {
+    throw NotImplementedException(
+        "GQL INSERT requires canonical %s and %s columns", expected_key,
+        expected_label);
+  }
+  if (kind == "EDGE" &&
+      (!StringUtil::CIEquals(graph.edge_source_column, "__gql_source_id") ||
+       !StringUtil::CIEquals(graph.edge_target_column, "__gql_target_id"))) {
+    throw NotImplementedException(
+        "GQL INSERT requires canonical edge endpoint columns");
+  }
+  case_insensitive_set_t properties;
+  for (const auto &entry : ListValue::GetChildren(input.inputs[1])) {
+    auto property = entry.GetValue<string>();
+    if (!properties.insert(property).second) {
+      throw BinderException("Duplicate GQL INSERT property '%s'", property);
+    }
+    auto &column = MappedProperty(table, property);
+    if (!StringUtil::CIEquals(column, property)) {
+      throw NotImplementedException(
+          "INSERT property '%s' maps to physical column '%s'; aliased "
+          "columns are not implemented",
+          property, column);
+    }
+  }
+  auto result = make_uniq<BaseTableRef>();
+  result->catalog_name = table.catalog_name;
+  result->schema_name = table.schema_name;
+  result->table_name = table.table_name;
+  return std::move(result);
+}
+
+static unique_ptr<TableRef>
+InsertIdsBindReplace(ClientContext &context, TableFunctionBindInput &input) {
+  if (input.inputs.size() != 2 || input.inputs[0].IsNull() ||
+      input.inputs[1].IsNull()) {
+    throw BinderException(
+        "GQL INSERT id allocation requires vertex and edge counts");
+  }
+  auto graph = LoadSelectedGraph(context);
+  auto vertex_count = input.inputs[0].GetValue<uint64_t>();
+  auto edge_count = input.inputs[1].GetValue<uint64_t>();
+  auto select = make_uniq<SelectNode>();
+  select->from_table = make_uniq<EmptyTableRef>();
+  auto add_ids = [&](const string &sequence_suffix,
+                     const string &column_prefix, uint64_t count) {
+    for (uint64_t index = 0; index < count; index++) {
+      vector<unique_ptr<ParsedExpression>> arguments;
+      arguments.push_back(Constant(Value(
+          "gql_internal.graph_" + to_string(graph.graph_id) + sequence_suffix)));
+      auto next_id =
+          make_uniq<FunctionExpression>("nextval", std::move(arguments));
+      next_id->SetAlias(column_prefix + to_string(index));
+      select->select_list.push_back(std::move(next_id));
+    }
+  };
+  add_ids("_vertex_id_seq", "vertex_id_", vertex_count);
+  add_ids("_edge_id_seq", "edge_id_", edge_count);
+  auto statement = make_uniq<SelectStatement>();
+  statement->node = std::move(select);
+  return make_uniq<SubqueryRef>(std::move(statement));
+}
+
+TableFunction GqlInsertTargetFunction() {
+  TableFunction function(
+      "gql_insert_target",
+      {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR)}, nullptr,
+      nullptr);
+  function.bind_replace = InsertTargetBindReplace;
+  return function;
+}
+
+TableFunction GqlInsertIdsFunction() {
+  TableFunction function("gql_insert_ids",
+                         {LogicalType::UBIGINT, LogicalType::UBIGINT}, nullptr,
+                         nullptr);
+  function.bind_replace = InsertIdsBindReplace;
+  return function;
+}
+
+static unique_ptr<TableRef>
 MergeTargetBindReplace(ClientContext &context, TableFunctionBindInput &input) {
   if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
     throw BinderException("GQL MERGE target requires a property-name list");
@@ -611,6 +707,149 @@ static Value MergeLiteralValue(const GqlLiteral &literal) {
         "NULL properties are not supported in MERGE patterns");
   }
   throw InternalException("Unknown MERGE literal type");
+}
+
+static Value InsertLiteralValue(const GqlLiteral &literal) {
+  if (literal.type == GqlLiteralType::NULL_VALUE) {
+    return Value();
+  }
+  return MergeLiteralValue(literal);
+}
+
+static vector<Value> InsertPropertyNames(const GqlInsertElement &element) {
+  vector<Value> result;
+  for (const auto &property : element.properties) {
+    result.emplace_back(property.name.value);
+  }
+  return result;
+}
+
+static unique_ptr<TableRef> InsertTarget(const char *kind,
+                                         const GqlInsertElement &element,
+                                         const string &alias) {
+  return FunctionTable(
+      "gql_insert_target",
+      {Value(kind), Value::LIST(LogicalType::VARCHAR,
+                                InsertPropertyNames(element))},
+      alias);
+}
+
+static unique_ptr<SQLStatement>
+CreateInsertIds(const string &snapshot_name, idx_t vertex_count,
+                idx_t edge_count) {
+  auto create = make_uniq<CreateStatement>();
+  auto info =
+      make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, snapshot_name);
+  info->temporary = true;
+  auto select = make_uniq<SelectNode>();
+  select->from_table = FunctionTable(
+      "gql_insert_ids",
+      {Value::UBIGINT(vertex_count), Value::UBIGINT(edge_count)},
+      "gql_insert_ids");
+  select->select_list.push_back(make_uniq<StarExpression>());
+  auto statement = make_uniq<SelectStatement>();
+  statement->node = std::move(select);
+  info->query = std::move(statement);
+  create->info = std::move(info);
+  return std::move(create);
+}
+
+static unique_ptr<ParsedExpression>
+InsertLabels(const GqlInsertElement &element) {
+  vector<string> labels;
+  case_insensitive_set_t seen;
+  for (const auto &label : element.labels) {
+    if (seen.insert(label.value).second) {
+      labels.push_back(label.value);
+    }
+  }
+  return Constant(labels.empty() ? Value()
+                                 : Value(StringUtil::Join(labels, ";")));
+}
+
+static void AddInsertProperties(MergeIntoAction &action,
+                                const GqlInsertElement &element) {
+  for (const auto &property : element.properties) {
+    action.insert_columns.push_back(property.name.value);
+    action.expressions.push_back(Constant(InsertLiteralValue(property.value)));
+  }
+}
+
+static unique_ptr<SQLStatement>
+LowerInsertVertex(const string &snapshot_name, idx_t vertex_index,
+                  const GqlInsertElement &vertex) {
+  auto statement = make_uniq<MergeIntoStatement>();
+  statement->target = InsertTarget("VERTEX", vertex, "gql_insert_target");
+  statement->source = Snapshot(snapshot_name, "gql_insert_source");
+  statement->join_condition = Constant(Value(false));
+
+  auto action = make_uniq<MergeIntoAction>();
+  action->action_type = MergeActionType::MERGE_INSERT;
+  action->insert_columns = {"__gql_id", "__gql_external_id",
+                            "__gql_label"};
+  auto id_column = "vertex_id_" + to_string(vertex_index);
+  action->expressions.push_back(Column("gql_insert_source", id_column));
+  action->expressions.push_back(make_uniq<CastExpression>(
+      LogicalType::VARCHAR, Column("gql_insert_source", id_column)));
+  action->expressions.push_back(InsertLabels(vertex));
+  AddInsertProperties(*action, vertex);
+  statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
+      .push_back(std::move(action));
+  return std::move(statement);
+}
+
+static unique_ptr<SQLStatement>
+LowerInsertEdge(const string &snapshot_name, idx_t edge_index,
+                const GqlInsertEdge &edge) {
+  auto statement = make_uniq<MergeIntoStatement>();
+  statement->target = InsertTarget("EDGE", edge, "gql_insert_target");
+  statement->source = Snapshot(snapshot_name, "gql_insert_source");
+  statement->join_condition = Constant(Value(false));
+
+  auto action = make_uniq<MergeIntoAction>();
+  action->action_type = MergeActionType::MERGE_INSERT;
+  action->insert_columns = {"__gql_edge_id", "__gql_source_id",
+                            "__gql_target_id", "__gql_type"};
+  action->expressions.push_back(Column(
+      "gql_insert_source", "edge_id_" + to_string(edge_index)));
+  action->expressions.push_back(Column(
+      "gql_insert_source", "vertex_id_" + to_string(edge.source_vertex)));
+  action->expressions.push_back(Column(
+      "gql_insert_source", "vertex_id_" + to_string(edge.target_vertex)));
+  action->expressions.push_back(InsertLabels(edge));
+  AddInsertProperties(*action, edge);
+  statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
+      .push_back(std::move(action));
+  return std::move(statement);
+}
+
+vector<unique_ptr<SQLStatement>>
+GqlLowerInsert(const GqlInsertStatement &insert) {
+  if (insert.vertices.empty()) {
+    throw BinderException("GQL INSERT requires at least one vertex");
+  }
+  static atomic<uint64_t> next_insert_command_id(0);
+  auto command_id = "gql_insert_" +
+                    to_string(next_insert_command_id.fetch_add(
+                        1, std::memory_order_relaxed));
+  auto snapshot_name = "_" + command_id;
+  vector<unique_ptr<SQLStatement>> statements;
+  statements.push_back(ControlStatement(command_id, true));
+  statements.push_back(CreateInsertIds(snapshot_name, insert.vertices.size(),
+                                       insert.edges.size()));
+  for (idx_t index = 0; index < insert.vertices.size(); index++) {
+    statements.push_back(
+        LowerInsertVertex(snapshot_name, index, insert.vertices[index]));
+  }
+  for (idx_t index = 0; index < insert.edges.size(); index++) {
+    statements.push_back(
+        LowerInsertEdge(snapshot_name, index, insert.edges[index]));
+  }
+  statements.push_back(UpdateGraphVersionAlways());
+  statements.push_back(DropSnapshot(snapshot_name));
+  statements.push_back(ControlStatement(command_id, false));
+  statements.push_back(ResultStatement());
+  return statements;
 }
 
 static unique_ptr<SQLStatement>

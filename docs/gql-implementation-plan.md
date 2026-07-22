@@ -6,7 +6,7 @@ Build a C++17 DuckDB extension that accepts GQL directly, stores graphs in manag
 
 The target is full ISO/IEC 39075:2024 conformance, not a permanently limited graph-query subset. The source of record is [`test/conformance/iso-gql-2024.tsv`](../test/conformance/iso-gql-2024.tsv), checked by `python3 scripts/check_gql_conformance.py --release`.
 
-## Current status (2026-07-20)
+## Current status (2026-07-21)
 
 - Direct OpenGQL parsing, owned AST nodes, initial binding/type checks, logical MATCH IR, and DuckDB plan lowering exist.
 - `CREATE GRAPH`, `DROP GRAPH`, `SESSION SET GRAPH`, and atomic `COPY GRAPH` are implemented.
@@ -15,7 +15,11 @@ The target is full ISO/IEC 39075:2024 conformance, not a permanently limited gra
 - Fixed directed MATCH, filters, projections, optional matching, aggregation, ordering/paging, finite anonymous quantifiers, and one anonymous unbounded directed factor use native DuckDB plans.
 - Native variable-length execution uses recursive CTEs with ordered used-edge identity for different-edge/trail semantics.
 - Explicit connection-local CSR build and hinted unbounded-path execution are implemented for managed native graphs.
-- Matched property `SET`, `REMOVE`, edge/node `DELETE`, and `DETACH DELETE` lower to ordinary DuckDB DML over managed native tables. Multiple items use one pre-mutation snapshot, participate in the caller transaction, and are atomic in autocommit. `INSERT` and whole-map replacement remain pending.
+- Standalone node and directed fixed-path `INSERT`, matched property `SET`,
+  `REMOVE`, edge/node `DELETE`, and `DETACH DELETE` lower to ordinary DuckDB
+  DML over managed native tables. They participate in the caller transaction
+  and are atomic in autocommit. Match-and-insert, undirected insertion, and
+  whole-map replacement remain pending.
 - A project-owned Cypher-compatible single-vertex `MERGE` lowers to DuckDB's native `MERGE INTO`; it is intentionally not recorded as ISO GQL conformance. Edge/path MERGE and `ON CREATE`/`ON MATCH` remain pending.
 
 ## Required compiler architecture
@@ -35,7 +39,8 @@ The target is full ISO/IEC 39075:2024 conformance, not a permanently limited gra
 3. Complete storage-independent graph-relational logical IR.
 4. Complete core query behavior: fixed patterns, optional matching, label expressions, predicates, projection, distinctness, grouping, aggregation, ordering, offset, and limit.
 5. Complete core mutation directly over managed tables:
-   - `INSERT` target-table selection and identity allocation;
+   - standalone node and directed fixed-path `INSERT` are implemented with
+     target-table validation and sequence-backed identity allocation;
    - typed property `SET` is implemented; whole-map replacement remains;
    - `REMOVE` is implemented for mapped nullable property columns;
    - edge/node `DELETE` and `DETACH DELETE` are implemented;
