@@ -136,29 +136,35 @@ std::any GqlTransformer::visitSessionSetGraphClause(GQLParser::SessionSetGraphCl
 }
 
 std::any GqlTransformer::visitInsertStatement(GQLParser::InsertStatementContext *context) {
-	auto pattern = context->insertGraphPattern();
+	statement = TransformInsert(*context, false);
+	return {};
+}
+
+shared_ptr<GqlInsertStatement> GqlTransformer::TransformInsert(GQLParser::InsertStatementContext &context,
+                                                               bool allow_expressions) {
+	auto pattern = context.insertGraphPattern();
 	if (!pattern || !pattern->insertPathPatternList()) {
-		Unsupported(*context, "empty INSERT pattern");
-		return {};
+		Unsupported(context, "empty INSERT pattern");
+		return nullptr;
 	}
 	auto paths = pattern->insertPathPatternList()->insertPathPattern();
 	if (paths.size() != 1) {
-		Unsupported(*context, "multiple INSERT paths");
-		return {};
+		Unsupported(context, "multiple INSERT paths");
+		return nullptr;
 	}
 	auto nodes = paths[0]->insertNodePattern();
 	auto edge_patterns = paths[0]->insertEdgePattern();
 	if (nodes.empty() || edge_patterns.size() + 1 != nodes.size()) {
-		Unsupported(*context, "invalid INSERT path topology");
-		return {};
+		Unsupported(context, "invalid INSERT path topology");
+		return nullptr;
 	}
 
-	auto insert = make_shared_ptr<GqlInsertStatement>(SourceRange(*context));
+	auto insert = make_shared_ptr<GqlInsertStatement>(SourceRange(context));
 	for (auto node : nodes) {
 		GqlInsertElement element;
 		element.source = SourceRange(*node);
-		if (!TransformInsertElement(node->insertElementPatternFiller(), element)) {
-			return {};
+		if (!TransformInsertElement(node->insertElementPatternFiller(), element, allow_expressions)) {
+			return nullptr;
 		}
 		insert->vertices.push_back(std::move(element));
 	}
@@ -175,20 +181,19 @@ std::any GqlTransformer::visitInsertStatement(GQLParser::InsertStatementContext 
 			edge.target_vertex = index;
 			filler = pointing_left->insertElementPatternFiller();
 		} else {
-			Unsupported(*context, "undirected edge INSERT patterns");
-			return {};
+			Unsupported(context, "undirected edge INSERT patterns");
+			return nullptr;
 		}
-		if (!TransformInsertElement(filler, edge)) {
-			return {};
+		if (!TransformInsertElement(filler, edge, allow_expressions)) {
+			return nullptr;
 		}
 		insert->edges.push_back(std::move(edge));
 	}
-	statement = std::move(insert);
-	return {};
+	return insert;
 }
 
 bool GqlTransformer::TransformInsertElement(GQLParser::InsertElementPatternFillerContext *filler,
-                                            GqlInsertElement &element) {
+	                                            GqlInsertElement &element, bool allow_expressions) {
 	if (!filler) {
 		return true;
 	}
@@ -225,7 +230,12 @@ bool GqlTransformer::TransformInsertElement(GQLParser::InsertElementPatternFille
 		GqlPropertyAssignment assignment;
 		assignment.source = SourceRange(*property);
 		assignment.name = TransformIdentifier(*property->propertyName());
-		if (!TransformLiteral(*property->valueExpression(), assignment.value)) {
+		if (allow_expressions) {
+			if (!TransformExpression(*property->valueExpression(), assignment.expression)) {
+				Unsupported(*property, "INSERT property expression");
+				return false;
+			}
+		} else if (!TransformLiteral(*property->valueExpression(), assignment.value)) {
 			Unsupported(*property, "non-scalar literal property values in INSERT");
 			return false;
 		}
@@ -669,8 +679,11 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 			mutation.detach = deletion->DETACH() != nullptr;
 			match.mutations.push_back(std::move(mutation));
 		}
-	} else if (context.insertStatement()) {
-		return fail(context, "MATCH with data modification pipeline");
+	} else if (auto insertion = context.insertStatement()) {
+		match.insertion = TransformInsert(*insertion, true);
+		if (!match.insertion) {
+			return false;
+		}
 	} else {
 		return fail(context, "data modification statement");
 	}

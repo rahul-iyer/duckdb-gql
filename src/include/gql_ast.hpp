@@ -37,9 +37,12 @@ struct GqlLiteral {
   GqlSourceRange source;
 };
 
+struct GqlExpression;
+
 struct GqlPropertyAssignment {
   GqlIdentifier name;
   GqlLiteral value;
+  shared_ptr<GqlExpression> expression;
   GqlSourceRange source;
 };
 
@@ -269,6 +272,7 @@ public:
   vector<GqlOrderBy> order_by;
   vector<GqlIdentifier> group_by_variables;
   vector<GqlMutation> mutations;
+  shared_ptr<GqlInsertStatement> insertion;
   bool has_mutation = false;
   bool optional = false;
   bool distinct = false;

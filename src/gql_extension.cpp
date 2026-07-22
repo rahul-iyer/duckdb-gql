@@ -26,6 +26,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlMutationGraphFunction());
 	loader.RegisterFunction(GqlInsertTargetFunction());
 	loader.RegisterFunction(GqlInsertIdsFunction());
+	loader.RegisterFunction(GqlMatchInsertIdsFunction());
 	loader.RegisterFunction(GqlMergeTargetFunction());
 	loader.RegisterFunction(GqlMergeIdFunction());
 	loader.RegisterFunction(GqlMutationControlFunction());

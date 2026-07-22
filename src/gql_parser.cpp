@@ -725,7 +725,8 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
     }
     vector<unique_ptr<SQLStatement>> statements;
     if (match.has_mutation) {
-      statements = GqlLowerMutation(plans);
+      statements = match.insertion ? GqlLowerMatchInsert(plans)
+                                   : GqlLowerMutation(plans);
     } else {
       statements.push_back(GqlLowerSelect(std::move(plans)));
     }

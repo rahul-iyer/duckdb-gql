@@ -38,12 +38,14 @@ RETURN a.name AS source_name,
 
 Native DuckDB relations are authoritative. Fixed MATCH and the default variable-length path implementation lower to ordinary DuckDB scans, joins, filters, projections, aggregation, ordering, and recursive CTE operators.
 
-Standalone node and directed fixed-path `INSERT`, matched property `SET`,
-`REMOVE`, edge/node `DELETE`, and `DETACH DELETE` lower directly to managed
-native DuckDB tables. They participate in explicit caller transactions and
-retain command-level atomicity in autocommit. Match-and-insert pipelines,
-undirected edge insertion, whole-map replacement, and schema evolution for
-previously unmapped properties remain pending.
+Standalone node and directed fixed-path `INSERT`, fixed directed
+`MATCH`-and-`INSERT` pipelines, matched property `SET`, `REMOVE`, edge/node
+`DELETE`, and `DETACH DELETE` lower directly to managed native DuckDB tables.
+Pipeline inserts reuse matched nodes as endpoints and evaluate inserted
+properties once per matched row. They participate in explicit caller
+transactions and retain command-level atomicity in autocommit. Multiple insert
+paths/clauses, undirected edge insertion, whole-map replacement, and schema
+evolution for previously unmapped properties remain pending.
 
 The project also provides a deliberately separate Cypher-compatible vertex
 upsert extension:

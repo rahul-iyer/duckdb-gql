@@ -95,6 +95,38 @@ struct GqlBoundMutation {
   GqlSourceRange source;
 };
 
+struct GqlBoundInsertProperty {
+  string name;
+  string value_column;
+  GqlSourceRange source;
+};
+
+struct GqlBoundInsertVertex {
+  bool existing = false;
+  bool create = false;
+  idx_t binding_index = DConstants::INVALID_INDEX;
+  idx_t allocation_index = DConstants::INVALID_INDEX;
+  string existing_id_column;
+  vector<string> labels;
+  vector<GqlBoundInsertProperty> properties;
+  GqlSourceRange source;
+};
+
+struct GqlBoundInsertEdge {
+  idx_t allocation_index = DConstants::INVALID_INDEX;
+  idx_t source_vertex = DConstants::INVALID_INDEX;
+  idx_t target_vertex = DConstants::INVALID_INDEX;
+  vector<string> labels;
+  vector<GqlBoundInsertProperty> properties;
+  GqlSourceRange source;
+};
+
+struct GqlBoundInsert {
+  vector<GqlBoundInsertVertex> vertices;
+  vector<GqlBoundInsertEdge> edges;
+  idx_t new_vertex_count = 0;
+};
+
 enum class GqlLogicalOperatorType : uint8_t { MATCH, FILTER, PROJECT };
 
 class GqlLogicalOperator {
@@ -151,6 +183,7 @@ struct GqlLogicalPlan {
   vector<GqlBinding> bindings;
   shared_ptr<GqlLogicalOperator> root;
   vector<GqlBoundMutation> mutations;
+  shared_ptr<GqlBoundInsert> insertion;
   GqlExecutionMode execution_mode = GqlExecutionMode::NATIVE;
 };
 

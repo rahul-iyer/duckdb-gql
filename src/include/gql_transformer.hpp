@@ -23,7 +23,10 @@ private:
 	std::any visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *context) override;
 	std::any visitInsertStatement(GQLParser::InsertStatementContext *context) override;
 
-	bool TransformInsertElement(GQLParser::InsertElementPatternFillerContext *filler, GqlInsertElement &element);
+	shared_ptr<GqlInsertStatement> TransformInsert(GQLParser::InsertStatementContext &context,
+	                                               bool allow_expressions);
+	bool TransformInsertElement(GQLParser::InsertElementPatternFillerContext *filler, GqlInsertElement &element,
+	                            bool allow_expressions);
 	bool TransformMatch(GQLParser::GqlProgramContext &root);
 	bool TransformMutation(GQLParser::PrimitiveDataModifyingStatementContext &context, GqlMatchStatement &match);
 	bool TransformMatchElement(GQLParser::ElementPatternFillerContext *filler, GqlPatternElementType type,

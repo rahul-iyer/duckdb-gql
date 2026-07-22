@@ -633,6 +633,52 @@ TableFunction GqlInsertIdsFunction() {
 }
 
 static unique_ptr<TableRef>
+MatchInsertIdsBindReplace(ClientContext &context,
+                          TableFunctionBindInput &input) {
+  if (input.inputs.size() != 3 || input.inputs[0].IsNull() ||
+      input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
+    throw BinderException("GQL MATCH INSERT id allocation requires a source "
+                          "snapshot and vertex/edge counts");
+  }
+  auto graph = LoadSelectedGraph(context);
+  auto snapshot_name = input.inputs[0].GetValue<string>();
+  auto vertex_count = input.inputs[1].GetValue<uint64_t>();
+  auto edge_count = input.inputs[2].GetValue<uint64_t>();
+  auto select = make_uniq<SelectNode>();
+  auto source = make_uniq<BaseTableRef>();
+  source->table_name = snapshot_name;
+  source->alias = "gql_match_insert_input";
+  select->from_table = std::move(source);
+  select->select_list.push_back(make_uniq<StarExpression>());
+  auto add_ids = [&](const string &sequence_suffix,
+                     const string &column_prefix, uint64_t count) {
+    for (uint64_t index = 0; index < count; index++) {
+      vector<unique_ptr<ParsedExpression>> arguments;
+      arguments.push_back(Constant(Value(
+          "gql_internal.graph_" + to_string(graph.graph_id) + sequence_suffix)));
+      auto next_id =
+          make_uniq<FunctionExpression>("nextval", std::move(arguments));
+      next_id->SetAlias(column_prefix + to_string(index));
+      select->select_list.push_back(std::move(next_id));
+    }
+  };
+  add_ids("_vertex_id_seq", "vertex_id_", vertex_count);
+  add_ids("_edge_id_seq", "edge_id_", edge_count);
+  auto statement = make_uniq<SelectStatement>();
+  statement->node = std::move(select);
+  return make_uniq<SubqueryRef>(std::move(statement));
+}
+
+TableFunction GqlMatchInsertIdsFunction() {
+  TableFunction function(
+      "gql_match_insert_ids",
+      {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT},
+      nullptr, nullptr);
+  function.bind_replace = MatchInsertIdsBindReplace;
+  return function;
+}
+
+static unique_ptr<TableRef>
 MergeTargetBindReplace(ClientContext &context, TableFunctionBindInput &input) {
   if (input.inputs.size() != 1 || input.inputs[0].IsNull()) {
     throw BinderException("GQL MERGE target requires a property-name list");
@@ -847,6 +893,168 @@ GqlLowerInsert(const GqlInsertStatement &insert) {
   }
   statements.push_back(UpdateGraphVersionAlways());
   statements.push_back(DropSnapshot(snapshot_name));
+  statements.push_back(ControlStatement(command_id, false));
+  statements.push_back(ResultStatement());
+  return statements;
+}
+
+static vector<Value>
+MatchInsertPropertyNames(const vector<GqlBoundInsertProperty> &properties) {
+  vector<Value> result;
+  for (const auto &property : properties) {
+    result.emplace_back(property.name);
+  }
+  return result;
+}
+
+static unique_ptr<TableRef>
+MatchInsertTarget(const char *kind,
+                  const vector<GqlBoundInsertProperty> &properties,
+                  const string &alias) {
+  return FunctionTable(
+      "gql_insert_target",
+      {Value(kind), Value::LIST(LogicalType::VARCHAR,
+                                MatchInsertPropertyNames(properties))},
+      alias);
+}
+
+static unique_ptr<SQLStatement>
+CreateMatchInsertIds(const string &source_snapshot,
+                     const string &ids_snapshot, idx_t vertex_count,
+                     idx_t edge_count) {
+  auto create = make_uniq<CreateStatement>();
+  auto info =
+      make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, ids_snapshot);
+  info->temporary = true;
+  auto select = make_uniq<SelectNode>();
+  select->from_table = FunctionTable(
+      "gql_match_insert_ids",
+      {Value(source_snapshot), Value::UBIGINT(vertex_count),
+       Value::UBIGINT(edge_count)},
+      "gql_match_insert_ids");
+  select->select_list.push_back(make_uniq<StarExpression>());
+  auto statement = make_uniq<SelectStatement>();
+  statement->node = std::move(select);
+  info->query = std::move(statement);
+  create->info = std::move(info);
+  return std::move(create);
+}
+
+static unique_ptr<ParsedExpression>
+MatchInsertLabels(const vector<string> &input) {
+  vector<string> labels;
+  case_insensitive_set_t seen;
+  for (const auto &label : input) {
+    if (seen.insert(label).second) {
+      labels.push_back(label);
+    }
+  }
+  return Constant(labels.empty() ? Value()
+                                 : Value(StringUtil::Join(labels, ";")));
+}
+
+static void AddMatchInsertProperties(
+    MergeIntoAction &action,
+    const vector<GqlBoundInsertProperty> &properties) {
+  for (const auto &property : properties) {
+    action.insert_columns.push_back(property.name);
+    action.expressions.push_back(
+        Column("gql_match_insert_source", property.value_column));
+  }
+}
+
+static string MatchInsertVertexIdColumn(const GqlBoundInsertVertex &vertex) {
+  return vertex.existing
+             ? vertex.existing_id_column
+             : "vertex_id_" + to_string(vertex.allocation_index);
+}
+
+static unique_ptr<SQLStatement>
+LowerMatchInsertVertex(const string &ids_snapshot,
+                       const GqlBoundInsertVertex &vertex) {
+  auto statement = make_uniq<MergeIntoStatement>();
+  statement->target =
+      MatchInsertTarget("VERTEX", vertex.properties, "gql_insert_target");
+  statement->source = Snapshot(ids_snapshot, "gql_match_insert_source");
+  statement->join_condition = Constant(Value(false));
+
+  auto action = make_uniq<MergeIntoAction>();
+  action->action_type = MergeActionType::MERGE_INSERT;
+  action->insert_columns = {"__gql_id", "__gql_external_id",
+                            "__gql_label"};
+  auto id_column = MatchInsertVertexIdColumn(vertex);
+  action->expressions.push_back(
+      Column("gql_match_insert_source", id_column));
+  action->expressions.push_back(make_uniq<CastExpression>(
+      LogicalType::VARCHAR,
+      Column("gql_match_insert_source", id_column)));
+  action->expressions.push_back(MatchInsertLabels(vertex.labels));
+  AddMatchInsertProperties(*action, vertex.properties);
+  statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
+      .push_back(std::move(action));
+  return std::move(statement);
+}
+
+static unique_ptr<SQLStatement>
+LowerMatchInsertEdge(const string &ids_snapshot,
+                     const GqlBoundInsert &insert,
+                     const GqlBoundInsertEdge &edge) {
+  auto statement = make_uniq<MergeIntoStatement>();
+  statement->target =
+      MatchInsertTarget("EDGE", edge.properties, "gql_insert_target");
+  statement->source = Snapshot(ids_snapshot, "gql_match_insert_source");
+  statement->join_condition = Constant(Value(false));
+
+  auto action = make_uniq<MergeIntoAction>();
+  action->action_type = MergeActionType::MERGE_INSERT;
+  action->insert_columns = {"__gql_edge_id", "__gql_source_id",
+                            "__gql_target_id", "__gql_type"};
+  action->expressions.push_back(Column(
+      "gql_match_insert_source",
+      "edge_id_" + to_string(edge.allocation_index)));
+  action->expressions.push_back(Column(
+      "gql_match_insert_source",
+      MatchInsertVertexIdColumn(insert.vertices[edge.source_vertex])));
+  action->expressions.push_back(Column(
+      "gql_match_insert_source",
+      MatchInsertVertexIdColumn(insert.vertices[edge.target_vertex])));
+  action->expressions.push_back(MatchInsertLabels(edge.labels));
+  AddMatchInsertProperties(*action, edge.properties);
+  statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
+      .push_back(std::move(action));
+  return std::move(statement);
+}
+
+vector<unique_ptr<SQLStatement>>
+GqlLowerMatchInsert(const vector<GqlLogicalPlan> &plans) {
+  if (plans.empty() || !plans[0].insertion) {
+    throw InternalException(
+        "GQL MATCH INSERT lowering requires a bound insertion");
+  }
+  const auto &insert = *plans[0].insertion;
+  static atomic<uint64_t> next_match_insert_command_id(0);
+  auto command_id = "gql_match_insert_" +
+                    to_string(next_match_insert_command_id.fetch_add(
+                        1, std::memory_order_relaxed));
+  auto match_snapshot = "_" + command_id + "_matches";
+  auto ids_snapshot = "_" + command_id + "_ids";
+  vector<unique_ptr<SQLStatement>> statements;
+  statements.push_back(ControlStatement(command_id, true));
+  statements.push_back(CreateSnapshot(plans, match_snapshot));
+  statements.push_back(CreateMatchInsertIds(
+      match_snapshot, ids_snapshot, insert.new_vertex_count,
+      insert.edges.size()));
+  for (const auto &vertex : insert.vertices) {
+    if (vertex.create) {
+      statements.push_back(LowerMatchInsertVertex(ids_snapshot, vertex));
+    }
+  }
+  for (const auto &edge : insert.edges) {
+    statements.push_back(LowerMatchInsertEdge(ids_snapshot, insert, edge));
+  }
+  statements.push_back(UpdateGraphVersion(ids_snapshot));
+  statements.push_back(DropSnapshot(ids_snapshot));
+  statements.push_back(DropSnapshot(match_snapshot));
   statements.push_back(ControlStatement(command_id, false));
   statements.push_back(ResultStatement());
   return statements;

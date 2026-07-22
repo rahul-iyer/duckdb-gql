@@ -13,7 +13,7 @@ manifest rows, and run the verification commands at the end of this document.
 - Branch: `rewrite/native-tables`
 - Native DuckDB wide-table graph storage; no EAV fallback
 - Vectorized CSV and Parquet loading through `COPY GRAPH`
-- 1,154 assertions passing across 12 GQL test cases
+- 1,178 assertions passing across 12 GQL test cases
 - 93 imported clause feature files and 827 source scenarios
 - 93 verified executable source scenarios; 734 unreviewed
 - 532 of 548 fixture setups adapted
@@ -33,7 +33,9 @@ manifest rows, and run the verification commands at the end of this document.
 - [ ] Implement directed and undirected native edge `INSERT`. Directed fixed
       paths are implemented; undirected edges remain.
 - [x] Support multiple elements in one insert graph pattern.
-- [ ] Support match-and-insert pipelines.
+- [x] Support one fixed directed match-and-insert path, including matched
+      endpoints, per-match-row property expressions, cardinality preservation,
+      and command rollback. Multiple paths/clauses remain.
 - [x] Make generated insert operations command-atomic in autocommit mode.
 - [x] Verify read-your-writes and rollback inside caller transactions.
 
@@ -253,7 +255,7 @@ manifest rows, and run the verification commands at the end of this document.
 
 1. Implement element type, label, source, and destination functions.
 2. Materialize quantified/VLP path values.
-3. Complete match-driven, multi-path, and undirected `INSERT`.
+3. Complete multiple-path/clause and undirected `INSERT`.
 4. Regenerate and promote compatibility candidates.
 
 ## Verification commands

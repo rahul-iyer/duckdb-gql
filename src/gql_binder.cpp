@@ -536,46 +536,170 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 
 	auto project = make_shared_ptr<GqlLogicalProject>();
 	vector<GqlBoundMutation> bound_mutations;
+	shared_ptr<GqlBoundInsert> bound_insertion;
 	if (statement.has_mutation) {
-		for (idx_t mutation_index = 0; mutation_index < statement.mutations.size(); mutation_index++) {
-			auto &mutation = statement.mutations[mutation_index];
-			auto &target = Resolve(mutation.variable);
-			if (target.type.id != GqlTypeId::NODE && target.type.id != GqlTypeId::EDGE) {
-				throw BinderException("GQL mutation target must be a node or edge");
-			}
-			GqlBoundMutation bound_mutation;
-			bound_mutation.type = mutation.type;
-			bound_mutation.binding_index = target.index;
-			bound_mutation.binding_type = target.type;
-			bound_mutation.name = mutation.name.value;
-			bound_mutation.detach = mutation.detach;
-			bound_mutation.source = mutation.source;
+		if (statement.insertion) {
+			bound_insertion = make_shared_ptr<GqlBoundInsert>();
+			unordered_map<string, pair<bool, idx_t>> inserted_variables;
+			auto bind_properties = [&](const GqlInsertElement &element, const string &column_prefix,
+			                           vector<GqlBoundInsertProperty> &properties) {
+				case_insensitive_set_t names;
+				for (idx_t property_index = 0; property_index < element.properties.size(); property_index++) {
+					const auto &property = element.properties[property_index];
+					if (!names.insert(property.name.value).second) {
+						throw BinderException("Duplicate GQL INSERT property '%s'", property.name.value);
+					}
+					if (!property.expression) {
+						throw InternalException("MATCH INSERT property has no expression");
+					}
+					auto value = BindExpression(*property.expression);
+					if (ContainsAggregate(*value)) {
+						throw BinderException("GQL aggregate functions are not allowed in INSERT");
+					}
+					if (!IsScalar(value->result_type.id)) {
+						throw BinderException("GQL INSERT property requires a scalar value");
+					}
+					auto value_column = column_prefix + std::to_string(property_index);
+					project->projections.push_back({std::move(value), value_column, property.source});
+					properties.push_back({property.name.value, std::move(value_column), property.source});
+				}
+			};
 
-			auto target_expression = make_shared_ptr<GqlBoundExpression>();
-			target_expression->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
-			target_expression->binding_index = target.index;
-			target_expression->result_type = {GqlTypeId::ELEMENT_ID, false};
-			project->projections.push_back(
-			    {std::move(target_expression), "gql_target_id_" + std::to_string(mutation_index), mutation.source});
-			if (mutation.type == GqlMutationType::SET_PROPERTY) {
-				if (!mutation.value) {
-					throw InternalException("GQL SET property has no value expression");
+			for (idx_t vertex_index = 0; vertex_index < statement.insertion->vertices.size(); vertex_index++) {
+				const auto &vertex = statement.insertion->vertices[vertex_index];
+				GqlBoundInsertVertex bound_vertex;
+				bound_vertex.source = vertex.source;
+				for (const auto &label : vertex.labels) {
+					bound_vertex.labels.push_back(label.value);
 				}
-				bound_mutation.value = BindExpression(*mutation.value);
-				if (ContainsAggregate(*bound_mutation.value)) {
-					throw BinderException("GQL aggregate functions are not allowed in SET");
+				auto existing = vertex.variable.IsEmpty() ? binding_map.end() : binding_map.find(vertex.variable.value);
+				if (existing != binding_map.end()) {
+					auto &binding = bindings[existing->second];
+					if (binding.type.id != GqlTypeId::NODE) {
+						throw BinderException("GQL INSERT cannot reuse bound non-node variable '%s' as a node",
+						                      vertex.variable.value);
+					}
+					if (statement.insertion->edges.empty() || !vertex.labels.empty() || !vertex.properties.empty()) {
+						throw BinderException("GQL INSERT node variable '%s' is already bound",
+						                      vertex.variable.value);
+					}
+					bound_vertex.existing = true;
+					bound_vertex.binding_index = binding.index;
+					bound_vertex.existing_id_column =
+					    "gql_insert_existing_vertex_" + std::to_string(vertex_index);
+					auto id = make_shared_ptr<GqlBoundExpression>();
+					id->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
+					id->binding_index = binding.index;
+					id->result_type = {GqlTypeId::ELEMENT_ID, false};
+					project->projections.push_back({std::move(id), bound_vertex.existing_id_column, vertex.source});
+				} else {
+					bool first_declaration = true;
+					if (!vertex.variable.IsEmpty()) {
+						auto inserted = inserted_variables.find(vertex.variable.value);
+						if (inserted != inserted_variables.end()) {
+							if (!inserted->second.first) {
+								throw BinderException("GQL INSERT variable '%s' is already defined as an edge",
+								                      vertex.variable.value);
+							}
+							if (!vertex.labels.empty() || !vertex.properties.empty()) {
+								throw BinderException("GQL INSERT node variable '%s' is already defined",
+								                      vertex.variable.value);
+							}
+							bound_vertex.allocation_index = inserted->second.second;
+							first_declaration = false;
+						} else {
+							bound_vertex.allocation_index = bound_insertion->new_vertex_count++;
+							inserted_variables.emplace(vertex.variable.value,
+							                           make_pair(true, bound_vertex.allocation_index));
+						}
+					} else {
+						bound_vertex.allocation_index = bound_insertion->new_vertex_count++;
+					}
+					bound_vertex.create = first_declaration;
+					if (bound_vertex.create) {
+						bind_properties(vertex,
+						                "gql_insert_vertex_property_" + std::to_string(vertex_index) + "_",
+						                bound_vertex.properties);
+					}
 				}
-				auto value_type = bound_mutation.value->result_type.id;
-				if (value_type == GqlTypeId::UNKNOWN || value_type == GqlTypeId::NULL_VALUE ||
-				    value_type == GqlTypeId::NODE || value_type == GqlTypeId::EDGE || value_type == GqlTypeId::PATH) {
-					throw NotImplementedException("GQL SET property requires a non-null scalar value");
-				}
-				project->projections.push_back(
-				    {bound_mutation.value, "gql_mutation_value_" + std::to_string(mutation_index), mutation.source});
+				bound_insertion->vertices.push_back(std::move(bound_vertex));
 			}
-			bound_mutations.push_back(std::move(bound_mutation));
+
+			for (idx_t edge_index = 0; edge_index < statement.insertion->edges.size(); edge_index++) {
+				const auto &edge = statement.insertion->edges[edge_index];
+				if (edge.source_vertex >= bound_insertion->vertices.size() ||
+				    edge.target_vertex >= bound_insertion->vertices.size()) {
+					throw InternalException("GQL INSERT edge endpoint is outside the vertex path");
+				}
+				if (!edge.variable.IsEmpty()) {
+					if (binding_map.find(edge.variable.value) != binding_map.end() ||
+					    inserted_variables.find(edge.variable.value) != inserted_variables.end()) {
+						throw BinderException("GQL INSERT edge variable '%s' is already bound", edge.variable.value);
+					}
+					inserted_variables.emplace(edge.variable.value, make_pair(false, edge_index));
+				}
+				GqlBoundInsertEdge bound_edge;
+				bound_edge.allocation_index = edge_index;
+				bound_edge.source_vertex = edge.source_vertex;
+				bound_edge.target_vertex = edge.target_vertex;
+				bound_edge.source = edge.source;
+				for (const auto &label : edge.labels) {
+					bound_edge.labels.push_back(label.value);
+				}
+				bind_properties(edge, "gql_insert_edge_property_" + std::to_string(edge_index) + "_",
+				                bound_edge.properties);
+				bound_insertion->edges.push_back(std::move(bound_edge));
+			}
+			auto row_marker = make_shared_ptr<GqlBoundExpression>();
+			row_marker->expression_type = GqlExpressionType::LITERAL;
+			row_marker->literal.type = GqlLiteralType::INTEGER;
+			row_marker->literal.value = "1";
+			row_marker->result_type = {GqlTypeId::INTEGER, false};
+			project->projections.push_back({std::move(row_marker), "gql_insert_row_marker", statement.source});
+		} else {
+			for (idx_t mutation_index = 0; mutation_index < statement.mutations.size(); mutation_index++) {
+				auto &mutation = statement.mutations[mutation_index];
+				auto &target = Resolve(mutation.variable);
+				if (target.type.id != GqlTypeId::NODE && target.type.id != GqlTypeId::EDGE) {
+					throw BinderException("GQL mutation target must be a node or edge");
+				}
+				GqlBoundMutation bound_mutation;
+				bound_mutation.type = mutation.type;
+				bound_mutation.binding_index = target.index;
+				bound_mutation.binding_type = target.type;
+				bound_mutation.name = mutation.name.value;
+				bound_mutation.detach = mutation.detach;
+				bound_mutation.source = mutation.source;
+
+				auto target_expression = make_shared_ptr<GqlBoundExpression>();
+				target_expression->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
+				target_expression->binding_index = target.index;
+				target_expression->result_type = {GqlTypeId::ELEMENT_ID, false};
+				project->projections.push_back(
+				    {std::move(target_expression), "gql_target_id_" + std::to_string(mutation_index), mutation.source});
+				if (mutation.type == GqlMutationType::SET_PROPERTY) {
+					if (!mutation.value) {
+						throw InternalException("GQL SET property has no value expression");
+					}
+					bound_mutation.value = BindExpression(*mutation.value);
+					if (ContainsAggregate(*bound_mutation.value)) {
+						throw BinderException("GQL aggregate functions are not allowed in SET");
+					}
+					auto value_type = bound_mutation.value->result_type.id;
+					if (value_type == GqlTypeId::UNKNOWN || value_type == GqlTypeId::NULL_VALUE ||
+					    value_type == GqlTypeId::NODE || value_type == GqlTypeId::EDGE ||
+					    value_type == GqlTypeId::PATH) {
+						throw NotImplementedException("GQL SET property requires a non-null scalar value");
+					}
+					project->projections.push_back(
+					    {bound_mutation.value, "gql_mutation_value_" + std::to_string(mutation_index), mutation.source});
+				}
+				bound_mutations.push_back(std::move(bound_mutation));
+			}
 		}
-		project->distinct = true;
+		if (!statement.insertion) {
+			project->distinct = true;
+		}
 	} else {
 		for (const auto &projection : statement.projections) {
 			if (!projection.expression) {
@@ -626,6 +750,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 	result.bindings = bindings;
 	result.root = std::move(project);
 	result.mutations = std::move(bound_mutations);
+	result.insertion = std::move(bound_insertion);
 	return result;
 }
 
