@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return2_172.test
+# name: test/features/executable_candidates/candidate_return2_172.test
 # Source: tck/features/clauses/return/Return2.feature:172 [10] Return count aggregation over an empty graph
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -2,7 +2,7 @@
 # description: Cypher-compatible vertex MERGE over managed native graph tables
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

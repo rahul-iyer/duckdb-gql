@@ -1,7 +1,7 @@
 {
   "type": "excalidraw",
   "version": 2,
-  "source": "duckdb-gql",
+  "source": "DuckGQL",
   "elements": [
     {
       "id": "title",
@@ -18,7 +18,7 @@
       "roughness": 0,
       "opacity": 100,
       "seed": 101,
-      "text": "DuckDB-GQL compiler and execution architecture",
+      "text": "DuckGQL compiler and execution architecture",
       "fontSize": 34,
       "fontFamily": 2,
       "textAlign": "left",

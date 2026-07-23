@@ -2,7 +2,7 @@
 # description: Basic GQL result shaping, optional matching, functions, and aggregation on native DuckDB operators
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

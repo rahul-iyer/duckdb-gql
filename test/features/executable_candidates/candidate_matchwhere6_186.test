@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere6_186.test
+# name: test/features/executable_candidates/candidate_matchwhere6_186.test
 # Source: tck/features/clauses/match-where/MatchWhere6.feature:186 [8] Join nodes on non-equality of properties – Two OPTIONAL MATCH clauses and WHERE
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

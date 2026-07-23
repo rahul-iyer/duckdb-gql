@@ -25,7 +25,7 @@ jobs:
     with:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
-      extension_name: gql
+      extension_name: duckgql
 
   code-quality-check:
     name: Code Quality Check
@@ -33,5 +33,5 @@ jobs:
     with:
       duckdb_version: v1.5.4
       ci_tools_version: v1.5-variegata
-      extension_name: gql
+      extension_name: duckgql
       format_checks: 'format;tidy'

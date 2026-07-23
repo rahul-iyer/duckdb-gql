@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match5_427.test
+# name: test/features/executable_candidates/candidate_match5_427.test
 # Source: tck/features/clauses/match/Match5.feature:427 [23] Handling a variable length relationship and a standard relationship in chain, longer 1
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

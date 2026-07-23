@@ -28,7 +28,7 @@ def candidate_body(path: Path) -> str:
     for line in lines:
         if line.startswith("# name:") or line == "# group: [gql]":
             continue
-        if line == "require gql":
+        if line == "require duckgql":
             continue
         result.append(line)
     while result and not result[0]:
@@ -147,6 +147,9 @@ def main() -> int:
     promoted: list[tuple[dict[str, str], Path]] = []
     for row in load_tsv(candidate_root / "manifest.tsv"):
         candidate = Path(row["test_path"])
+        if not candidate.is_absolute():
+            candidate = ROOT / candidate
+        candidate = candidate.resolve()
         completed = subprocess.run(
             [str(runner), candidate.relative_to(ROOT).as_posix()],
             cwd=ROOT,
@@ -168,7 +171,7 @@ def main() -> int:
         "# Each source-equivalent ISO-GQL adaptation passed independently before",
         "# inclusion here. Source licensing is retained under test/features/clauses.",
         "",
-        "require gql",
+        "require duckgql",
         "",
     ]
     for _, candidate in promoted:

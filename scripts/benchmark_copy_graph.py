@@ -222,7 +222,7 @@ def run_trial(
     trial: int,
     warmup: bool,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix=f"duckdb-gql-copy-{case}-") as temp:
+    with tempfile.TemporaryDirectory(prefix=f"duckgql-copy-{case}-") as temp:
         database = Path(temp) / "roadnet.duckdb"
         started = time.perf_counter()
         completed = subprocess.run(
@@ -294,7 +294,7 @@ def main() -> None:
     parser.add_argument(
         "--extension",
         type=Path,
-        default=Path("build/release/extension/gql/gql.duckdb_extension"),
+        default=Path("build/release/extension/duckgql/duckgql.duckdb_extension"),
     )
     parser.add_argument(
         "--source", type=Path, default=Path("data/roadnet-ca/roadNet-CA.txt.gz")

@@ -401,6 +401,10 @@ def main() -> int:
     if arguments.output is None:
         parser.error("--output is required unless --self-test is used")
     output = arguments.output.resolve()
+    try:
+        output_display = output.relative_to(ROOT)
+    except ValueError:
+        output_display = output
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
@@ -466,13 +470,14 @@ def main() -> int:
             if rowsort:
                 output_rows.sort()
             test_path = output / f"{name}.test"
+            test_path_display = output_display / test_path.name
             contents = [
-                f"# name: {test_path}",
+                f"# name: {test_path_display.as_posix()}",
                 f"# Source: {row['source_path']}:{row['source_line']} {row['scenario']}",
                 "# Generated candidate; semantic review required before promotion.",
                 "# group: [gql]",
                 "",
-                "require gql",
+                "require duckgql",
                 "",
                 fixture_sql,
                 "",
@@ -484,7 +489,7 @@ def main() -> int:
             ]
             test_path.write_text("\n".join(contents), encoding="utf-8")
             generated.append(
-                [row["source_path"], row["source_line"], str(test_path)]
+                [row["source_path"], row["source_line"], test_path_display.as_posix()]
             )
 
     with (output / "manifest.tsv").open(

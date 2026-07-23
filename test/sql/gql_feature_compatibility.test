@@ -6,7 +6,7 @@
 # Each source-equivalent ISO-GQL adaptation passed independently before
 # inclusion here. Source licensing is retained under test/features/clauses.
 
-require gql
+require duckgql
 
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:33 [1] Filter node with node label predicate on multi variables with multiple bindings
 # Generated candidate; semantic review required before promotion.

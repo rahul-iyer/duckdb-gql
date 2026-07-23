@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere5_96.test
+# name: test/features/executable_candidates/candidate_matchwhere5_96.test
 # Source: tck/features/clauses/match-where/MatchWhere5.feature:96 [4] Do not filter out on null if the OR'd predicate evaluates to true
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

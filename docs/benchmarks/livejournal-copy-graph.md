@@ -60,11 +60,11 @@ mkdir -p data/livejournal
 curl -L https://snap.stanford.edu/data/soc-LiveJournal1.txt.gz \
   -o data/livejournal/soc-LiveJournal1.txt.gz
 
-cmake --build build/release --target shell gql_loadable_extension -j8
+cmake --build build/release --target shell duckgql_loadable_extension -j8
 
 python3 scripts/benchmark_copy_graph.py \
   --duckdb build/release/duckdb \
-  --extension build/release/extension/gql/gql.duckdb_extension \
+  --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --source data/livejournal/soc-LiveJournal1.txt.gz \
   --prepared-dir data/livejournal/neo4j \
   --dataset-name soc-LiveJournal1 \

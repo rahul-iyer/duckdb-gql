@@ -2,7 +2,7 @@
 # description: Managed native wide-table loading through COPY GRAPH
 # group: [gql]
 
-require gql
+require duckgql
 
 require parquet
 

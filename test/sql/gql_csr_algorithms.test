@@ -2,7 +2,7 @@
 # description: Explicit CSR build and CALL-based traversal, ranking, components, and triangles
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

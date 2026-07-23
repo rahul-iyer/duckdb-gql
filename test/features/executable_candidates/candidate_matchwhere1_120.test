@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_120.test
+# name: test/features/executable_candidates/candidate_matchwhere1_120.test
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:120 [6] Filter node with a parameter in a property predicate on multi variables with one binding
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_returnorderby6_33.test
+# name: test/features/executable_candidates/candidate_returnorderby6_33.test
 # Source: tck/features/clauses/return-orderby/ReturnOrderBy6.feature:33 [1] Handle constants and parameters inside an order by item which contains an aggregation expression
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

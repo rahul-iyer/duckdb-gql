@@ -1,6 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
-#include "gql_extension.hpp"
+#include "duckgql_extension.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -77,13 +77,13 @@ static void LoadInternal(ExtensionLoader &loader) {
   callbacks.Register(GqlParserExtension());
 }
 
-void GqlExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
+void DuckgqlExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
 
-std::string GqlExtension::Name() { return "gql"; }
+std::string DuckgqlExtension::Name() { return "duckgql"; }
 
-std::string GqlExtension::Version() const {
-#ifdef EXT_VERSION_GQL
-  return EXT_VERSION_GQL;
+std::string DuckgqlExtension::Version() const {
+#ifdef EXT_VERSION_DUCKGQL
+  return EXT_VERSION_DUCKGQL;
 #else
   return "0.1.0-dev";
 #endif
@@ -93,5 +93,5 @@ std::string GqlExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(gql, loader) { duckdb::LoadInternal(loader); }
+DUCKDB_CPP_EXTENSION_ENTRY(duckgql, loader) { duckdb::LoadInternal(loader); }
 }

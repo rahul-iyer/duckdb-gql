@@ -234,7 +234,7 @@ def main() -> None:
     parser.add_argument(
         "--extension",
         type=Path,
-        default=Path("build/release/extension/gql/gql.duckdb_extension"),
+        default=Path("build/release/extension/duckgql/duckgql.duckdb_extension"),
     )
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

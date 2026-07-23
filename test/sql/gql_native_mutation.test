@@ -2,7 +2,7 @@
 # description: Native-table SET, REMOVE, DELETE, and DETACH DELETE
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

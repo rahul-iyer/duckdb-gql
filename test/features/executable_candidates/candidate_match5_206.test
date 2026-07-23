@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match5_206.test
+# name: test/features/executable_candidates/candidate_match5_206.test
 # Source: tck/features/clauses/match/Match5.feature:206 [9] Handling symmetrically bounded variable length match, bounds are one
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

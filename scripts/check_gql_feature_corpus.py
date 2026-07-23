@@ -16,7 +16,7 @@ EXPECTED_FILES = 93
 EXPECTED_SCENARIOS = 827
 EXPECTED_FIXTURE_SETUPS = 548
 EXPECTED_REVISION = "677cbafabb8c3c5eed458fd3b1ec0daec8d67d23"
-NOTICE = "# Modified by duckdb-gql:"
+NOTICE = "# Modified by DuckGQL:"
 
 
 def query_blocks(text: str, path: Path) -> list[str]:

@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return5_33.test
+# name: test/features/executable_candidates/candidate_return5_33.test
 # Source: tck/features/clauses/return/Return5.feature:33 [1] DISTINCT inside aggregation should work with lists in maps
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

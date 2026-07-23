@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere5_54.test
+# name: test/features/executable_candidates/candidate_matchwhere5_54.test
 # Source: tck/features/clauses/match-where/MatchWhere5.feature:54 [2] Filter out on null if the AND'd predicate evaluates to false
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

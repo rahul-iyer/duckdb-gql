@@ -4,8 +4,8 @@ Generated: 2026-07-23T02:10:07.061024+00:00
 
 This is a local compatibility run over the official Graphalytics test archives and bundled reference outputs. It is not an audited or published Graphalytics benchmark submission.
 
-- CLI: `/Users/rahuliyer/duckdb-gql/build/release/duckdb`
-- Extension: `/Users/rahuliyer/duckdb-gql/build/release/extension/gql/gql.duckdb_extension`
+- CLI: `build/release/duckdb`
+- Extension: `build/release/extension/duckgql/duckgql.duckdb_extension`
 - Threads: 8
 - Warmups / measured runs: 2 / 7
 - Passing cases: 8 / 8
@@ -27,8 +27,8 @@ This is a local compatibility run over the official Graphalytics test archives a
 - PageRank and LCC: Graphalytics relative epsilon validation (`0.0001`).
 - WCC: partition-equivalence validation with a bijection between component labels.
 - Undirected datasets: each logical input edge is expanded to two directed CSR arcs.
-- CDLP: not run because duckdb-gql does not implement this kernel.
-- SSSP: not run because duckdb-gql currently implements unweighted hop distance, while Graphalytics requires double edge weights.
+- CDLP: not run because DuckGQL does not implement this kernel.
+- SSSP: not run because DuckGQL currently implements unweighted hop distance, while Graphalytics requires double edge weights.
 
 ## Failures
 

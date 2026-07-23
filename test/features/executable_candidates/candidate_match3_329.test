@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match3_329.test
+# name: test/features/executable_candidates/candidate_match3_329.test
 # Source: tck/features/clauses/match/Match3.feature:329 [18] Handling cyclic patterns when separated into two parts
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

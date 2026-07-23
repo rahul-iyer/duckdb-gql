@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_367.test
+# name: test/features/executable_candidates/candidate_match7_367.test
 # Source: tck/features/clauses/match/Match7.feature:367 [18] Named paths inside optional matches with node predicates
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -314,7 +314,7 @@ manifest rows, and run the verification commands at the end of this document.
 ## Verification commands
 
 ```sh
-cmake --build build/debug --target unittest gql_loadable_extension -j2
+cmake --build build/debug --target unittest duckgql_loadable_extension -j2
 ./build/debug/test/unittest "test/sql/gql*"
 python3 scripts/check_gql_conformance.py
 python3 scripts/check_gql_conformance.py --release

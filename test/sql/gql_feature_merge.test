@@ -11,7 +11,7 @@
 # the post-state with a separate MATCH query. Those adaptations preserve the
 # MERGE match-versus-create behavior and side-effect assertions exercised here.
 
-require gql
+require duckgql
 
 statement ok
 COPY (

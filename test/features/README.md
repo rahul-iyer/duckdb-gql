@@ -1,6 +1,6 @@
 # GQL clause feature corpus
 
-This directory is the feature-level breadth corpus for `duckdb-gql`. The
+This directory is the feature-level breadth corpus for `DuckGQL`. The
 `clauses` subtree is derived from the Apache-2.0 openCypher Technology
 Compatibility Kit at the exact revision recorded in `clauses/SOURCE.json`.
 Every derived feature retains the upstream notices, identifies its source, and

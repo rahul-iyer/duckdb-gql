@@ -2,7 +2,7 @@
 # description: ISO GQL graph catalog creation, selection, introspection, and removal
 # group: [gql]
 
-require gql
+require duckgql
 
 # Removed compatibility entry points must not be reintroduced accidentally.
 statement error

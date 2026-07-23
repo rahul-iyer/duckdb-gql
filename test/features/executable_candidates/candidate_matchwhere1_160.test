@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_160.test
+# name: test/features/executable_candidates/candidate_matchwhere1_160.test
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:160 [8] Filter relationship with property predicate on multi variables with multiple bindings
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

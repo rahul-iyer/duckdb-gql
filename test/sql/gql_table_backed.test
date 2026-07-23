@@ -2,7 +2,7 @@
 # description: Native MATCH and VLP over COPY GRAPH managed tables
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_545.test
+# name: test/features/executable_candidates/candidate_match7_545.test
 # Source: tck/features/clauses/match/Match7.feature:545 [26] Handling correlated optional matches; first does not match implies second does not match
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

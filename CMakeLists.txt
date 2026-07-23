@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.5)
 
-set(TARGET_NAME gql)
+set(TARGET_NAME duckgql)
 project(${TARGET_NAME})
 
 set(CMAKE_CXX_STANDARD "17" CACHE STRING "C++ standard to enforce")
@@ -52,7 +52,7 @@ if(TARGET antlr4_static)
     target_link_libraries(${EXTENSION_NAME} antlr4_static)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} antlr4_static)
 else()
-    message(FATAL_ERROR "The gql extension requires the static ANTLR4 C++ runtime target")
+    message(FATAL_ERROR "The DuckGQL extension requires the static ANTLR4 C++ runtime target")
 endif()
 
 install(

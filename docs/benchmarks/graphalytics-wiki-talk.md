@@ -17,7 +17,7 @@ Local run over the official dataset and reference outputs; this is not an audite
 | WCC | PASS | 0.456s | 0.452s | 0.480s |
 | LCC | PASS | 4.579s | 4.566s | 4.620s |
 
-CDLP is not implemented. Weighted SSSP is not present in wiki-Talk and duckdb-gql's current SSSP is unweighted.
+CDLP is not implemented. Weighted SSSP is not present in wiki-Talk and DuckGQL's current SSSP is unweighted.
 
 ## Reproduce
 

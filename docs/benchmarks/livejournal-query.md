@@ -140,11 +140,11 @@ CHECKPOINT;
 Then run the profiles:
 
 ```sh
-cmake --build build/release --target shell gql_loadable_extension
+cmake --build build/release --target shell duckgql_loadable_extension
 
 python3 scripts/benchmark_livejournal_queries.py \
   --duckdb build/release/duckdb \
-  --extension build/release/extension/gql/gql.duckdb_extension \
+  --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --database build/benchmarks/livejournal-query.duckdb \
   --seed 10009 \
   --runs 10 \
@@ -161,7 +161,7 @@ Run only the long VLP comparison with:
 ```sh
 python3 scripts/benchmark_livejournal_queries.py \
   --duckdb build/release/duckdb \
-  --extension build/release/extension/gql/gql.duckdb_extension \
+  --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --database build/benchmarks/livejournal-query.duckdb \
   --seed 1000018 \
   --one-hop-paths 1 \

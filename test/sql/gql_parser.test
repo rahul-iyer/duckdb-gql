@@ -2,7 +2,7 @@
 # description: GQL parser validation, SQL coexistence, normalization, and feature boundaries
 # group: [gql]
 
-require gql
+require duckgql
 
 query I
 SELECT 42

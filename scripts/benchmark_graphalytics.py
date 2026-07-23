@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run duckdb-gql against the official LDBC Graphalytics test datasets.
+"""Run DuckGQL against the official LDBC Graphalytics test datasets.
 
 This is a local compatibility and timing harness, not an audited Graphalytics
 submission.  It downloads the official test archives, loads each graph through
@@ -77,7 +77,7 @@ def download(case: TestCase, cache_dir: Path) -> tuple[Path, str]:
         temporary = archive.with_suffix(archive.suffix + ".part")
         request = urllib.request.Request(
             f"{BASE_URL}/{archive.name}",
-            headers={"User-Agent": "duckdb-gql-graphalytics/1.0"},
+            headers={"User-Agent": "DuckGQL-graphalytics/1.0"},
         )
         with urllib.request.urlopen(request) as source, temporary.open("wb") as output:
             shutil.copyfileobj(source, output)
@@ -389,7 +389,7 @@ def run_case(
     runs: int,
 ) -> dict[str, Any]:
     archive, archive_sha256 = download(case, cache_dir)
-    with tempfile.TemporaryDirectory(prefix=f"duckdb-gql-{case.name}-") as temporary:
+    with tempfile.TemporaryDirectory(prefix=f"duckgql-{case.name}-") as temporary:
         directory = Path(temporary)
         extracted = extract_archive(archive, directory / "official")
         nodes_csv, edges_csv, vertices, logical_edges, stored_arcs = write_neo4j_inputs(
@@ -496,8 +496,8 @@ def markdown_report(result: dict[str, Any]) -> str:
             "- PageRank and LCC: Graphalytics relative epsilon validation (`0.0001`).",
             "- WCC: partition-equivalence validation with a bijection between component labels.",
             "- Undirected datasets: each logical input edge is expanded to two directed CSR arcs.",
-            "- CDLP: not run because duckdb-gql does not implement this kernel.",
-            "- SSSP: not run because duckdb-gql currently implements unweighted "
+            "- CDLP: not run because DuckGQL does not implement this kernel.",
+            "- SSSP: not run because DuckGQL currently implements unweighted "
             "hop distance, while Graphalytics requires double edge weights.",
             "",
             "## Failures",
@@ -536,7 +536,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--extension",
         type=Path,
-        default=Path("build/release/extension/gql/gql.duckdb_extension"),
+        default=Path("build/release/extension/duckgql/duckgql.duckdb_extension"),
     )
     parser.add_argument(
         "--cache-dir", type=Path, default=Path("build/benchmarks/graphalytics-data")

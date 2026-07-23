@@ -59,7 +59,7 @@ mkdir -p data/roadnet-ca
 curl -L https://snap.stanford.edu/data/roadNet-CA.txt.gz \
   -o data/roadnet-ca/roadNet-CA.txt.gz
 
-cmake --build build/release --target shell gql_loadable_extension -j8
+cmake --build build/release --target shell duckgql_loadable_extension -j8
 ```
 
 Run the benchmark:
@@ -67,7 +67,7 @@ Run the benchmark:
 ```sh
 python3 scripts/benchmark_copy_graph.py \
   --duckdb build/release/duckdb \
-  --extension build/release/extension/gql/gql.duckdb_extension \
+  --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --source data/roadnet-ca/roadNet-CA.txt.gz \
   --prepared-dir data/roadnet-ca/neo4j \
   --runs 10 \

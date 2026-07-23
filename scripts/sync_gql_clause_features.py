@@ -22,7 +22,7 @@ from pathlib import Path
 UPSTREAM_URL = "https://github.com/opencypher/openCypher"
 PINNED_REVISION = "677cbafabb8c3c5eed458fd3b1ec0daec8d67d23"
 MODIFICATION_NOTICE = (
-    "# Modified by duckdb-gql: query text uses the mechanical GQL mappings "
+    "# Modified by DuckGQL: query text uses the mechanical GQL mappings "
     "documented in test/features/README.md; scenario semantics remain unverified."
 )
 

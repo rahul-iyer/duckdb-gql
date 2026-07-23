@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match6_66.test
+# name: test/features/executable_candidates/candidate_match6_66.test
 # Source: tck/features/clauses/match/Match6.feature:66 [3] Return a three node path
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

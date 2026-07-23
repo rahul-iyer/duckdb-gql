@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return2_140.test
+# name: test/features/executable_candidates/candidate_return2_140.test
 # Source: tck/features/clauses/return/Return2.feature:140 [8] Returning label predicate expression
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

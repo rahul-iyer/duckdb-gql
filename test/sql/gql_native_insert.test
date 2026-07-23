@@ -2,7 +2,7 @@
 # description: ISO GQL INSERT over managed native graph tables
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

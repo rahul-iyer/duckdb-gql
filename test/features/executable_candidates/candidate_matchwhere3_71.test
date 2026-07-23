@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere3_71.test
+# name: test/features/executable_candidates/candidate_matchwhere3_71.test
 # Source: tck/features/clauses/match-where/MatchWhere3.feature:71 [3] Join between node properties of adjacent nodes
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

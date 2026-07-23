@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_return4_146.test
+# name: test/features/executable_candidates/candidate_return4_146.test
 # Source: tck/features/clauses/return/Return4.feature:146 [8] Support column renaming for aggregations
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -2,7 +2,7 @@
 # description: Fixed GQL plans expose native join islands to DuckDB's optimizer
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

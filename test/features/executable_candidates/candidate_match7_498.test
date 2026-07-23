@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_498.test
+# name: test/features/executable_candidates/candidate_match7_498.test
 # Source: tck/features/clauses/match/Match7.feature:498 [24] Optionally matching self-loops
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

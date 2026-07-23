@@ -4,7 +4,7 @@
 
 namespace duckdb {
 
-class GqlExtension : public Extension {
+class DuckgqlExtension : public Extension {
 public:
 	void Load(ExtensionLoader &db) override;
 	std::string Name() override;

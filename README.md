@@ -1,6 +1,9 @@
-# DuckDB ISO GQL extension
+# DuckGQL
 
-`gql` is a C++17 DuckDB extension targeting ISO GQL. The current implementation uses one canonical storage model: graph-owned native DuckDB vertex and edge tables. There is no normalized EAV compatibility backend and no manual table-registration API.
+`duckgql` is a C++17 extension providing experimental ISO GQL support for
+DuckDB. The current implementation uses one canonical storage model:
+graph-owned native DuckDB vertex and edge tables. There is no normalized EAV
+compatibility backend and no manual table-registration API.
 
 ## Current workflow
 

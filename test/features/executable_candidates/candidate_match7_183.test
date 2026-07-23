@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_183.test
+# name: test/features/executable_candidates/candidate_match7_183.test
 # Source: tck/features/clauses/match/Match7.feature:183 [9] Longer pattern with bound nodes
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

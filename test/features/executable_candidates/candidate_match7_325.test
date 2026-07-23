@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_325.test
+# name: test/features/executable_candidates/candidate_match7_325.test
 # Source: tck/features/clauses/match/Match7.feature:325 [16] Optionally matching named paths - null result
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

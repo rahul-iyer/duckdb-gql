@@ -18,7 +18,7 @@ Local run over the official dataset and reference outputs; this is not an audite
 | WCC | PASS | 4.075s | 4.051s | 4.174s |
 | LCC | PASS | 29.476s | 29.123s | 30.264s |
 
-CDLP is not implemented. The current duckdb-gql SSSP is unweighted and is not run against Graphalytics weighted SSSP.
+CDLP is not implemented. The current DuckGQL SSSP is unweighted and is not run against Graphalytics weighted SSSP.
 
 ## Reproduce
 

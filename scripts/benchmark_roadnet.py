@@ -219,7 +219,7 @@ def run_load_trial(
     trial: int,
     warmup: bool,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix=f"duckdb-gql-roadnet-{case}-") as temp:
+    with tempfile.TemporaryDirectory(prefix=f"duckgql-roadnet-{case}-") as temp:
         temp_path = Path(temp)
         database = temp_path / "roadnet.duckdb"
         nodes: Path | None = None
@@ -481,7 +481,7 @@ def run_query_benchmarks(
     warmups: int,
     runs: int,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="duckdb-gql-roadnet-query-") as temp:
+    with tempfile.TemporaryDirectory(prefix="duckgql-roadnet-query-") as temp:
         temp_path = Path(temp)
         database = temp_path / "roadnet.duckdb"
         nodes, edges = prepare_graph_inputs(cli, dataset, temp_path, threads)
@@ -555,7 +555,7 @@ def main() -> None:
     parser.add_argument(
         "--extension",
         type=Path,
-        default=Path("build/release/extension/gql/gql.duckdb_extension"),
+        default=Path("build/release/extension/duckgql/duckgql.duckdb_extension"),
     )
     parser.add_argument(
         "--dataset",

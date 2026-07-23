@@ -17,7 +17,7 @@
     </style>
   </defs>
   <rect width="1800" height="950" fill="#ffffff"/>
-  <text x="40" y="68" class="title">DuckDB-GQL compiler and execution architecture</text>
+  <text x="40" y="68" class="title">DuckGQL compiler and execution architecture</text>
   <text x="42" y="112" class="subtitle">One semantic pipeline; native tables are truth; physical access paths compete under one cost model.</text>
 
   <rect x="40" y="160" width="220" height="130" rx="14" fill="#d0ebff" stroke="#1971c2" stroke-width="3"/>

@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match9_103.test
+# name: test/features/executable_candidates/candidate_match9_103.test
 # Source: tck/features/clauses/match/Match9.feature:103 [5] Variable length pattern with label predicate on both sides
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

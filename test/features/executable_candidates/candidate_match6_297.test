@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match6_297.test
+# name: test/features/executable_candidates/candidate_match6_297.test
 # Source: tck/features/clauses/match/Match6.feature:297 [16] Return a var length path
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

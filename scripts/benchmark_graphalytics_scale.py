@@ -53,7 +53,7 @@ def ensure_dataset(dataset: str, cache_dir: Path) -> tuple[Path, Path, str]:
         archive_url = f"{BASE_URL}/{archive.name}"
         request = urllib.request.Request(
             archive_url,
-            headers={"User-Agent": "duckdb-gql-graphalytics/1.0"},
+            headers={"User-Agent": "DuckGQL-graphalytics/1.0"},
         )
         temporary = archive.with_suffix(archive.suffix + ".part")
         with urllib.request.urlopen(request) as source, temporary.open("wb") as output:
@@ -393,7 +393,7 @@ def markdown(result: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "CDLP is not implemented. The current duckdb-gql SSSP is "
+            "CDLP is not implemented. The current DuckGQL SSSP is "
             "unweighted and is not run against Graphalytics weighted SSSP.",
             "",
             "## Reproduce",
@@ -414,7 +414,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--extension",
         type=Path,
-        default=Path("build/release/extension/gql/gql.duckdb_extension"),
+        default=Path("build/release/extension/duckgql/duckgql.duckdb_extension"),
     )
     parser.add_argument(
         "--cache-dir", type=Path, default=Path("build/benchmarks/graphalytics-data")
@@ -443,7 +443,7 @@ def main() -> int:
     config = read_config(args.dataset, extracted)
     queries = algorithm_queries(config)
     print(f"[{config.name}] official archive {archive_sha}", flush=True)
-    with tempfile.TemporaryDirectory(prefix="duckdb-gql-graphalytics-scale-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="duckgql-graphalytics-scale-") as temporary:
         directory = Path(temporary)
         print(f"[{config.name}] converting official text input", flush=True)
         nodes, edges = prepare_inputs(

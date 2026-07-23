@@ -2,7 +2,7 @@
 # description: End-to-end native COPY GRAPH output produced by gql_fixture_adapter.py
 # group: [gql]
 
-require gql
+require duckgql
 
 # Generated from:
 # INSERT (a:Person:Engineer {name: 'Alice', age: 42,

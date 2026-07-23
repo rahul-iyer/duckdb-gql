@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_matchwhere1_239.test
+# name: test/features/executable_candidates/candidate_matchwhere1_239.test
 # Source: tck/features/clauses/match-where/MatchWhere1.feature:239 [12] Filter path with path length predicate on multi variables with one binding
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match1_97.test
+# name: test/features/executable_candidates/candidate_match1_97.test
 # Source: tck/features/clauses/match/Match1.feature:97 [5] Use multiple MATCH clauses to do a Cartesian product
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

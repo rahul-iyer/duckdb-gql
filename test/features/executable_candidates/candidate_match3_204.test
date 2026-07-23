@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match3_204.test
+# name: test/features/executable_candidates/candidate_match3_204.test
 # Source: tck/features/clauses/match/Match3.feature:204 [11] Undirected match in self-relationship graph
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

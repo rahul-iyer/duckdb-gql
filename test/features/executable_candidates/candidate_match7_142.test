@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match7_142.test
+# name: test/features/executable_candidates/candidate_match7_142.test
 # Source: tck/features/clauses/match/Match7.feature:142 [7] MATCH with OPTIONAL MATCH in longer pattern
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (

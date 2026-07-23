@@ -1,9 +1,9 @@
-# name: /Users/rahuliyer/duckdb-gql/test/features/executable_candidates/candidate_match6_180.test
+# name: test/features/executable_candidates/candidate_match6_180.test
 # Source: tck/features/clauses/match/Match6.feature:180 [10] Named path with alternating directed/undirected relationships
 # Generated candidate; semantic review required before promotion.
 # group: [gql]
 
-require gql
+require duckgql
 
 statement ok
 COPY (
