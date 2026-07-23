@@ -14,8 +14,11 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 # DuckDB's Wasm extension builder relinks the extension's static archive in a
 # post-build step. CMake target dependencies are not forwarded to that command,
 # so include the ANTLR runtime archive explicitly in the final side module.
+# Bind definitions locally so ANTLR's internal calls do not become GOT imports
+# that DuckDB-Wasm would try to resolve from the host module.
 if(EMSCRIPTEN)
     set(DUCKDB_EXTENSION_DUCKGQL_LINKED_LIBS
+        "-Wl,-Bsymbolic"
         "../../vcpkg_installed/wasm32-emscripten/lib/libantlr4-runtime.a"
     )
 endif()
