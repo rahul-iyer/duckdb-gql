@@ -9,5 +9,4 @@ __pycache__/
 /.cache/
 /data/
 /vcpkg/
-/air-routes.duckdb
-/air-routes.duckdb.wal
+/test/features/clauses/
