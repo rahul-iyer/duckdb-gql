@@ -1,0 +1,1027 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "duckdb-gql",
+  "elements": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 40,
+      "y": 35,
+      "width": 1080,
+      "height": 44,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 101,
+      "text": "DuckDB-GQL compiler and execution architecture",
+      "fontSize": 34,
+      "fontFamily": 2,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "containerId": null,
+      "boundElements": null
+    },
+    {
+      "id": "source",
+      "type": "rectangle",
+      "x": 40,
+      "y": 160,
+      "width": 220,
+      "height": 130,
+      "angle": 0,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "#d0ebff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 102,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "source_text",
+          "type": "text"
+        },
+        {
+          "id": "a_source_ast",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "source_text",
+      "type": "text",
+      "x": 57,
+      "y": 184,
+      "width": 186,
+      "height": 82,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 103,
+      "text": "GQL source\nISO grammar parse tree\nParser diagnostics",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "source",
+      "boundElements": null
+    },
+    {
+      "id": "ast",
+      "type": "rectangle",
+      "x": 340,
+      "y": 160,
+      "width": 240,
+      "height": 130,
+      "angle": 0,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "#d0ebff",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 104,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "ast_text",
+          "type": "text"
+        },
+        {
+          "id": "a_source_ast",
+          "type": "arrow"
+        },
+        {
+          "id": "a_ast_binder",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "ast_text",
+      "type": "text",
+      "x": 359,
+      "y": 174,
+      "width": 202,
+      "height": 101,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 105,
+      "text": "Ordered immutable AST\nClause + path variants\nNested query structure\nSource spans",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ast",
+      "boundElements": null
+    },
+    {
+      "id": "binder",
+      "type": "rectangle",
+      "x": 660,
+      "y": 160,
+      "width": 240,
+      "height": 130,
+      "angle": 0,
+      "strokeColor": "#2b8a3e",
+      "backgroundColor": "#d3f9d8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 106,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "binder_text",
+          "type": "text"
+        },
+        {
+          "id": "a_ast_binder",
+          "type": "arrow"
+        },
+        {
+          "id": "a_binder_ir",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "binder_text",
+      "type": "text",
+      "x": 681,
+      "y": 174,
+      "width": 198,
+      "height": 101,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 107,
+      "text": "Scoped typed binder\nSymbols + graph focus\nOverload resolution\nSemantic validation",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "binder",
+      "boundElements": null
+    },
+    {
+      "id": "ir",
+      "type": "rectangle",
+      "x": 980,
+      "y": 160,
+      "width": 240,
+      "height": 130,
+      "angle": 0,
+      "strokeColor": "#9c36b5",
+      "backgroundColor": "#f3d9fa",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 108,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "ir_text",
+          "type": "text"
+        },
+        {
+          "id": "a_binder_ir",
+          "type": "arrow"
+        },
+        {
+          "id": "a_ir_optimizer",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "ir_text",
+      "type": "text",
+      "x": 998,
+      "y": 174,
+      "width": 204,
+      "height": 101,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 109,
+      "text": "Graph-relational IR\nExplicit Apply + Expand\nPath search + DML\nTyped schemas",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "ir",
+      "boundElements": null
+    },
+    {
+      "id": "optimizer",
+      "type": "rectangle",
+      "x": 1300,
+      "y": 160,
+      "width": 280,
+      "height": 130,
+      "angle": 0,
+      "strokeColor": "#e67700",
+      "backgroundColor": "#ffec99",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 110,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "optimizer_text",
+          "type": "text"
+        },
+        {
+          "id": "a_ir_optimizer",
+          "type": "arrow"
+        },
+        {
+          "id": "a_optimizer_native",
+          "type": "arrow"
+        },
+        {
+          "id": "a_optimizer_path",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "optimizer_text",
+      "type": "text",
+      "x": 1320,
+      "y": 174,
+      "width": 240,
+      "height": 101,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 111,
+      "text": "Property-driven optimizer\nGraph rewrites + join order\nStatistics + cost model\nPhysical access selection",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "optimizer",
+      "boundElements": null
+    },
+    {
+      "id": "native",
+      "type": "rectangle",
+      "x": 1020,
+      "y": 450,
+      "width": 280,
+      "height": 140,
+      "angle": 0,
+      "strokeColor": "#495057",
+      "backgroundColor": "#e9ecef",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 112,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "native_text",
+          "type": "text"
+        },
+        {
+          "id": "a_optimizer_native",
+          "type": "arrow"
+        },
+        {
+          "id": "a_native_mvcc",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "native_text",
+      "type": "text",
+      "x": 1043,
+      "y": 475,
+      "width": 234,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 113,
+      "text": "DuckDB native plan\nScan / join / filter\nAggregate / sort / set ops\nTransactional DML",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "native",
+      "boundElements": null
+    },
+    {
+      "id": "path",
+      "type": "rectangle",
+      "x": 1400,
+      "y": 450,
+      "width": 300,
+      "height": 140,
+      "angle": 0,
+      "strokeColor": "#c2255c",
+      "backgroundColor": "#ffdeeb",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 114,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "path_text",
+          "type": "text"
+        },
+        {
+          "id": "a_optimizer_path",
+          "type": "arrow"
+        },
+        {
+          "id": "a_path_mvcc",
+          "type": "arrow"
+        },
+        {
+          "id": "a_path_csr",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "path_text",
+      "type": "text",
+      "x": 1424,
+      "y": 475,
+      "width": 252,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 115,
+      "text": "Graph physical operators\nAdjacency join\nRecursive path engine\nVectorized CSR traversal",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "path",
+      "boundElements": null
+    },
+    {
+      "id": "mvcc",
+      "type": "rectangle",
+      "x": 1020,
+      "y": 740,
+      "width": 280,
+      "height": 140,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "#c3fae8",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 116,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "mvcc_text",
+          "type": "text"
+        },
+        {
+          "id": "a_native_mvcc",
+          "type": "arrow"
+        },
+        {
+          "id": "a_path_mvcc",
+          "type": "arrow"
+        },
+        {
+          "id": "a_mvcc_csr",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "mvcc_text",
+      "type": "text",
+      "x": 1041,
+      "y": 765,
+      "width": 238,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 117,
+      "text": "Authoritative storage\nNative wide tables + MVCC\nCatalog graph bindings\nDuckDB indexes + stats",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "mvcc",
+      "boundElements": null
+    },
+    {
+      "id": "csr",
+      "type": "rectangle",
+      "x": 1400,
+      "y": 740,
+      "width": 300,
+      "height": 140,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "#e6fcf5",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 118,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "csr_text",
+          "type": "text"
+        },
+        {
+          "id": "a_path_csr",
+          "type": "arrow"
+        },
+        {
+          "id": "a_mvcc_csr",
+          "type": "arrow"
+        }
+      ]
+    },
+    {
+      "id": "csr_text",
+      "type": "text",
+      "x": 1424,
+      "y": 765,
+      "width": 252,
+      "height": 90,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 119,
+      "text": "Derived CSR cache\nSnapshot/version keyed\nTransaction delta overlay\nLRU + memory budget",
+      "fontSize": 18,
+      "fontFamily": 2,
+      "textAlign": "center",
+      "verticalAlign": "middle",
+      "containerId": "csr",
+      "boundElements": null
+    },
+    {
+      "id": "subtitle",
+      "type": "text",
+      "x": 42,
+      "y": 94,
+      "width": 1120,
+      "height": 25,
+      "angle": 0,
+      "strokeColor": "#495057",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 120,
+      "text": "One semantic pipeline; native tables are truth; physical access paths compete under one cost model.",
+      "fontSize": 20,
+      "fontFamily": 2,
+      "textAlign": "left",
+      "verticalAlign": "top",
+      "containerId": null,
+      "boundElements": null
+    },
+    {
+      "id": "invariants",
+      "type": "rectangle",
+      "x": 40,
+      "y": 430,
+      "width": 760,
+      "height": 450,
+      "angle": 0,
+      "strokeColor": "#495057",
+      "backgroundColor": "#f8f9fa",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 121,
+      "roundness": {
+        "type": 3
+      },
+      "boundElements": [
+        {
+          "id": "invariants_text",
+          "type": "text"
+        }
+      ]
+    },
+    {
+      "id": "invariants_text",
+      "type": "text",
+      "x": 75,
+      "y": 464,
+      "width": 690,
+      "height": 380,
+      "angle": 0,
+      "strokeColor": "#1e1e1e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 1,
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 122,
+      "text": "Non-negotiable contracts\n\n• Clause order and query nesting survive parsing.\n\n• Every symbol has an identity, scope and type.\n\n• Optional MATCH is a correlated LeftApply—not a flag.\n\n• Quantified paths remain one LogicalPathExpand—not\n  an explosion of complete plans.\n\n• Mutations are operators in one transaction plan—not\n  sidecars or independently executed statements.\n\n• MVCC tables are authoritative; CSR is disposable.\n\n• A verifier checks every compiler boundary.",
+      "fontSize": 21,
+      "fontFamily": 2,
+      "textAlign": "left",
+      "verticalAlign": "middle",
+      "containerId": "invariants",
+      "boundElements": null
+    },
+    {
+      "id": "a_source_ast",
+      "type": "arrow",
+      "x": 268,
+      "y": 225,
+      "width": 64,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#1971c2",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 123,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          64,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "source",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "ast",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_ast_binder",
+      "type": "arrow",
+      "x": 588,
+      "y": 225,
+      "width": 64,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#2b8a3e",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 124,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          64,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "ast",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "binder",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_binder_ir",
+      "type": "arrow",
+      "x": 908,
+      "y": 225,
+      "width": 64,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#9c36b5",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 125,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          64,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "binder",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "ir",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_ir_optimizer",
+      "type": "arrow",
+      "x": 1228,
+      "y": 225,
+      "width": 64,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#e67700",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 126,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          64,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "ir",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "optimizer",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_optimizer_native",
+      "type": "arrow",
+      "x": 1385,
+      "y": 298,
+      "width": 225,
+      "height": 144,
+      "angle": 0,
+      "strokeColor": "#495057",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 127,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -225,
+          144
+        ]
+      ],
+      "startBinding": {
+        "elementId": "optimizer",
+        "focus": 0.35,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "native",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_optimizer_path",
+      "type": "arrow",
+      "x": 1470,
+      "y": 298,
+      "width": 80,
+      "height": 144,
+      "angle": 0,
+      "strokeColor": "#c2255c",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 128,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          80,
+          144
+        ]
+      ],
+      "startBinding": {
+        "elementId": "optimizer",
+        "focus": -0.35,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "path",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_native_mvcc",
+      "type": "arrow",
+      "x": 1160,
+      "y": 598,
+      "width": 0,
+      "height": 134,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 129,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          134
+        ]
+      ],
+      "startBinding": {
+        "elementId": "native",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "mvcc",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_path_mvcc",
+      "type": "arrow",
+      "x": 1470,
+      "y": 598,
+      "width": 190,
+      "height": 134,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 130,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          -190,
+          134
+        ]
+      ],
+      "startBinding": {
+        "elementId": "path",
+        "focus": 0.5,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "mvcc",
+        "focus": -0.5,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_path_csr",
+      "type": "arrow",
+      "x": 1550,
+      "y": 598,
+      "width": 0,
+      "height": 134,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "solid",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 131,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          0,
+          134
+        ]
+      ],
+      "startBinding": {
+        "elementId": "path",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "csr",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    },
+    {
+      "id": "a_mvcc_csr",
+      "type": "arrow",
+      "x": 1308,
+      "y": 810,
+      "width": 84,
+      "height": 0,
+      "angle": 0,
+      "strokeColor": "#087f5b",
+      "backgroundColor": "transparent",
+      "fillStyle": "solid",
+      "strokeWidth": 2,
+      "strokeStyle": "dashed",
+      "roughness": 0,
+      "opacity": 100,
+      "seed": 132,
+      "points": [
+        [
+          0,
+          0
+        ],
+        [
+          84,
+          0
+        ]
+      ],
+      "startBinding": {
+        "elementId": "mvcc",
+        "focus": 0,
+        "gap": 8
+      },
+      "endBinding": {
+        "elementId": "csr",
+        "focus": 0,
+        "gap": 8
+      },
+      "startArrowhead": null,
+      "endArrowhead": "arrow",
+      "boundElements": null
+    }
+  ],
+  "appState": {
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": null
+}

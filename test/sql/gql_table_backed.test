@@ -1,5 +1,5 @@
 # name: test/sql/gql_table_backed.test
-# description: Native MATCH, VLP, and CSR over COPY GRAPH managed tables
+# description: Native MATCH and VLP over COPY GRAPH managed tables
 # group: [gql]
 
 require gql
@@ -193,87 +193,21 @@ RETURN b.code
 ----
 ATL
 
-# A table-backed CSR is built explicitly outside query execution, then an
-# eligible hint reuses it for the same different-edge/trail semantics.
-
+# CSR is reserved for explicitly invoked graph algorithms. MATCH always uses
+# DuckDB's native relational/recursive execution path.
 statement error
 MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
 WHERE a.code = 'ATL'
 RETURN b.code
 ----
-has not been built on this connection
+CSR is reserved for graph algorithms invoked with CALL
 
-query III
-SELECT vertex_count, edge_count, build_count
-FROM gql_build_csr('table_native')
+statement error
+MATCH /*+ UNKNOWN */ (a:airport) RETURN a.code
 ----
-5	3	1
+Unknown GQL execution hint
 
-query T rowsort
-MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
-WHERE a.code = 'ATL'
-RETURN b.code
-----
-ATL
-AUS
-SFO
-SFO
-
-query III
-SELECT vertex_count, edge_count, cached
-FROM gql_csr_stats('table_native')
-----
-5	3	true
-
-query II rowsort
-SELECT * FROM gql_neighbors('table_native', 1, 'out')
-----
-2	1
-5	3
-
-query T rowsort
-MATCH /*+ CSR */ (a:airport)-[:route]->{2,}(b:airport)
-WHERE a.code = 'ATL'
-RETURN b.code
-----
-ATL
-SFO
-
-query T rowsort
-MATCH /*+ CSR */ (a:airport)<-[:route]-+(b:airport)
-WHERE a.code = 'ATL'
-RETURN b.code
-----
-ATL
-AUS
-
-query T rowsort
-MATCH /*+ CSR */ (a:airport)-[:route]->*(a)
-RETURN a.code
-----
-ATL
-ATL
-AUS
-AUS
-LAX
-SFO
-
-# Star keeps its zero-hop row even when the requested edge type is absent.
-query T
-MATCH /*+ CSR */ (a:airport)-[:missing]->*(b:airport)
-WHERE a.code = 'ATL'
-RETURN b.code
-----
-ATL
-
-# Direct SQL topology changes become visible after the explicitly managed
-# offline snapshot is rebuilt.
-query I
-MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
-WHERE a.code = 'SFO'
-RETURN COUNT(*)
-----
-0
+# Direct SQL topology changes remain immediately visible to native recursion.
 
 statement ok
 INSERT INTO gql_data.graph_1_edges VALUES (4, 5, 2, 'route', 1500)
@@ -289,47 +223,6 @@ ATL
 AUS
 AUS
 SFO
-
-query III
-SELECT vertex_count, edge_count, build_count
-FROM gql_build_csr('table_native')
-----
-5	4	2
-
-query T
-MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
-WHERE a.code = 'SFO'
-RETURN b.code
-ORDER BY b.code
-----
-ATL
-AUS
-AUS
-SFO
-
-# Hints never silently change ineligible query shapes or transaction semantics.
-statement error
-MATCH /*+ CSR */ (a:airport)-[:route]->(b:airport)
-RETURN b.code
-----
-CSR execution hint currently requires one anonymous unbounded directed path factor
-
-statement error
-MATCH /*+ UNKNOWN */ (a:airport) RETURN a.code
-----
-Unknown GQL execution hint
-
-statement ok
-BEGIN
-
-statement error
-MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
-RETURN b.code
-----
-CSR execution hint is not eligible inside an explicit transaction
-
-statement ok
-ROLLBACK
 
 # Reading an absent graph property yields NULL for every matched element.
 query T rowsort

@@ -44,6 +44,161 @@ RETURN person.age, person.city
 ----
 43	Cambridge
 
+# Property-map replacement clears every mapped property from the managed wide
+# row, then evaluates and applies the supplied values from the same pre-mutation
+# snapshot.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Grace'
+SET person = {name: 'Amazing Grace', age: person.age + 1}
+
+query IT
+MATCH (person:Person) WHERE person.name = 'Amazing Grace'
+RETURN person.age, person.city
+----
+38	NULL
+
+# Clearing and subsequent assignments are one autocommit command. A conversion
+# failure after the clear and an earlier assignment restores the complete row.
+statement error
+MATCH (person:Person) WHERE person.name = 'Amazing Grace'
+SET person = {city: 'Should Roll Back', age: 'not an integer'}
+----
+<REGEX>:.*Could not convert string.*
+
+query TIT
+MATCH (person:Person) WHERE person.name = 'Amazing Grace'
+RETURN person.name, person.age, person.city
+----
+Amazing Grace	38	NULL
+
+# An empty map clears every mapped property while preserving element identity,
+# labels, and graph topology.
+statement ok
+MATCH (person:Person) WHERE element_id(person) = 2
+SET person = {}
+
+query TTT
+MATCH (person:Person) WHERE element_id(person) = 2
+RETURN person.name, person.age, person.city
+----
+NULL	NULL	NULL
+
+# The project-owned += compatibility form merges only supplied properties.
+# Expressions still read the shared pre-mutation snapshot.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person += {age: person.age + 1, city: 'R+=ome'}
+
+query TIT
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN person.name, person.age, person.city
+----
+Solo	11	R+=ome
+
+# A NULL property result removes that property without clearing unrelated
+# values, and an empty merge map is a true no-op.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person += {city: NULL}
+
+statement ok
+CREATE TEMP TABLE empty_merge_version AS
+SELECT graph_version FROM gql_internal.graphs
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person += {}
+
+query I
+SELECT count(*)
+FROM gql_internal.graphs current_version
+JOIN empty_merge_version original_version USING (graph_version)
+----
+1
+
+statement ok
+DROP TABLE empty_merge_version
+
+query TIT
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN person.name, person.age, person.city
+----
+Solo	11	NULL
+
+# LET supplies the reusable runtime value-binding seam for compatibility map
+# expressions. Record-valued bindings are expanded by the binder into the same
+# snapshot-based CLEAR/SET mutation sequence as inline property maps.
+statement ok
+MATCH (person:Person) WHERE element_id(person) = 2
+LET base_age = 40,
+    envelope = {payload: {name: 'Runtime Map', age: base_age + 1, city: 'Seattle'}},
+    runtime_map = envelope.payload
+SET person = runtime_map
+
+query TIT
+MATCH (person:Person) WHERE element_id(person) = 2
+RETURN person.name, person.age, person.city
+----
+Runtime Map	41	Seattle
+
+# Merge bindings retain omitted values and NULL removes only the named
+# property. LET definitions are ordered, so later records can use earlier
+# scalar bindings without materializing an intermediate collection operator.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+LET next_age = person.age + 1,
+    runtime_patch = {age: next_age, city: NULL}
+SET person += /* runtime record binding */ runtime_patch
+
+query TIT
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+RETURN person.name, person.age, person.city
+----
+Runtime Map	42	NULL
+
+# An empty record-valued merge remains a true no-op, including graph version.
+statement ok
+CREATE TEMP TABLE empty_runtime_merge_version AS
+SELECT graph_version FROM gql_internal.graphs
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+LET m = {}
+SET person += m
+
+query I
+SELECT count(*)
+FROM gql_internal.graphs current_version
+JOIN empty_runtime_merge_version original_version USING (graph_version)
+----
+1
+
+statement ok
+DROP TABLE empty_runtime_merge_version
+
+# Map values are validated before any generated DML. Scalar bindings fail at
+# bind time, while a later conversion failure rolls back the replacement clear
+# and every field assignment.
+statement error
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+LET not_a_map = person.age + 1
+SET person = not_a_map
+----
+<REGEX>:.*property-map mutation requires a record value.*
+
+statement error
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+LET invalid_map = {city: 'Should Roll Back', age: 'not an integer'}
+SET person = invalid_map
+----
+<REGEX>:.*Could not convert string.*
+
+query TIT
+MATCH (person:Person) WHERE person.name = 'Runtime Map'
+RETURN person.name, person.age, person.city
+----
+Runtime Map	42	NULL
+
 statement ok
 MATCH (person:Person) WHERE person.name = 'Ada'
 REMOVE person.city
@@ -60,11 +215,74 @@ statement ok
 MATCH (person:Person) WHERE person.name = 'Solo'
 SET person:Temporary
 
+# ISO IS spelling and multiple comma-separated label items share the same
+# idempotent native label-set lowering.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person IS Reviewed, person:Verified
+
+# Project-owned compact chains expand to the same typed label mutations. Mixed
+# whitespace and comments keep source offsets stable through the parser adapter.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person:CompactOne:CompactTwo,
+    person :SpacedOne :SpacedTwo,
+    person:CommentOne /* chained label */ :CommentTwo
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person:CompactOne:CompactTwo
+
+# Non-label items and colons inside strings are ignored by the chain adapter.
+statement ok
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person.city = 'Chain:Text:Preserved', person:MixedOne:MixedTwo
+
 query II
-MATCH (person:Person&Temporary)
+MATCH (person:Person&Temporary&Reviewed&Verified&CompactOne&CompactTwo&SpacedOne&SpacedTwo&CommentOne&CommentTwo&MixedOne&MixedTwo)
 RETURN count(*), count(DISTINCT person.name)
 ----
 1	1
+
+query T
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN person.city
+----
+Chain:Text:Preserved
+
+# A later conversion failure rolls back every label expanded from the compact
+# item, just like an explicit comma-separated mutation list.
+statement error
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person:RollbackOne:RollbackTwo, person.age = 'not an integer'
+----
+<REGEX>:.*Could not convert string.*
+
+query I
+MATCH (person:Person) WHERE person.name = 'Solo'
+RETURN person.age
+----
+11
+
+query I
+MATCH (person:RollbackOne)
+RETURN count(*)
+----
+0
+
+# Malformed compact syntax remains a parser error and cannot partially apply
+# the first label.
+statement error
+MATCH (person:Person) WHERE person.name = 'Solo'
+SET person:BrokenChain:
+----
+<REGEX>:.*GQL parser error.*
+
+query I
+MATCH (person:BrokenChain)
+RETURN count(*)
+----
+0
 
 statement ok
 MATCH (person:Person&Temporary) WHERE person.name = 'Solo'
@@ -77,8 +295,14 @@ RETURN count(*)
 1
 
 statement ok
-MATCH (person:Temporary) WHERE person.name = 'Solo'
-REMOVE person:Temporary
+MATCH (person:Temporary&Reviewed&Verified&CompactOne&CompactTwo&SpacedOne&SpacedTwo&CommentOne&CommentTwo&MixedOne&MixedTwo)
+WHERE person.name = 'Solo'
+REMOVE person:Temporary:CompactOne:CompactTwo,
+       person :SpacedOne :SpacedTwo,
+       person:CommentOne:CommentTwo,
+       person:MixedOne:MixedTwo,
+       person IS Reviewed,
+       person:Verified
 
 query I
 MATCH (person:Temporary)
@@ -141,6 +365,52 @@ RETURN count(*)
 ----
 3
 
+# Edge property-map replacement uses the same schema-adaptive path while
+# preserving the edge identity, type, and endpoints.
+statement ok
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+SET edge = {since: edge.since + 1}
+
+query I
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+RETURN edge.since
+----
+2021
+
+# Edge property maps use the identical LET-backed expansion path.
+statement ok
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+LET edge_patch = {since: edge.since + 1}
+SET edge += edge_patch
+
+query I
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+RETURN edge.since
+----
+2022
+
+# Label mutation applies to edges as well as nodes. Compact edge chains reuse
+# the same set-valued native label column.
+statement ok
+MATCH (:Person)-[edge:KNOWS]->(:Person)
+SET edge:Trusted:Observed
+
+query I
+MATCH (:Person)-[:KNOWS&Trusted&Observed]->(:Person)
+RETURN count(*)
+----
+1
+
+statement ok
+MATCH (:Person)-[edge:Trusted&Observed]->(:Person)
+REMOVE edge:Trusted:Observed
+
+query I
+MATCH (:Person)-[:KNOWS]->(:Person)
+RETURN count(*)
+----
+1
+
 # Edge deletion is a direct DuckDB DELETE from the managed edge table.
 statement ok
 MATCH (:Person)-[edge:KNOWS]->(:Person)
@@ -195,6 +465,310 @@ MATCH (person:Person) WHERE person.name = 'Solo'
 RETURN count(*)
 ----
 1
+
+# Explicit edge targets are deleted before plain node constraints are checked,
+# so DELETE semantics do not depend on the textual item order.
+statement ok
+INSERT (source_node:Cleanup {name: 'Left', age: 1})
+       -[edge:CLEANUP {since: 2026}]->
+       (target_node:Cleanup {name: 'Right', age: 2})
+
+statement ok
+MATCH (source_node:Cleanup) WHERE source_node.name = 'Left'
+INSERT (source_node)-[:KEEP {since: 2027}]->
+       (:Cleanup {name: 'Third', age: 3})
+
+# Deleting only one incident edge still rejects the node. The earlier generated
+# edge DELETE is rolled back when the remaining-edge constraint fails.
+statement error
+MATCH (source_node:Cleanup)-[edge:CLEANUP]->(:Cleanup)
+DELETE source_node, edge
+----
+<REGEX>:.*use DETACH DELETE.*
+
+query II
+MATCH (:Cleanup)-[cleanup_edge:CLEANUP]->(:Cleanup),
+      (:Cleanup)-[keep_edge:KEEP]->(:Cleanup)
+RETURN count(DISTINCT cleanup_edge), count(DISTINCT keep_edge)
+----
+1	1
+
+statement ok
+MATCH (source_node:Cleanup)-[cleanup_edge:CLEANUP]->(:Cleanup),
+      (source_node)-[keep_edge:KEEP]->(:Cleanup)
+DELETE source_node, cleanup_edge, keep_edge
+
+query I
+MATCH (source_node:Cleanup) WHERE source_node.name = 'Left'
+RETURN count(*)
+----
+0
+
+query I
+MATCH (target_node:Cleanup) WHERE target_node.name = 'Right'
+RETURN count(*)
+----
+1
+
+query I
+MATCH (target_node:Cleanup) WHERE target_node.name = 'Third'
+RETURN count(*)
+----
+1
+
+# NODETACH is the explicit constrained form and succeeds for an isolated node.
+statement ok
+MATCH (target_node:Cleanup) WHERE target_node.name = 'Right'
+NODETACH DELETE target_node
+
+query I
+MATCH (target_node:Cleanup) WHERE target_node.name = 'Right'
+RETURN count(*)
+----
+0
+
+# A path mutation target expands to its ordered node/edge bindings. Plain
+# DELETE succeeds when the path owns every incident edge.
+statement ok
+INSERT (:PathPlain {name: 'Plain A', age: 1})
+       -[:PATH_PLAIN {since: 2020}]->
+       (:PathPlain {name: 'Plain B', age: 2})
+
+statement ok
+MATCH plain_path = (:PathPlain)-[:PATH_PLAIN]->(:PathPlain)
+DELETE plain_path
+
+query I
+MATCH (:PathPlain)
+RETURN count(*)
+----
+0
+
+query I
+MATCH ()-[:PATH_PLAIN]->()
+RETURN count(*)
+----
+0
+
+# If an element on the path has an unlisted incident edge, plain path deletion
+# rejects and restores the path edges deleted earlier in the same command.
+statement ok
+INSERT (:PathDelete {name: 'Path A', age: 1})
+       -[:PATH_DELETE {since: 2021}]->
+       (:PathDelete {name: 'Path B', age: 2})
+       -[:PATH_DELETE {since: 2022}]->
+       (:PathDelete {name: 'Path C', age: 3})
+
+statement ok
+MATCH (middle:PathDelete) WHERE middle.name = 'Path B'
+INSERT (middle)-[:PATH_EXTERNAL {since: 2023}]->
+       (:PathDelete {name: 'Outside', age: 4})
+
+statement error
+MATCH path_value = (:PathDelete)-[:PATH_DELETE]->(:PathDelete)-[:PATH_DELETE]->(:PathDelete)
+DELETE path_value
+----
+<REGEX>:.*use DETACH DELETE.*
+
+query III
+MATCH (path_node:PathDelete),
+      ()-[path_edge:PATH_DELETE]->(),
+      ()-[external_edge:PATH_EXTERNAL]->()
+RETURN count(DISTINCT path_node), count(DISTINCT path_edge), count(DISTINCT external_edge)
+----
+4	2	1
+
+# DETACH DELETE over the same path removes its nodes, its explicit path edges,
+# and the outside incident edge while retaining the outside node.
+statement ok
+MATCH path_value = (:PathDelete)-[:PATH_DELETE]->(:PathDelete)-[:PATH_DELETE]->(:PathDelete)
+DETACH DELETE path_value
+
+query I
+MATCH (path_node:PathDelete)
+RETURN count(*)
+----
+1
+
+query II
+MATCH ()-[path_edge:PATH_DELETE]->(),
+      ()-[external_edge:PATH_EXTERNAL]->()
+RETURN count(DISTINCT path_edge), count(DISTINCT external_edge)
+----
+0	0
+
+# Repeated path elements are harmless: the binder preserves both path
+# positions, while native DELETE remains idempotent for the repeated node key.
+statement ok
+INSERT (:PathLoop {name: 'Loop', age: 1})
+
+statement ok
+MATCH (loop_node:PathLoop) WHERE loop_node.name = 'Loop'
+INSERT (loop_node)-[:PATH_LOOP {since: 2024}]->(loop_node)
+
+statement ok
+MATCH loop_path = (loop_node:PathLoop)-[:PATH_LOOP]->(loop_node)
+DELETE loop_path
+
+query I
+MATCH (loop_node:PathLoop)
+RETURN count(*)
+----
+0
+
+query I
+MATCH ()-[:PATH_LOOP]->()
+RETURN count(*)
+----
+0
+
+# Literal record/list DELETE targets are resolved structurally by the binder.
+# Nested collections, NULL entries, and mixed node/edge textual order reuse the
+# ordinary typed deletion program without runtime collection materialization.
+statement ok
+INSERT (left_node:CollectionDelete {name: 'List Left', age: 1})
+       -[collection_edge:COLLECTION_DELETE {since: 2025}]->
+       (right_node:CollectionDelete {name: 'List Right', age: 2})
+
+statement ok
+MATCH (left_node:CollectionDelete)-[collection_edge:COLLECTION_DELETE]->(right_node:CollectionDelete)
+DELETE {payload: [left_node, NULL, [collection_edge, right_node]]}.payload
+
+query II
+MATCH (collection_node:CollectionDelete),
+      ()-[collection_edge:COLLECTION_DELETE]->()
+RETURN count(DISTINCT collection_node), count(DISTINCT collection_edge)
+----
+0	0
+
+# Path leaves retain their existing typed expansion, including duplicate path
+# entries inside the surrounding collection.
+statement ok
+INSERT (:CollectionPath {name: 'Path Left', age: 7})
+       -[:COLLECTION_PATH {since: 2028}]->
+       (:CollectionPath {name: 'Path Right', age: 8})
+
+statement ok
+MATCH collection_path = (:CollectionPath)-[:COLLECTION_PATH]->(:CollectionPath)
+DELETE {targets: [collection_path, collection_path]}.targets
+
+query II
+MATCH (collection_node:CollectionPath),
+      ()-[collection_edge:COLLECTION_PATH]->()
+RETURN count(DISTINCT collection_node), count(DISTINCT collection_edge)
+----
+0	0
+
+# A scalar leaf is rejected during binding. No part of the already-expanded
+# collection reaches execution, so the matched node remains unchanged.
+statement ok
+INSERT (:CollectionInvalid {name: 'Invalid Leaf', age: 3})
+
+statement error
+MATCH (invalid_node:CollectionInvalid)
+DELETE [invalid_node, 1 + 1]
+----
+<REGEX>:.*DELETE target has invalid type.*
+
+query I
+MATCH (invalid_node:CollectionInvalid)
+RETURN count(*)
+----
+1
+
+# A collection containing only NULL is a true no-op: it preserves the matched
+# row and does not advance the graph version.
+statement ok
+CREATE TEMP TABLE null_collection_version AS
+SELECT graph_version FROM gql_internal.graphs
+
+statement ok
+MATCH (invalid_node:CollectionInvalid)
+DELETE {targets: [[NULL]]}.targets
+
+query I
+SELECT count(*)
+FROM gql_internal.graphs current_version
+JOIN null_collection_version original_version USING (graph_version)
+----
+1
+
+statement ok
+DROP TABLE null_collection_version
+
+query I
+MATCH (invalid_node:CollectionInvalid)
+RETURN count(*)
+----
+1
+
+# Record selection validates field names at bind time and likewise leaves the
+# target untouched on failure.
+statement error
+MATCH (invalid_node:CollectionInvalid)
+DELETE {node: invalid_node}.missing
+----
+<REGEX>:.*record field 'missing' does not exist.*
+
+query I
+MATCH (invalid_node:CollectionInvalid)
+RETURN count(*)
+----
+1
+
+statement ok
+MATCH (invalid_node:CollectionInvalid)
+DELETE {node: invalid_node}
+
+query I
+MATCH (invalid_node:CollectionInvalid)
+RETURN count(*)
+----
+0
+
+# Plain collection deletion preserves the same incident-edge constraint and
+# command rollback as ordinary DELETE. DETACH over the identical record target
+# then removes both explicit and outside incident edges.
+statement ok
+INSERT (source_node:CollectionRollback {name: 'Rollback Source', age: 4})
+       -[listed_edge:COLLECTION_LISTED {since: 2026}]->
+       (listed_target:CollectionRollback {name: 'Listed Target', age: 5})
+
+statement ok
+MATCH (source_node:CollectionRollback) WHERE source_node.name = 'Rollback Source'
+INSERT (source_node)-[:COLLECTION_OUTSIDE {since: 2027}]->
+       (:CollectionRollback {name: 'Outside Target', age: 6})
+
+statement error
+MATCH (source_node:CollectionRollback)-[listed_edge:COLLECTION_LISTED]->(:CollectionRollback)
+DELETE {targets: [source_node, listed_edge]}.targets
+----
+<REGEX>:.*use DETACH DELETE.*
+
+query III
+MATCH (collection_node:CollectionRollback),
+      ()-[listed_edge:COLLECTION_LISTED]->(),
+      ()-[outside_edge:COLLECTION_OUTSIDE]->()
+RETURN count(DISTINCT collection_node), count(DISTINCT listed_edge), count(DISTINCT outside_edge)
+----
+3	1	1
+
+statement ok
+MATCH (source_node:CollectionRollback)-[listed_edge:COLLECTION_LISTED]->(:CollectionRollback)
+DETACH DELETE {targets: [source_node, listed_edge]}.targets
+
+query I
+MATCH (collection_node:CollectionRollback)
+RETURN count(*)
+----
+2
+
+query II
+MATCH ()-[listed_edge:COLLECTION_LISTED]->(),
+      ()-[outside_edge:COLLECTION_OUTSIDE]->()
+RETURN count(DISTINCT listed_edge), count(DISTINCT outside_edge)
+----
+0	0
 
 statement ok
 DROP GRAPH native_mutations

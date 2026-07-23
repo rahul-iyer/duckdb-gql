@@ -1,27 +1,23 @@
 #include "gql_csr.hpp"
 
 #include "gql_catalog.hpp"
-#include "gql_ir.hpp"
 #include "gql_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/value_operations/value_operations.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
-#include <algorithm>
-#include <deque>
 #include <unordered_map>
 #include <unordered_set>
 
 namespace duckdb {
 
 static constexpr const char *GQL_CSR_STATE_KEY = "gql_csr_state";
-static constexpr idx_t GQL_CSR_PATH_BATCH_SIZE = 128;
 
 static string QuoteLiteral(const string &value) {
   string result = "'";
@@ -41,38 +37,15 @@ static string QualifiedTable(const GqlElementTableBinding &table) {
          QuoteIdentifier(table.table_name);
 }
 
-static void ThrowOnError(const MaterializedQueryResult &result) {
+static void ThrowOnError(const BaseQueryResult &result) {
   if (result.HasError()) {
     throw InvalidInputException("GQL CSR error: %s", result.GetError());
   }
 }
 
-struct CsrEdge {
-  uint64_t edge_id;
-  idx_t source;
-  idx_t target;
-  uint32_t label_id;
-};
-
-struct GqlCsrSnapshot {
-  uint64_t graph_id;
-  uint64_t graph_version;
-  vector<uint64_t> vertex_ids;
-  unordered_map<uint64_t, idx_t> ordinal_by_id;
-  vector<idx_t> outgoing_offsets;
-  vector<uint64_t> outgoing_neighbors;
-  vector<uint64_t> outgoing_edge_ids;
-  vector<uint32_t> outgoing_label_ids;
-  vector<idx_t> incoming_offsets;
-  vector<uint64_t> incoming_neighbors;
-  vector<uint64_t> incoming_edge_ids;
-  vector<uint32_t> incoming_label_ids;
-  unordered_map<string, uint32_t> label_ids;
-  idx_t memory_bytes;
-};
-
 struct GqlCsrCacheState : ClientContextState {
   unordered_map<uint64_t, shared_ptr<GqlCsrSnapshot>> snapshots;
+  unordered_map<string, uint64_t> graph_ids_by_name;
   uint64_t build_count = 0;
 };
 
@@ -94,29 +67,40 @@ static GraphVersion ReadGraphVersion(Connection &connection,
           result->GetValue(1, 0).GetValue<uint64_t>()};
 }
 
-static vector<idx_t> BuildOffsets(idx_t vertex_count,
-                                  const vector<CsrEdge> &edges, bool outgoing) {
-  vector<idx_t> offsets(vertex_count + 1, 0);
-  for (const auto &edge : edges) {
-    auto ordinal = outgoing ? edge.source : edge.target;
-    offsets[ordinal + 1]++;
-  }
+static void FinalizeOffsets(vector<idx_t> &offsets) {
   for (idx_t index = 1; index < offsets.size(); index++) {
     offsets[index] += offsets[index - 1];
   }
-  return offsets;
+}
+
+bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id,
+                         idx_t &ordinal) {
+  if (snapshot.dense_vertex_ids) {
+    if (vertex_id == 0 || vertex_id > snapshot.vertex_ids.size()) {
+      return false;
+    }
+    ordinal = NumericCast<idx_t>(vertex_id - 1);
+    return true;
+  }
+  auto entry = snapshot.ordinal_by_id.find(vertex_id);
+  if (entry == snapshot.ordinal_by_id.end()) {
+    return false;
+  }
+  ordinal = entry->second;
+  return true;
 }
 
 static uint32_t CsrLabelId(GqlCsrSnapshot &snapshot, const string &label) {
   if (label.empty()) {
     return 0;
   }
-  auto entry = snapshot.label_ids.find(label);
+  auto normalized = StringUtil::Lower(label);
+  auto entry = snapshot.label_ids.find(normalized);
   if (entry != snapshot.label_ids.end()) {
     return entry->second;
   }
   auto identifier = NumericCast<uint32_t>(snapshot.label_ids.size() + 1);
-  snapshot.label_ids.emplace(label, identifier);
+  snapshot.label_ids.emplace(std::move(normalized), identifier);
   return identifier;
 }
 
@@ -124,29 +108,79 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
                                                      const string &graph_name) {
   GqlTableGraphBinding binding;
   if (!GqlTryLoadTableGraph(context, graph_name, binding)) {
-    throw NotImplementedException(
-        "CSR execution hint currently requires a table-backed graph");
+    throw InvalidInputException("CSR algorithms require a table-backed graph; "
+                                "load graph '%s' with COPY GRAPH first",
+                                graph_name);
   }
   Connection connection(*context.db);
-  auto graph = ReadGraphVersion(connection, graph_name);
   auto snapshot = make_shared_ptr<GqlCsrSnapshot>();
+  connection.BeginTransaction();
+  auto graph = ReadGraphVersion(connection, graph_name);
   snapshot->graph_id = graph.graph_id;
   snapshot->graph_version = graph.graph_version;
 
-  auto vertices = connection.Query(
+  auto vertex_count = connection.Query("SELECT count(*)::UBIGINT FROM " +
+                                       QualifiedTable(binding.vertex));
+  ThrowOnError(*vertex_count);
+  snapshot->vertex_ids.reserve(
+      NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()));
+  auto vertex_label_projection =
+      binding.vertex.label_column.empty()
+          ? "CAST(NULL AS VARCHAR)"
+          : "CAST(" + QuoteIdentifier(binding.vertex.label_column) +
+                " AS VARCHAR)";
+  auto vertices = connection.SendQuery(
       "SELECT CAST(" + QuoteIdentifier(binding.vertex.key_column) +
-      " AS UBIGINT) AS vertex_id FROM " + QualifiedTable(binding.vertex) +
-      " ORDER BY vertex_id");
+      " AS UBIGINT) AS vertex_id, " + vertex_label_projection + " FROM " +
+      QualifiedTable(binding.vertex) + " ORDER BY vertex_id");
   ThrowOnError(*vertices);
-  for (idx_t row = 0; row < vertices->RowCount(); row++) {
-    auto vertex_id = vertices->GetValue(0, row).GetValue<uint64_t>();
-    if (!snapshot->ordinal_by_id.emplace(vertex_id, snapshot->vertex_ids.size())
-             .second) {
-      throw InvalidInputException(
-          "Table-backed CSR requires unique vertex keys; duplicate key %llu",
-          static_cast<unsigned long long>(vertex_id));
+  snapshot->vertex_label_offsets.push_back(0);
+  while (auto chunk = vertices->Fetch()) {
+    UnifiedVectorFormat vertex_data;
+    UnifiedVectorFormat label_data;
+    chunk->data[0].ToUnifiedFormat(chunk->size(), vertex_data);
+    chunk->data[1].ToUnifiedFormat(chunk->size(), label_data);
+    auto ids = UnifiedVectorFormat::GetData<uint64_t>(vertex_data);
+    auto labels = UnifiedVectorFormat::GetData<string_t>(label_data);
+    for (idx_t row = 0; row < chunk->size(); row++) {
+      auto index = vertex_data.sel->get_index(row);
+      if (!vertex_data.validity.RowIsValid(index)) {
+        throw InvalidInputException(
+            "Table-backed CSR vertex keys must not contain NULL values");
+      }
+      auto vertex_id = ids[index];
+      if (!snapshot->vertex_ids.empty() &&
+          snapshot->vertex_ids.back() == vertex_id) {
+        throw InvalidInputException(
+            "Table-backed CSR requires unique vertex keys; duplicate key %llu",
+            static_cast<unsigned long long>(vertex_id));
+      }
+      snapshot->vertex_ids.push_back(vertex_id);
+      auto label_index = label_data.sel->get_index(row);
+      if (label_data.validity.RowIsValid(label_index)) {
+        for (auto &label :
+             StringUtil::Split(labels[label_index].GetString(), ';')) {
+          if (!label.empty()) {
+            snapshot->vertex_label_ids.push_back(CsrLabelId(*snapshot, label));
+          }
+        }
+      }
+      snapshot->vertex_label_offsets.push_back(
+          snapshot->vertex_label_ids.size());
     }
-    snapshot->vertex_ids.push_back(vertex_id);
+  }
+  snapshot->dense_vertex_ids = true;
+  for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
+    if (snapshot->vertex_ids[ordinal] != ordinal + 1) {
+      snapshot->dense_vertex_ids = false;
+      break;
+    }
+  }
+  if (!snapshot->dense_vertex_ids) {
+    snapshot->ordinal_by_id.reserve(snapshot->vertex_ids.size());
+    for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
+      snapshot->ordinal_by_id.emplace(snapshot->vertex_ids[ordinal], ordinal);
+    }
   }
 
   auto label_projection = binding.edge.label_column.empty()
@@ -154,118 +188,192 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
                               : "CAST(" +
                                     QuoteIdentifier(binding.edge.label_column) +
                                     " AS VARCHAR)";
-  auto edge_rows = connection.Query(
-      "SELECT CAST(" + QuoteIdentifier(binding.edge.key_column) +
-      " AS UBIGINT), CAST(" + QuoteIdentifier(binding.edge_source_column) +
-      " AS UBIGINT), CAST(" + QuoteIdentifier(binding.edge_target_column) +
-      " AS UBIGINT), " + label_projection + " FROM " +
-      QualifiedTable(binding.edge));
-  ThrowOnError(*edge_rows);
-  vector<CsrEdge> edges;
+  auto edge_count = connection.Query("SELECT count(*)::UBIGINT FROM " +
+                                     QualifiedTable(binding.edge));
+  ThrowOnError(*edge_count);
+  auto expected_edges =
+      NumericCast<idx_t>(edge_count->GetValue(0, 0).GetValue<uint64_t>());
+  auto edge_key =
+      "CAST(" + QuoteIdentifier(binding.edge.key_column) + " AS UBIGINT)";
+  auto edge_source =
+      "CAST(" + QuoteIdentifier(binding.edge_source_column) + " AS UBIGINT)";
+  auto edge_target =
+      "CAST(" + QuoteIdentifier(binding.edge_target_column) + " AS UBIGINT)";
+  auto edge_table = QualifiedTable(binding.edge);
+  auto endpoint_projection = "SELECT " + edge_key + ", " + edge_source + ", " +
+                             edge_target + " FROM " + edge_table;
+  auto edge_projection = "SELECT " + edge_key + ", " + edge_source + ", " +
+                         edge_target + ", " + label_projection + " FROM " +
+                         edge_table;
+  // COPY GRAPH owns these tables and generates monotonically unique IDs. Keep
+  // duplicate validation for any future non-managed/table-attachment path,
+  // but do not build an O(E) hash set for the managed fast path.
+  auto validate_edge_ids = binding.edge.schema_name != "gql_data" ||
+                           binding.edge.key_column != "__gql_edge_id";
   unordered_set<uint64_t> edge_ids;
-  for (idx_t row = 0; row < edge_rows->RowCount(); row++) {
-    auto edge_id = edge_rows->GetValue(0, row).GetValue<uint64_t>();
-    if (!edge_ids.insert(edge_id).second) {
-      throw InvalidInputException(
-          "Table-backed CSR requires unique edge keys; duplicate key %llu",
-          static_cast<unsigned long long>(edge_id));
-    }
-    auto source_id = edge_rows->GetValue(1, row).GetValue<uint64_t>();
-    auto target_id = edge_rows->GetValue(2, row).GetValue<uint64_t>();
-    auto source = snapshot->ordinal_by_id.find(source_id);
-    auto target = snapshot->ordinal_by_id.find(target_id);
-    if (source == snapshot->ordinal_by_id.end() ||
-        target == snapshot->ordinal_by_id.end()) {
-      throw InvalidInputException(
-          "Graph contains edge %llu with an invalid endpoint",
-          static_cast<unsigned long long>(edge_id));
-    }
-    auto label = edge_rows->GetValue(3, row).IsNull()
-                     ? string()
-                     : edge_rows->GetValue(3, row).GetValue<string>();
-    edges.push_back({edge_id, source->second, target->second,
-                     CsrLabelId(*snapshot, label)});
+  if (validate_edge_ids) {
+    edge_ids.reserve(expected_edges);
   }
-
-  auto outgoing = edges;
-  std::sort(
-      outgoing.begin(), outgoing.end(),
-      [](const CsrEdge &left, const CsrEdge &right) {
-        return left.source < right.source ||
-               (left.source == right.source &&
-                (left.target < right.target || (left.target == right.target &&
-                                                left.edge_id < right.edge_id)));
-      });
-  snapshot->outgoing_offsets =
-      BuildOffsets(snapshot->vertex_ids.size(), outgoing, true);
-  for (const auto &edge : outgoing) {
-    snapshot->outgoing_neighbors.push_back(snapshot->vertex_ids[edge.target]);
-    snapshot->outgoing_edge_ids.push_back(edge.edge_id);
-    snapshot->outgoing_label_ids.push_back(edge.label_id);
+  snapshot->outgoing_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
+  snapshot->incoming_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
+  auto degree_rows = connection.SendQuery(endpoint_projection);
+  ThrowOnError(*degree_rows);
+  idx_t counted_edges = 0;
+  while (auto chunk = degree_rows->Fetch()) {
+    UnifiedVectorFormat edge_id_data;
+    UnifiedVectorFormat source_data;
+    UnifiedVectorFormat target_data;
+    chunk->data[0].ToUnifiedFormat(chunk->size(), edge_id_data);
+    chunk->data[1].ToUnifiedFormat(chunk->size(), source_data);
+    chunk->data[2].ToUnifiedFormat(chunk->size(), target_data);
+    auto edge_id_values = UnifiedVectorFormat::GetData<uint64_t>(edge_id_data);
+    auto source_values = UnifiedVectorFormat::GetData<uint64_t>(source_data);
+    auto target_values = UnifiedVectorFormat::GetData<uint64_t>(target_data);
+    for (idx_t row = 0; row < chunk->size(); row++) {
+      auto edge_index = edge_id_data.sel->get_index(row);
+      auto source_index = source_data.sel->get_index(row);
+      auto target_index = target_data.sel->get_index(row);
+      if (!edge_id_data.validity.RowIsValid(edge_index) ||
+          !source_data.validity.RowIsValid(source_index) ||
+          !target_data.validity.RowIsValid(target_index)) {
+        throw InvalidInputException("Table-backed CSR edge keys and endpoints "
+                                    "must not contain NULL values");
+      }
+      auto edge_id = edge_id_values[edge_index];
+      idx_t source;
+      idx_t target;
+      if (!GqlTryGetCsrOrdinal(*snapshot, source_values[source_index],
+                               source) ||
+          !GqlTryGetCsrOrdinal(*snapshot, target_values[target_index],
+                               target)) {
+        throw InvalidInputException(
+            "Graph contains edge %llu with an invalid endpoint",
+            static_cast<unsigned long long>(edge_id));
+      }
+      snapshot->outgoing_offsets[source + 1]++;
+      snapshot->incoming_offsets[target + 1]++;
+      counted_edges++;
+    }
   }
+  if (counted_edges != expected_edges) {
+    throw InternalException(
+        "GQL CSR edge scan returned an unexpected row count");
+  }
+  degree_rows.reset();
 
-  auto incoming = edges;
-  std::sort(
-      incoming.begin(), incoming.end(),
-      [](const CsrEdge &left, const CsrEdge &right) {
-        return left.target < right.target ||
-               (left.target == right.target &&
-                (left.source < right.source || (left.source == right.source &&
-                                                left.edge_id < right.edge_id)));
-      });
-  snapshot->incoming_offsets =
-      BuildOffsets(snapshot->vertex_ids.size(), incoming, false);
-  for (const auto &edge : incoming) {
-    snapshot->incoming_neighbors.push_back(snapshot->vertex_ids[edge.source]);
-    snapshot->incoming_edge_ids.push_back(edge.edge_id);
-    snapshot->incoming_label_ids.push_back(edge.label_id);
+  FinalizeOffsets(snapshot->outgoing_offsets);
+  FinalizeOffsets(snapshot->incoming_offsets);
+  snapshot->outgoing_neighbors.resize(expected_edges);
+  snapshot->outgoing_edge_ids.resize(expected_edges);
+  snapshot->outgoing_label_ids.resize(expected_edges);
+  snapshot->incoming_neighbors.resize(expected_edges);
+  snapshot->incoming_edge_ids.resize(expected_edges);
+  snapshot->incoming_label_ids.resize(expected_edges);
+  auto outgoing_cursor = snapshot->outgoing_offsets;
+  auto incoming_cursor = snapshot->incoming_offsets;
+  auto edge_rows = connection.SendQuery(edge_projection);
+  ThrowOnError(*edge_rows);
+  idx_t scattered_edges = 0;
+  while (auto chunk = edge_rows->Fetch()) {
+    UnifiedVectorFormat edge_id_data;
+    UnifiedVectorFormat source_data;
+    UnifiedVectorFormat target_data;
+    UnifiedVectorFormat label_data;
+    chunk->data[0].ToUnifiedFormat(chunk->size(), edge_id_data);
+    chunk->data[1].ToUnifiedFormat(chunk->size(), source_data);
+    chunk->data[2].ToUnifiedFormat(chunk->size(), target_data);
+    chunk->data[3].ToUnifiedFormat(chunk->size(), label_data);
+    auto edge_id_values = UnifiedVectorFormat::GetData<uint64_t>(edge_id_data);
+    auto source_values = UnifiedVectorFormat::GetData<uint64_t>(source_data);
+    auto target_values = UnifiedVectorFormat::GetData<uint64_t>(target_data);
+    auto label_values = UnifiedVectorFormat::GetData<string_t>(label_data);
+    for (idx_t row = 0; row < chunk->size(); row++) {
+      auto edge_index = edge_id_data.sel->get_index(row);
+      auto source_index = source_data.sel->get_index(row);
+      auto target_index = target_data.sel->get_index(row);
+      auto edge_id = edge_id_values[edge_index];
+      if (validate_edge_ids && !edge_ids.insert(edge_id).second) {
+        throw InvalidInputException(
+            "Table-backed CSR requires unique edge keys; duplicate key %llu",
+            static_cast<unsigned long long>(edge_id));
+      }
+      idx_t source;
+      idx_t target;
+      if (!GqlTryGetCsrOrdinal(*snapshot, source_values[source_index],
+                               source) ||
+          !GqlTryGetCsrOrdinal(*snapshot, target_values[target_index],
+                               target)) {
+        throw InternalException(
+            "GQL CSR endpoints changed within a read transaction");
+      }
+      auto label_index = label_data.sel->get_index(row);
+      auto label = label_data.validity.RowIsValid(label_index)
+                       ? label_values[label_index].GetString()
+                       : string();
+      auto label_id = CsrLabelId(*snapshot, label);
+      auto outgoing = outgoing_cursor[source]++;
+      snapshot->outgoing_neighbors[outgoing] = target;
+      snapshot->outgoing_edge_ids[outgoing] = edge_id;
+      snapshot->outgoing_label_ids[outgoing] = label_id;
+      auto incoming = incoming_cursor[target]++;
+      snapshot->incoming_neighbors[incoming] = source;
+      snapshot->incoming_edge_ids[incoming] = edge_id;
+      snapshot->incoming_label_ids[incoming] = label_id;
+      scattered_edges++;
+    }
+  }
+  if (scattered_edges != expected_edges) {
+    throw InternalException(
+        "GQL CSR edge scan changed within a read transaction");
   }
   snapshot->memory_bytes =
       snapshot->vertex_ids.size() * sizeof(uint64_t) +
+      snapshot->vertex_label_offsets.size() * sizeof(idx_t) +
+      snapshot->vertex_label_ids.size() * sizeof(uint32_t) +
       snapshot->outgoing_offsets.size() * sizeof(idx_t) +
-      snapshot->outgoing_neighbors.size() * sizeof(uint64_t) +
+      snapshot->outgoing_neighbors.size() * sizeof(idx_t) +
       snapshot->outgoing_edge_ids.size() * sizeof(uint64_t) +
       snapshot->outgoing_label_ids.size() * sizeof(uint32_t) +
       snapshot->incoming_offsets.size() * sizeof(idx_t) +
-      snapshot->incoming_neighbors.size() * sizeof(uint64_t) +
+      snapshot->incoming_neighbors.size() * sizeof(idx_t) +
       snapshot->incoming_edge_ids.size() * sizeof(uint64_t) +
       snapshot->incoming_label_ids.size() * sizeof(uint32_t);
+  connection.Commit();
   return snapshot;
 }
 
 static shared_ptr<GqlCsrSnapshot>
 GetPreparedTableSnapshot(ClientContext &context, const string &graph_name,
                          GqlCsrCacheState &cache) {
+  auto graph_id = cache.graph_ids_by_name.find(graph_name);
+  if (graph_id == cache.graph_ids_by_name.end()) {
+    throw InvalidInputException(
+        "CSR for table-backed graph '%s' has not been built on this "
+        "connection; run CALL gql_build_csr('%s') first",
+        graph_name, graph_name);
+  }
   Connection connection(*context.db);
   auto graph = ReadGraphVersion(connection, graph_name);
-  auto entry = cache.snapshots.find(graph.graph_id);
-  if (entry == cache.snapshots.end() ||
+  auto entry = cache.snapshots.find(graph_id->second);
+  if (graph.graph_id != graph_id->second || entry == cache.snapshots.end() ||
       entry->second->graph_version != graph.graph_version) {
     throw InvalidInputException(
         "CSR for table-backed graph '%s' has not been built on this "
-        "connection; run SELECT * FROM gql_build_csr('%s') first",
+        "connection; run CALL gql_build_csr('%s') first",
         graph_name, graph_name);
   }
   return entry->second;
 }
 
-static shared_ptr<GqlCsrSnapshot> GetTraversalSnapshot(ClientContext &context,
-                                                       const string &graph_name,
-                                                       GqlCsrCacheState &cache,
-                                                       bool &cached) {
-  GqlTableGraphBinding binding;
-  if (!GqlTryLoadTableGraph(context, graph_name, binding)) {
-    throw InvalidInputException(
-        "Graph '%s' has no native tables; load it with COPY GRAPH before CSR execution",
-        graph_name);
-  }
+shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context,
+                                                   const string &graph_name) {
   if (!context.transaction.IsAutoCommit()) {
     throw NotImplementedException(
-        "Table-backed CSR is not eligible inside an explicit transaction; "
-        "use native execution");
+        "CSR algorithms are not eligible inside an explicit transaction");
   }
-  cached = true;
-  return GetPreparedTableSnapshot(context, graph_name, cache);
+  auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(
+      GQL_CSR_STATE_KEY);
+  return GetPreparedTableSnapshot(context, graph_name, *cache);
 }
 
 struct CsrBindData : TableFunctionData {
@@ -310,13 +418,9 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
   auto &state = input.global_state->Cast<NeighborRowsState>();
   if (!state.initialized) {
     auto &data = input.bind_data->Cast<CsrBindData>();
-    auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(
-        GQL_CSR_STATE_KEY);
-    bool cached;
-    auto snapshot =
-        GetTraversalSnapshot(context, data.graph_name, *cache, cached);
-    auto vertex = snapshot->ordinal_by_id.find(data.vertex_id);
-    if (vertex != snapshot->ordinal_by_id.end()) {
+    auto snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+    idx_t vertex;
+    if (GqlTryGetCsrOrdinal(*snapshot, data.vertex_id, vertex)) {
       const auto &offsets = data.direction == "out"
                                 ? snapshot->outgoing_offsets
                                 : snapshot->incoming_offsets;
@@ -326,9 +430,10 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
       const auto &edge_ids = data.direction == "out"
                                  ? snapshot->outgoing_edge_ids
                                  : snapshot->incoming_edge_ids;
-      for (idx_t index = offsets[vertex->second];
-           index < offsets[vertex->second + 1]; index++) {
-        state.rows.emplace_back(neighbors[index], edge_ids[index]);
+      for (idx_t index = offsets[vertex]; index < offsets[vertex + 1];
+           index++) {
+        state.rows.emplace_back(snapshot->vertex_ids[neighbors[index]],
+                                edge_ids[index]);
       }
     }
     state.initialized = true;
@@ -382,16 +487,15 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input,
   auto &data = input.bind_data->Cast<CsrBindData>();
   auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(
       GQL_CSR_STATE_KEY);
-  Connection connection(*context.db);
-  auto graph = ReadGraphVersion(connection, data.graph_name);
   GqlTableGraphBinding binding;
   if (!GqlTryLoadTableGraph(context, data.graph_name, binding)) {
-    throw InvalidInputException(
-        "Graph '%s' has no native tables; load it with COPY GRAPH before building CSR",
-        data.graph_name);
+    throw InvalidInputException("Graph '%s' has no native tables; load it with "
+                                "COPY GRAPH before building CSR",
+                                data.graph_name);
   }
   auto snapshot = BuildTableSnapshot(context, data.graph_name);
-  cache->snapshots[graph.graph_id] = snapshot;
+  cache->snapshots[snapshot->graph_id] = snapshot;
+  cache->graph_ids_by_name[data.graph_name] = snapshot->graph_id;
   cache->build_count++;
 
   output.SetCardinality(1);
@@ -413,9 +517,7 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input,
   auto &data = input.bind_data->Cast<CsrBindData>();
   auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(
       GQL_CSR_STATE_KEY);
-  bool cached;
-  auto snapshot =
-      GetTraversalSnapshot(context, data.graph_name, *cache, cached);
+  auto snapshot = GqlGetCsrSnapshot(context, data.graph_name);
   output.SetCardinality(1);
   output.SetValue(0, 0, Value(data.graph_name));
   output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
@@ -423,218 +525,8 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input,
   output.SetValue(3, 0, Value::UBIGINT(snapshot->outgoing_edge_ids.size()));
   output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
   output.SetValue(5, 0, Value::UBIGINT(cache->build_count));
-  output.SetValue(6, 0, Value(cached));
+  output.SetValue(6, 0, Value(true));
   state.done = true;
-}
-
-struct CsrPathBindData : TableFunctionData {
-  string graph_name;
-  bool reverse = false;
-  idx_t minimum_repetitions = 0;
-  string edge_label;
-  bool restrict_starts = false;
-  vector<uint64_t> start_ids;
-};
-
-static unique_ptr<FunctionData> CsrPathBind(ClientContext &,
-                                            TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types,
-                                            vector<string> &names) {
-  if (input.inputs.size() != 5 || input.inputs[0].IsNull() ||
-      input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
-      input.inputs[3].IsNull()) {
-    throw BinderException("Invalid GQL CSR path scan input");
-  }
-  auto result = make_uniq<CsrPathBindData>();
-  result->graph_name = input.inputs[0].GetValue<string>();
-  result->reverse = input.inputs[1].GetValue<bool>();
-  result->minimum_repetitions =
-      NumericCast<idx_t>(input.inputs[2].GetValue<uint64_t>());
-  result->edge_label = input.inputs[3].GetValue<string>();
-  result->restrict_starts = !input.inputs[4].IsNull();
-  if (result->restrict_starts) {
-    for (const auto &entry : ListValue::GetChildren(input.inputs[4])) {
-      result->start_ids.push_back(entry.GetValue<uint64_t>());
-    }
-  }
-  if (result->graph_name.empty()) {
-    throw BinderException("GQL CSR path scan requires a graph name");
-  }
-  names = {"start_id", "end_id", "depth"};
-  return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT,
-                  LogicalType::UBIGINT};
-  return std::move(result);
-}
-
-static unique_ptr<NodeStatistics> CsrPathCardinality(ClientContext &,
-                                                     const FunctionData *) {
-  // An unbounded trail scan can be much larger than either element table.
-  // A deliberately high estimate keeps DuckDB from choosing the streaming CSR
-  // source as the materialized build side of its endpoint hash joins.
-  // The estimate must remain high even after a selective source-vertex join.
-  // A billion rows was insufficient for multi-million-vertex graphs: DuckDB
-  // estimated the source join at only thousands of rows, built the following
-  // endpoint hash join from the unbounded path stream, and consumed it before
-  // an outer LIMIT could stop execution. An unbounded trail can legitimately
-  // exceed this value by many orders of magnitude.
-  constexpr idx_t estimate = 1000000000000000000ULL;
-  return make_uniq<NodeStatistics>(estimate, estimate);
-}
-
-struct CsrPathLink {
-  uint64_t edge_id;
-  shared_ptr<CsrPathLink> parent;
-};
-
-struct CsrPathFrame {
-  idx_t vertex_ordinal;
-  idx_t next_offset;
-  idx_t end_offset;
-  idx_t depth;
-  shared_ptr<CsrPathLink> path;
-  bool emitted = false;
-};
-
-struct CsrPathState : GlobalTableFunctionState {
-  bool initialized = false;
-  shared_ptr<GqlCsrSnapshot> snapshot;
-  vector<idx_t> start_ordinals;
-  idx_t next_start = 0;
-  idx_t current_start = 0;
-  std::deque<CsrPathFrame> queue;
-  bool filter_label = false;
-  uint32_t required_label = 0;
-};
-
-static unique_ptr<GlobalTableFunctionState>
-CsrPathInit(ClientContext &, TableFunctionInitInput &) {
-  return make_uniq<CsrPathState>();
-}
-
-static bool PathContainsEdge(const shared_ptr<CsrPathLink> &path,
-                             uint64_t edge_id) {
-  for (auto entry = path; entry; entry = entry->parent) {
-    if (entry->edge_id == edge_id) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static void PushCsrFrame(CsrPathState &state, const CsrPathBindData &data,
-                         idx_t vertex_ordinal, idx_t depth,
-                         shared_ptr<CsrPathLink> path) {
-  const auto &offsets = data.reverse ? state.snapshot->incoming_offsets
-                                     : state.snapshot->outgoing_offsets;
-  state.queue.push_back({vertex_ordinal, offsets[vertex_ordinal],
-                         offsets[vertex_ordinal + 1], depth, std::move(path),
-                         false});
-}
-
-static void CsrPathFunction(ClientContext &context, TableFunctionInput &input,
-                            DataChunk &output) {
-  auto &state = input.global_state->Cast<CsrPathState>();
-  auto &data = input.bind_data->Cast<CsrPathBindData>();
-  if (!state.initialized) {
-    if (!context.transaction.IsAutoCommit()) {
-      throw NotImplementedException(
-          "CSR execution hint is not eligible inside an explicit transaction; "
-          "use native execution");
-    }
-    auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(
-        GQL_CSR_STATE_KEY);
-    bool cached;
-    state.snapshot =
-        GetTraversalSnapshot(context, data.graph_name, *cache, cached);
-    state.filter_label = !data.edge_label.empty();
-    if (state.filter_label) {
-      auto label = state.snapshot->label_ids.find(data.edge_label);
-      state.required_label = label == state.snapshot->label_ids.end()
-                                 ? NumericLimits<uint32_t>::Maximum()
-                                 : label->second;
-    }
-    if (data.restrict_starts) {
-      unordered_set<idx_t> seen;
-      for (const auto start_id : data.start_ids) {
-        auto start = state.snapshot->ordinal_by_id.find(start_id);
-        if (start != state.snapshot->ordinal_by_id.end() &&
-            seen.insert(start->second).second) {
-          state.start_ordinals.push_back(start->second);
-        }
-      }
-    } else {
-      state.start_ordinals.reserve(state.snapshot->vertex_ids.size());
-      for (idx_t ordinal = 0; ordinal < state.snapshot->vertex_ids.size();
-           ordinal++) {
-        state.start_ordinals.push_back(ordinal);
-      }
-    }
-    state.initialized = true;
-  }
-
-  const auto &neighbors = data.reverse ? state.snapshot->incoming_neighbors
-                                       : state.snapshot->outgoing_neighbors;
-  const auto &edge_ids = data.reverse ? state.snapshot->incoming_edge_ids
-                                      : state.snapshot->outgoing_edge_ids;
-  const auto &label_ids = data.reverse ? state.snapshot->incoming_label_ids
-                                       : state.snapshot->outgoing_label_ids;
-  idx_t count = 0;
-  while (count < GQL_CSR_PATH_BATCH_SIZE) {
-    if (context.IsInterrupted()) {
-      throw InterruptException();
-    }
-    if (state.queue.empty()) {
-      if (state.next_start >= state.start_ordinals.size()) {
-        break;
-      }
-      state.current_start = state.start_ordinals[state.next_start++];
-      PushCsrFrame(state, data, state.current_start, 0, nullptr);
-    }
-
-    auto &frame = state.queue.front();
-    if (!frame.emitted) {
-      frame.emitted = true;
-      if (frame.depth >= data.minimum_repetitions) {
-        output.SetValue(
-            0, count,
-            Value::UBIGINT(state.snapshot->vertex_ids[state.current_start]));
-        output.SetValue(
-            1, count,
-            Value::UBIGINT(state.snapshot->vertex_ids[frame.vertex_ordinal]));
-        output.SetValue(2, count, Value::UBIGINT(frame.depth));
-        count++;
-        continue;
-      }
-    }
-
-    bool pushed = false;
-    while (frame.next_offset < frame.end_offset) {
-      auto offset = frame.next_offset++;
-      if (state.filter_label && label_ids[offset] != state.required_label) {
-        continue;
-      }
-      auto edge_id = edge_ids[offset];
-      if (PathContainsEdge(frame.path, edge_id)) {
-        continue;
-      }
-      auto neighbor = state.snapshot->ordinal_by_id.find(neighbors[offset]);
-      if (neighbor == state.snapshot->ordinal_by_id.end()) {
-        throw InternalException(
-            "GQL CSR neighbor is missing its vertex ordinal");
-      }
-      auto path = make_shared_ptr<CsrPathLink>();
-      path->edge_id = edge_id;
-      path->parent = frame.path;
-      PushCsrFrame(state, data, neighbor->second, frame.depth + 1,
-                   std::move(path));
-      pushed = true;
-      break;
-    }
-    if (!pushed) {
-      state.queue.pop_front();
-    }
-  }
-  output.SetCardinality(count);
 }
 
 TableFunction GqlNeighborsFunction() {
@@ -671,18 +563,6 @@ TableFunction GqlCsrStatsFunction() {
                          CsrStatsFunction);
   function.bind = CsrStatsBind;
   function.init_global = SingleRowInit;
-  return function;
-}
-
-TableFunction GqlCsrPathFunction() {
-  TableFunction function("gql_csr_path_scan",
-                         {LogicalType::VARCHAR, LogicalType::BOOLEAN,
-                          LogicalType::UBIGINT, LogicalType::VARCHAR,
-                          LogicalType::LIST(LogicalType::UBIGINT)},
-                         CsrPathFunction);
-  function.bind = CsrPathBind;
-  function.init_global = CsrPathInit;
-  function.cardinality = CsrPathCardinality;
   return function;
 }
 

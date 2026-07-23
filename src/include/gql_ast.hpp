@@ -60,7 +60,6 @@ struct GqlInsertEdge : GqlInsertElement {
 
 enum class GqlPatternElementType : uint8_t { VERTEX, EDGE };
 enum class GqlEdgeDirection : uint8_t { RIGHT, LEFT, ANY };
-enum class GqlExecutionMode : uint8_t { NATIVE, CSR };
 
 struct GqlPatternElement {
   GqlPatternElementType type = GqlPatternElementType::VERTEX;
@@ -92,7 +91,9 @@ enum class GqlExpressionType : uint8_t {
   UNARY,
   BINARY,
   IS_NULL,
-  LABELED
+  LABELED,
+  LIST_CONSTRUCTOR,
+  RECORD_CONSTRUCTOR
 };
 
 enum class GqlUnaryOperator : uint8_t { PLUS, MINUS, NOT };
@@ -128,6 +129,7 @@ struct GqlExpression {
   shared_ptr<GqlExpression> left;
   shared_ptr<GqlExpression> right;
   vector<shared_ptr<GqlExpression>> arguments;
+  vector<GqlIdentifier> field_names;
   GqlSourceRange source;
 };
 
@@ -145,10 +147,65 @@ struct GqlOrderBy {
   GqlSourceRange source;
 };
 
+struct GqlYieldItem {
+  GqlIdentifier field;
+  GqlIdentifier alias;
+  GqlSourceRange source;
+};
+
+// A procedure invocation embedded in a linear query. Unlike the standalone
+// CALL statement, arguments are expressions so a procedure can declare that
+// selected arguments are evaluated over the complete upstream row set.
+struct GqlProcedureCall {
+  GqlIdentifier procedure_namespace;
+  GqlIdentifier procedure_name;
+  vector<shared_ptr<GqlExpression>> arguments;
+  vector<GqlYieldItem> yield_items;
+  GqlSourceRange source;
+};
+
+// Linear queries are represented as an ordered clause stream. Clause payloads
+// reference the statement-owned AST pools by index so copying a statement for
+// a physical alternative does not duplicate or invalidate its query shape.
+// This is the compatibility seam for migrating the remaining flat fields below
+// into dedicated clause payload arenas.
+enum class GqlQueryClauseType : uint8_t { MATCH, LET, FILTER, CALL, RETURN };
+
+struct GqlQueryClause {
+  GqlQueryClauseType type = GqlQueryClauseType::MATCH;
+  GqlSourceRange source;
+
+  // MATCH payload: a contiguous range in GqlMatchStatement::patterns and any
+  // graph-pattern WHERE predicates owned by this MATCH.
+  idx_t pattern_begin = 0;
+  idx_t pattern_count = 0;
+  vector<idx_t> predicate_indices;
+  bool optional = false;
+  idx_t optional_stage = 0;
+
+  // FILTER payload: one entry in GqlMatchStatement::predicates.
+  idx_t predicate_index = DConstants::INVALID_INDEX;
+
+  // LET payload: a contiguous range in GqlMatchStatement::let_bindings.
+  idx_t let_begin = 0;
+  idx_t let_count = 0;
+
+  // CALL payload: one entry in GqlMatchStatement::procedure_calls.
+  idx_t procedure_call_index = DConstants::INVALID_INDEX;
+};
+
+struct GqlLetBinding {
+  GqlIdentifier variable;
+  shared_ptr<GqlExpression> expression;
+  GqlSourceRange source;
+};
+
 enum class GqlMutationType : uint8_t {
   SET_PROPERTY,
+  SET_PROPERTIES,
   SET_LABEL,
   CLEAR_PROPERTIES,
+  MERGE_PROPERTIES,
   REMOVE_PROPERTY,
   REMOVE_LABEL,
   DELETE_ELEMENT
@@ -158,6 +215,7 @@ struct GqlMutation {
   GqlMutationType type = GqlMutationType::SET_PROPERTY;
   GqlIdentifier variable;
   GqlIdentifier name;
+  shared_ptr<GqlExpression> target;
   shared_ptr<GqlExpression> value;
   bool detach = false;
   GqlSourceRange source;
@@ -170,6 +228,7 @@ enum class GqlStatementType : uint8_t {
   SESSION_SET_GRAPH,
   INSERT,
   MERGE,
+  CALL,
   MATCH,
   UNSUPPORTED
 };
@@ -260,21 +319,44 @@ public:
   GqlInsertElement vertex;
 };
 
+class GqlCallStatement final : public GqlStatement {
+public:
+  explicit GqlCallStatement(GqlSourceRange source_p)
+      : GqlStatement(GqlStatementType::CALL, std::move(source_p)) {}
+
+  GqlIdentifier procedure_namespace;
+  GqlIdentifier procedure_name;
+  vector<GqlLiteral> arguments;
+  // Empty entries are positional. Non-empty entries preserve project-owned
+  // DuckDB-style `name := value` configuration arguments for CALL pipelines;
+  // ISO GQL's imported grammar only models positional procedure arguments.
+  vector<GqlIdentifier> argument_names;
+  vector<GqlYieldItem> yield_items;
+  vector<GqlProjection> projections;
+  vector<GqlOrderBy> order_by;
+  bool distinct = false;
+  bool has_offset = false;
+  bool has_limit = false;
+  idx_t offset = 0;
+  idx_t limit = 0;
+};
+
 class GqlMatchStatement final : public GqlStatement {
 public:
   explicit GqlMatchStatement(GqlSourceRange source_p)
       : GqlStatement(GqlStatementType::MATCH, std::move(source_p)) {}
 
+  vector<GqlQueryClause> clauses;
   vector<GqlPattern> patterns;
   vector<shared_ptr<GqlExpression>> predicates;
-  vector<idx_t> predicate_optional_stages;
+  vector<GqlLetBinding> let_bindings;
+  vector<GqlProcedureCall> procedure_calls;
   vector<GqlProjection> projections;
   vector<GqlOrderBy> order_by;
   vector<GqlIdentifier> group_by_variables;
   vector<GqlMutation> mutations;
   shared_ptr<GqlInsertStatement> insertion;
   bool has_mutation = false;
-  bool optional = false;
   bool distinct = false;
   bool has_offset = false;
   bool has_limit = false;

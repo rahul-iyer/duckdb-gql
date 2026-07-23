@@ -13,7 +13,7 @@ manifest rows, and run the verification commands at the end of this document.
 - Branch: `rewrite/native-tables`
 - Native DuckDB wide-table graph storage; no EAV fallback
 - Vectorized CSV and Parquet loading through `COPY GRAPH`
-- 1,178 assertions passing across 12 GQL test cases
+- 1,910 assertions passing across 14 GQL test cases
 - 93 imported clause feature files and 827 source scenarios
 - 93 verified executable source scenarios; 734 unreviewed
 - 532 of 548 fixture setups adapted
@@ -80,22 +80,50 @@ manifest rows, and run the verification commands at the end of this document.
 
 ### MATCH and OPTIONAL MATCH correctness
 
-- [ ] Preserve arbitrary ordered sequences of mandatory and optional match
+- [x] Preserve arbitrary ordered sequences of mandatory and optional match
       stages.
-- [ ] Support mandatory `MATCH` after `OPTIONAL MATCH` without reordering
+- [x] Support mandatory `MATCH` after `OPTIONAL MATCH` without reordering
       semantics.
-- [ ] Support optional stages that introduce no new bindings.
+- [x] Support optional stages that introduce no new bindings.
 - [ ] Support optional stages combined with the remaining path forms.
 - [ ] Add differential tests against equivalent native DuckDB joins.
 
 ### Mutation completeness
 
-- [ ] Implement `SET n = {...}` property-map replacement.
-- [ ] Implement the remaining property-map merge forms.
-- [ ] Complete label-setting and label-removal forms.
-- [ ] Complete node and edge deletion constraints.
-- [ ] Verify multiple mutation items use the required statement snapshot.
-- [ ] Verify every mutation failure rolls back the complete command.
+- [x] Implement `SET n = {...}` property-map replacement for managed node and
+      edge tables, including empty maps, snapshot evaluation, and command
+      rollback.
+- [x] Implement explicit property-map merge compatibility with
+      `SET n += {...}`, including overwrite, retained properties, NULL removal,
+      snapshot expressions, and empty-map no-op behavior.
+- [x] Complete ISO node and edge label setting/removal for `IS` and colon
+      spellings with multiple comma-separated items and set-valued matching.
+- [x] Complete bound node/edge deletion constraints: explicit edge targets are
+      removed before node validation, unlisted incident edges reject plain and
+      `NODETACH` deletion, and failures restore prior edge deletions.
+- [x] Expand fixed path-variable `DELETE` and `DETACH DELETE` targets into their
+      typed node/edge bindings, including repeated elements and rollback when
+      an outside incident edge violates plain deletion.
+- [x] Expand project-owned compact node/edge label chains such as
+      `SET n:Foo:Bar` and `REMOVE n:Foo:Bar` into ordinary typed label
+      mutations through a quote/comment-aware, source-offset-preserving parser
+      adapter.
+- [x] Extend compatibility property replacement/merge beyond inline map
+      constructors to ordered record-valued `LET` bindings. The binder resolves
+      nested record-field selections and expands their fields into the existing
+      snapshot mutation program without runtime map materialization.
+- [ ] Complete general runtime map expressions from parameters, functions, and
+      independently materialized record values once those value layers exist.
+- [x] Preserve literal list/record constructors in the typed AST and expand
+      recursively nested `DELETE` targets, record-field selections, path
+      leaves, duplicates, and NULL leaves into the existing typed mutation
+      program without runtime collection materialization.
+- [ ] Complete runtime list/record-derived `DELETE` selection through `LET`,
+      `collect`, parameters, and list indexing; promote the applicable
+      imported Delete5 scenarios only after those language layers exist.
+- [x] Verify multiple mutation items use the required statement snapshot.
+- [x] Verify generated mutation failures roll back the complete autocommit
+      command, including failures after property-map clearing.
 
 ### MERGE completeness
 
@@ -180,12 +208,15 @@ manifest rows, and run the verification commands at the end of this document.
 - [ ] Implement `ALL` and `ANY` path searches.
 - [ ] Implement shortest-path and shortest-group searches.
 - [ ] Implement `KEEP`.
-- [ ] Add dedicated CSR-backed operators where they outperform relational
-      execution.
+- [x] Keep path-query execution native and reserve CSR for explicit graph
+      algorithms.
 
 ### Query composition
 
-- [ ] Implement `LET`.
+- [ ] Complete `LET`; ordered deterministic scalar/record aliases used by
+      projections, filters, and mutation expressions are inlined today, while
+      independently materialized values, declared types, and broader value
+      categories remain.
 - [ ] Implement `FOR` and ordinality.
 - [ ] Implement `SELECT` and `FINISH`.
 - [ ] Implement `UNION`.
@@ -225,12 +256,34 @@ manifest rows, and run the verification commands at the end of this document.
 
 ### Physical optimization
 
-- [ ] Add cost-based native-relational versus CSR planning.
-- [ ] Collect graph cardinality, degree, label, and property statistics.
-- [ ] Implement selectivity estimates for match and expansion operators.
-- [ ] Implement a database-wide versioned CSR cache.
+- [x] Implement a connection-local ordinal CSR plus streaming BFS/DFS and
+  dense iterative PageRank behind explicit `CALL` interfaces.
+- [x] Add deterministic weak/strong component decomposition and degree-oriented
+  triangle counting over the algorithm CSR.
+- [x] Add streaming unweighted single-source shortest paths, exact in/out/total
+  degree, and exact generalized outbound closeness over the algorithm CSR.
+- [x] Add independently optional vertex- and edge-label filtering to every CSR
+      algorithm, using induced vertex projections and compact CSR label IDs.
+- [x] Add typed customer-facing algorithm `CALL ... YIELD ... RETURN` lowering
+      with projection, aliases, ordering, and static paging.
+- [x] Model algorithm `CALL` as a generic logical/physical procedure node with
+      metadata-driven `NONE`, reserved `ROW`, and `BATCH` input modes. Lower
+      `MATCH -> CALL -> YIELD -> RETURN` as one DuckDB table-in/out plan;
+      BFS/DFS consume matched IDs as one frontier while global algorithms run
+      once after their child is exhausted.
+- [x] Replace row-at-a-time, double-sort CSR construction with chunk streaming,
+  dense managed-ID lookup, exact allocation, and linear count/prefix/scatter.
+- [x] Lower fixed mandatory regions as one native DuckDB join graph so DuckDB
+  owns base-table statistics, filter pushdown, and inner-join enumeration.
+- [ ] Collect only graph-specific statistics DuckDB cannot derive: degree and
+  expansion fanout, endpoint/label correlation, and path-length distributions.
+- [ ] Implement selectivity estimates for native recursive/path expansion.
+- [ ] Implement a database-wide versioned algorithm CSR cache.
 - [ ] Add bounded LRU eviction for CSR entries.
-- [ ] Implement parallel expansion and path execution.
+- [ ] Implement parallel CSR construction and PageRank/algorithm execution.
+- [ ] Add typed aligned CSR edge-weight arrays and weighted Dijkstra/SSSP.
+- [ ] Add parallel/approximate closeness for graphs where exact all-source BFS
+      is not operationally appropriate.
 
 ### Concurrency and hardening
 

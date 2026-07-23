@@ -1,0 +1,89 @@
+# name: test/sql/gql_optimizer_plan.test
+# description: Fixed GQL plans expose native join islands to DuckDB's optimizer
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'Ada', 42, 'Person'),
+        ('2', 'Grace', 35, 'Person'),
+        ('3', 'Linus', 30, 'Person'),
+        ('4', 'Edsger', 27, 'Person')
+    ) vertices(":ID", "name:string", "age:int", ":LABEL")
+) TO '__TEST_DIR__/gql_optimizer_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'KNOWS'),
+        ('2', '3', 'KNOWS'),
+        ('3', '4', 'KNOWS')
+    ) edges(":START_ID", ":END_ID", ":TYPE")
+) TO '__TEST_DIR__/gql_optimizer_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH optimizer_plan ANY
+
+statement ok
+COPY GRAPH optimizer_plan FROM (
+    VERTICES '__TEST_DIR__/gql_optimizer_vertices.csv',
+    EDGES '__TEST_DIR__/gql_optimizer_edges.csv'
+) FORMAT NEO4J
+
+statement ok
+SESSION SET GRAPH optimizer_plan
+
+# Profiling observes the physical tree after DuckDB statistics propagation and
+# join ordering. Three mandatory MATCH stages must become one native join island:
+# three vertex scans plus two edge scans, connected by four joins, with the
+# gql_match_relational bind-replacement function completely absent.
+statement ok
+PRAGMA enable_profiling = 'query_tree_optimizer'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_mandatory_plan.txt'
+
+statement ok
+MATCH (source:Person)
+MATCH (source)-[edge_one]->(middle:Person)
+MATCH (middle)-[edge_two]->(destination:Person)
+FILTER source.age = 42
+RETURN source.name, middle.name, destination.name
+
+statement ok
+PRAGMA disable_profiling
+
+query IIIII
+SELECT
+    len(regexp_extract_all(content, 'TABLE_SCAN')),
+    len(regexp_extract_all(content, 'Join Type:')),
+    len(regexp_extract_all(lower(content), 'gql_match_relational')),
+    len(regexp_extract_all(content, 'Join Order:')),
+    len(regexp_extract_all(content, 'Statistics Propagation:'))
+FROM read_text('__TEST_DIR__/gql_mandatory_plan.txt')
+----
+5	4	0	1	1
+
+# LEFT_APPLY is deliberately not part of the reorderable inner-join island.
+# It must survive native lowering as exactly one left outer join barrier.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_optional_plan.txt'
+
+statement ok
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[relationship]->(destination:Person)
+RETURN source.name, destination.name
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT len(regexp_extract_all(content, 'Join Type: LEFT'))
+FROM read_text('__TEST_DIR__/gql_optional_plan.txt')
+----
+1

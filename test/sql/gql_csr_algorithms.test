@@ -1,0 +1,677 @@
+# name: test/sql/gql_csr_algorithms.test
+# description: Explicit CSR build and CALL-based traversal, ranking, components, and triangles
+# group: [gql]
+
+require gql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'node;odd', 'one'),
+        ('2', 'node;even', 'two'),
+        ('3', 'node;odd', 'three'),
+        ('4', 'node;even', 'four'),
+        ('5', 'node;odd', 'five'),
+        ('6', 'node;even', 'isolated')
+    ) vertices("external_id:ID", ":LABEL", "name:string")
+) TO '__TEST_DIR__/gql_csr_algo_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'route'),
+        ('1', '3', 'express'),
+        ('2', '4', 'route'),
+        ('3', '4', 'route'),
+        ('4', '5', 'route'),
+        ('5', '3', 'route')
+    ) edges(":START_ID", ":END_ID", ":TYPE")
+) TO '__TEST_DIR__/gql_csr_algo_edges.csv' (FORMAT CSV, HEADER)
+
+query IT
+CREATE GRAPH algo_graph ANY
+----
+true	algo_graph
+
+query ITII
+COPY GRAPH algo_graph FROM (
+    VERTICES '__TEST_DIR__/gql_csr_algo_vertices.csv',
+    EDGES '__TEST_DIR__/gql_csr_algo_edges.csv'
+) FORMAT NEO4J
+----
+true	algo_graph	6	6
+
+# Algorithms never build implicitly: construction is an explicit CALL and the
+# resulting immutable snapshot is reused by later calls on this connection.
+statement error
+CALL algo.bfs('algo_graph', 1)
+----
+run CALL gql_build_csr('algo_graph') first
+
+statement ok
+CALL gql_build_csr('algo_graph')
+
+query III
+SELECT vertex_count, edge_count, cached
+FROM gql_csr_stats('algo_graph')
+----
+6	6	true
+
+query II rowsort
+CALL gql_neighbors('algo_graph', 1, 'out')
+----
+2	1
+3	2
+
+# BFS streams vertices in level order and records the shortest-path tree.
+query IIIII
+CALL algo.bfs('algo_graph', 1)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+3	1	1	2	2
+4	2	2	3	3
+5	3	4	5	4
+
+# DFS uses an iterative frame stack and deterministic CSR adjacency order.
+query IIIII
+CALL algo.dfs('algo_graph', 1)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+4	2	2	3	2
+5	3	4	5	3
+3	4	5	6	4
+
+# SSSP is the unweighted, exactly-one-source contract. Distances are edge
+# counts and rows stream in nondecreasing settled distance.
+query IIIII
+CALL algo.sssp('algo_graph', 1)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+3	1	1	2	2
+4	2	2	3	3
+5	3	4	5	4
+
+# Named controls bound work without changing the fast positional API.
+query IIIII
+CALL algo.bfs('algo_graph', 1, max_depth := 1)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+3	1	1	2	2
+
+query IIIII
+CALL algo.bfs('algo_graph', 1, target_vertex_id := 4)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+3	1	1	2	2
+4	2	2	3	3
+
+query IIIII
+CALL algo.dfs('algo_graph', 1, target_vertex_id := 4)
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+4	2	2	3	2
+
+query IIIII
+CALL algo.bfs('algo_graph', 4, direction := 'in')
+----
+4	0	NULL	NULL	0
+2	1	4	3	1
+3	1	4	4	2
+1	2	2	1	3
+5	2	3	6	4
+
+query IIIII
+CALL algo.bfs('algo_graph', 1, edge_label := 'route')
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+4	2	2	3	2
+5	3	4	5	3
+3	4	5	6	4
+
+query IIIII
+SELECT * FROM system.algo.bfs('algo_graph', 1) LIMIT 2
+----
+1	0	NULL	NULL	0
+2	1	1	1	1
+
+# PageRank iterates directly over ordinal CSR arrays, including dangling-node
+# redistribution. The scores remain normalized and deterministic.
+statement ok
+CALL algo.pagerank('algo_graph', max_iterations := 1000, tolerance := 1e-12)
+
+# Named configuration arguments remain available when CALL continues through
+# the customer-facing YIELD/RETURN pipeline.
+query I
+CALL algo.pagerank('algo_graph', damping := 0.85, max_iterations := 1, tolerance := 1e-300)
+YIELD vertex_id, iterations
+RETURN iterations
+LIMIT 1
+----
+1
+
+query III
+SELECT count(*), abs(sum(rank) - 1.0) < 1e-12, bool_and(converged)
+FROM system.algo.pagerank('algo_graph', max_iterations := 1000, tolerance := 1e-12)
+----
+6	true	true
+
+query IR rowsort
+SELECT vertex_id, round(rank, 6)
+FROM system.algo.pagerank('algo_graph', max_iterations := 1000, tolerance := 1e-12)
+----
+1	0.029126
+2	0.041505
+3	0.292310
+4	0.312869
+5	0.295064
+6	0.029126
+
+statement error
+CALL algo.pagerank('algo_graph', damping := 1.0)
+----
+damping must be between 0 and 1
+
+# WCC projects directed edges to undirected connectivity. Component IDs are
+# deterministic: the smallest stored vertex ID in each component.
+query III
+CALL algo.wcc('algo_graph')
+----
+1	1	5
+2	1	5
+3	1	5
+4	1	5
+5	1	5
+6	6	1
+
+query II
+SELECT count(DISTINCT component_id), max(component_size)
+FROM system.algo.wcc('algo_graph', edge_label := 'express')
+----
+5	2
+
+# SCC preserves edge direction. Vertices 3, 4, and 5 form the only
+# non-singleton strongly connected component.
+query III
+CALL algo.scc('algo_graph')
+----
+1	1	1
+2	2	1
+3	3	3
+4	3	3
+5	3	3
+6	6	1
+
+# Triangle counting uses a simple undirected projection: self-loops are
+# ignored and reciprocal/parallel edges represent one adjacency. The result
+# includes local counts and coefficients plus the graph-wide count.
+query IIIRI
+SELECT vertex_id, triangle_count, degree,
+       round(local_clustering_coefficient, 6), global_triangle_count
+FROM system.algo.triangle_count('algo_graph')
+----
+1	0	2	0.000000	1
+2	0	2	0.000000	1
+3	1	3	0.333333	1
+4	1	3	0.333333	1
+5	1	2	1.000000	1
+6	0	0	0.000000	1
+
+# LCC keeps the undirected neighbor set but preserves direction for edges
+# between neighbors, matching the LDBC Graphalytics contract.
+query III rowsort
+CALL algo.lcc('algo_graph')
+YIELD vertex_id, degree, directed_neighbor_edge_count, local_clustering_coefficient
+RETURN vertex_id, degree, directed_neighbor_edge_count
+----
+1	2	0
+2	2	0
+3	3	1
+4	3	1
+5	2	1
+6	0	0
+
+query IR rowsort
+SELECT vertex_id, round(local_clustering_coefficient, 6)
+FROM system.algo.lcc('algo_graph')
+----
+1	0.000000
+2	0.000000
+3	0.166667
+4	0.166667
+5	0.500000
+6	0.000000
+
+# Degree counts CSR edge incidences. Parallel edges count separately and a
+# self-loop contributes once to each of in/out degree.
+query IIII
+CALL algo.degree('algo_graph')
+----
+1	2	0	2
+2	1	1	2
+3	1	2	3
+4	1	2	3
+5	1	1	2
+6	0	0	0
+
+query IIII
+CALL algo.degree('algo_graph', edge_label := 'express')
+----
+1	1	0	1
+2	0	0	0
+3	0	1	1
+4	0	0	0
+5	0	0	0
+6	0	0	0
+
+# Exact outbound generalized closeness is defined for disconnected directed
+# graphs: reached^2 / ((vertex_count - 1) * distance_sum).
+query IIIR
+SELECT vertex_id, reachable_count, distance_sum,
+       round(closeness_centrality, 6)
+FROM system.algo.closeness('algo_graph')
+----
+1	4	7	0.457143
+2	3	6	0.300000
+3	2	3	0.266667
+4	2	3	0.266667
+5	2	3	0.266667
+6	0	0	0.000000
+
+# vertex_label is an optional induced-vertex projection shared by every
+# algorithm. With no vertex_label, all preceding full-graph results remain
+# unchanged. edge_label is independently optional and composes inside it.
+query IIIII
+CALL algo.bfs('algo_graph', 1, vertex_label := 'odd')
+----
+1	0	NULL	NULL	0
+3	1	1	2	1
+
+query IIIII
+CALL algo.dfs('algo_graph', 1, vertex_label := 'odd')
+----
+1	0	NULL	NULL	0
+3	1	1	2	1
+
+query IIIII
+CALL algo.sssp('algo_graph', 1, vertex_label := 'odd')
+----
+1	0	NULL	NULL	0
+3	1	1	2	1
+
+query IR
+SELECT count(*), round(sum(rank), 6)
+FROM system.algo.pagerank('algo_graph', vertex_label := 'odd')
+----
+3	1.000000
+
+query III
+CALL algo.wcc('algo_graph', vertex_label := 'odd')
+----
+1	1	3
+3	1	3
+5	1	3
+
+query III
+CALL algo.scc('algo_graph', vertex_label := 'odd')
+----
+1	1	1
+3	3	1
+5	5	1
+
+query IIIRI
+SELECT vertex_id, triangle_count, degree,
+       round(local_clustering_coefficient, 6), global_triangle_count
+FROM system.algo.triangle_count('algo_graph', vertex_label := 'odd')
+----
+1	0	1	0.000000	0
+3	0	2	0.000000	0
+5	0	1	0.000000	0
+
+query IIII
+CALL algo.degree('algo_graph', vertex_label := 'odd')
+----
+1	1	0	1
+3	0	2	2
+5	1	0	1
+
+query IIII
+CALL algo.degree('algo_graph', vertex_label := 'odd', edge_label := 'route')
+----
+1	0	0	0
+3	0	1	1
+5	1	0	1
+
+query IIIR
+SELECT vertex_id, reachable_count, distance_sum,
+       round(closeness_centrality, 6)
+FROM system.algo.closeness('algo_graph', vertex_label := 'odd')
+----
+1	1	1	0.500000
+3	0	0	0.000000
+5	1	1	0.500000
+
+query I
+SELECT count(*) FROM system.algo.degree(
+    'algo_graph', vertex_label := 'does-not-exist'
+)
+----
+0
+
+statement error
+CALL algo.bfs('algo_graph', 2, vertex_label := 'odd')
+----
+outside the vertex-label projection
+
+# Customer-facing composition uses the GQL procedure pipeline. The compiler
+# keeps system.algo as an internal execution detail.
+query IIR rowsort
+CALL algo.triangle_count('algo_graph')
+YIELD vertex_id, triangle_count, local_clustering_coefficient
+RETURN vertex_id, triangle_count, local_clustering_coefficient
+ORDER BY triangle_count DESC
+LIMIT 20
+----
+1	0	0.000000
+2	0	0.000000
+3	1	0.333333
+4	1	0.333333
+5	1	1.000000
+6	0	0.000000
+
+query II
+CALL algo.triangle_count('algo_graph')
+YIELD vertex_id, triangle_count
+RETURN vertex_id, triangle_count
+ORDER BY triangle_count DESC, vertex_id ASC
+LIMIT 2
+----
+3	1
+4	1
+
+query II
+CALL algo.wcc('algo_graph')
+YIELD vertex_id AS node_id, component_id
+RETURN node_id AS vertex_id, component_id
+ORDER BY vertex_id DESC
+LIMIT 1
+----
+6	6
+
+query III
+CALL algo.degree('algo_graph')
+YIELD vertex_id, out_degree, total_degree
+RETURN vertex_id, out_degree, total_degree
+ORDER BY total_degree DESC, vertex_id ASC
+LIMIT 2
+----
+3	1	3
+4	1	3
+
+query II
+CALL algo.degree('algo_graph', 'odd')
+YIELD vertex_id, total_degree
+RETURN vertex_id, total_degree
+ORDER BY vertex_id ASC
+----
+1	1
+3	2
+5	1
+
+query II
+CALL algo.sssp('algo_graph', 1)
+YIELD vertex_id, distance
+RETURN vertex_id, distance
+ORDER BY distance ASC, vertex_id ASC
+LIMIT 3
+----
+1	0
+2	1
+3	1
+
+# MATCH -> CALL is one blocking procedure node with the MATCH relation as its
+# child. BFS consumes all matched element IDs as one deterministic frontier;
+# only YIELD bindings remain visible after the batch boundary.
+query IT
+SESSION SET GRAPH algo_graph
+----
+true	algo_graph
+
+query IIIII
+MATCH (seed:node)
+FILTER seed.name = 'one' OR seed.name = 'isolated'
+CALL algo.bfs('algo_graph', element_id(seed))
+YIELD vertex_id, depth, parent_vertex_id, edge_id, visit_order
+RETURN vertex_id, depth, parent_vertex_id, edge_id, visit_order
+----
+1	0	NULL	NULL	0
+6	0	NULL	NULL	1
+2	1	1	1	2
+3	1	1	2	3
+4	2	2	3	4
+5	3	4	5	5
+
+query II
+MATCH (seed:node)
+FILTER seed.name = 'one'
+CALL algo.dfs('algo_graph', element_id(seed))
+YIELD vertex_id, visit_order
+RETURN vertex_id, visit_order
+----
+1	0
+2	1
+4	2
+5	3
+3	4
+
+query II
+MATCH (seed:node)
+FILTER seed.name = 'one'
+CALL algo.sssp('algo_graph', element_id(seed))
+YIELD vertex_id, distance
+RETURN vertex_id, distance
+----
+1	0
+2	1
+3	1
+4	2
+5	3
+
+query II
+MATCH (seed:node)
+FILTER seed.name = 'one'
+CALL algo.sssp('algo_graph', element_id(seed), 'odd')
+YIELD vertex_id, distance
+RETURN vertex_id, distance
+----
+1	0
+3	1
+
+query II
+MATCH (seed:node)
+FILTER seed.name = 'one'
+CALL algo.dfs('algo_graph', element_id(seed), 'odd')
+YIELD vertex_id, depth
+RETURN vertex_id, depth
+----
+1	0
+3	1
+
+statement error
+MATCH (seed:node)
+FILTER seed.name = 'one' OR seed.name = 'isolated'
+CALL algo.sssp('algo_graph', element_id(seed))
+YIELD vertex_id
+RETURN vertex_id
+----
+SSSP requires exactly one distinct source vertex
+
+# A NONE-input algorithm still has the (possibly empty) MATCH child in the
+# same plan, but executes exactly once after that child is exhausted.
+query II
+MATCH (seed:node)
+FILTER seed.name = 'does-not-exist'
+CALL algo.triangle_count('algo_graph')
+YIELD vertex_id, triangle_count
+RETURN vertex_id, triangle_count
+ORDER BY vertex_id ASC
+LIMIT 2
+----
+1	0
+2	0
+
+query IR
+MATCH (seed:node)
+FILTER seed.name = 'does-not-exist'
+CALL algo.closeness('algo_graph')
+YIELD vertex_id, closeness_centrality
+RETURN vertex_id, closeness_centrality
+ORDER BY closeness_centrality DESC, vertex_id ASC
+LIMIT 1
+----
+1	0.45714285714285713
+
+query I
+MATCH (seed:node)
+FILTER seed.name = 'does-not-exist'
+CALL algo.pagerank('algo_graph', 'odd')
+YIELD vertex_id
+RETURN vertex_id
+ORDER BY vertex_id ASC
+----
+1
+3
+5
+
+query II
+MATCH (seed:node)
+FILTER seed.name = 'does-not-exist'
+CALL algo.wcc('algo_graph', 'odd')
+YIELD vertex_id, component_size
+RETURN vertex_id, component_size
+ORDER BY vertex_id ASC
+----
+1	3
+3	3
+5	3
+
+query II rowsort
+MATCH (seed:node)
+FILTER seed.name = 'does-not-exist'
+CALL algo.closeness('algo_graph', 'odd')
+YIELD vertex_id, closeness_centrality
+RETURN vertex_id, closeness_centrality
+ORDER BY vertex_id ASC
+----
+1	0.5
+3	0.0
+5	0.5
+
+statement error
+MATCH (seed:node)
+CALL algo.bfs('algo_graph', element_id(seed))
+YIELD vertex_id
+RETURN seed
+----
+binding variable 'seed' is not defined
+
+statement error
+CALL algo.triangle_count('algo_graph')
+YIELD vertex_id
+RETURN triangle_count
+----
+CALL/YIELD/RETURN procedure pipeline
+
+query II
+SELECT sum(triangle_count), max(global_triangle_count)
+FROM system.algo.triangle_count('algo_graph', edge_label := 'express')
+----
+0	0
+
+# Reciprocal edges, parallel edges, and self-loops do not multiply triangles
+# in the simple undirected projection.
+query IT
+SESSION SET GRAPH algo_graph
+----
+true	algo_graph
+
+statement ok
+MATCH (source:node), (target:node)
+WHERE source.name = 'three' AND target.name = 'four'
+INSERT (target)-[:route]->(source)
+
+statement ok
+MATCH (source:node), (target:node)
+WHERE source.name = 'three' AND target.name = 'four'
+INSERT (source)-[:route]->(target)
+
+statement ok
+MATCH (source:node) WHERE source.name = 'three'
+INSERT (source)-[:route]->(source)
+
+statement ok
+CALL gql_build_csr('algo_graph')
+
+query II
+SELECT sum(triangle_count), max(global_triangle_count)
+FROM system.algo.triangle_count('algo_graph')
+----
+3	1
+
+statement error
+CALL algo.bfs('algo_graph', 999)
+----
+start vertex 999 does not exist
+
+statement error
+CALL algo.bfs('algo_graph', 1, direction := 'sideways')
+----
+direction must be 'out', 'in', or 'both'
+
+# Conservative graph-version invalidation rejects stale snapshots. Rebuilding
+# is explicit even when a mutation only changed properties.
+statement ok
+MATCH (n:node) SET n.name = n.name
+
+statement error
+CALL algo.bfs('algo_graph', 1)
+----
+run CALL gql_build_csr('algo_graph') first
+
+statement ok
+CALL gql_build_csr('algo_graph')
+
+statement ok
+BEGIN
+
+statement error
+CALL algo.bfs('algo_graph', 1)
+----
+CSR algorithms are not eligible inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+# Managed IDs are normally dense. After a delete and sequence-backed insert
+# create a hole, construction falls back to the sparse ID map without changing
+# the public traversal contract.
+statement ok
+MATCH (n:node) WHERE n.name = 'isolated'
+DETACH DELETE n
+
+statement ok
+INSERT (:node {name: 'replacement'})
+
+statement ok
+CALL gql_build_csr('algo_graph')
+
+query IIIII
+CALL algo.bfs('algo_graph', 7)
+----
+7	0	NULL	NULL	0

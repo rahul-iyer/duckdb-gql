@@ -10,8 +10,8 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "gql_binder.hpp"
-#include "gql_csr.hpp"
 #include "gql_import.hpp"
 #include "gql_lowerer.hpp"
 #include "gql_mutation.hpp"
@@ -47,6 +47,100 @@ static bool StartsWithMergePattern(const string &query) {
     offset++;
   }
   return offset < query.size() && query[offset] == '(';
+}
+
+static bool FindAlgorithmCall(const string &query, idx_t &algorithm_offset) {
+  idx_t offset = 0;
+  while (offset < query.size() &&
+         std::isspace(static_cast<unsigned char>(query[offset]))) {
+    offset++;
+  }
+  if (offset + 4 > query.size() ||
+      !StringUtil::CIEquals(query.substr(offset, 4), "CALL")) {
+    return false;
+  }
+  offset += 4;
+  if (offset >= query.size() ||
+      !std::isspace(static_cast<unsigned char>(query[offset]))) {
+    return false;
+  }
+  while (offset < query.size() &&
+         std::isspace(static_cast<unsigned char>(query[offset]))) {
+    offset++;
+  }
+  if (offset + 5 > query.size() ||
+      !StringUtil::CIEquals(query.substr(offset, 5), "algo.")) {
+    return false;
+  }
+  algorithm_offset = offset;
+  return true;
+}
+
+static bool StartsWithAlgorithmCall(const string &query) {
+  idx_t algorithm_offset;
+  return FindAlgorithmCall(query, algorithm_offset);
+}
+
+static bool ContainsUnquotedKeyword(const string &query,
+                                    const string &keyword) {
+  char quote = '\0';
+  bool line_comment = false;
+  bool block_comment = false;
+  for (idx_t offset = 0; offset < query.size(); offset++) {
+    auto character = query[offset];
+    auto next = offset + 1 < query.size() ? query[offset + 1] : '\0';
+    if (line_comment) {
+      line_comment = character != '\n';
+      continue;
+    }
+    if (block_comment) {
+      if (character == '*' && next == '/') {
+        block_comment = false;
+        offset++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character != quote) {
+        continue;
+      }
+      if (next == quote) {
+        offset++;
+        continue;
+      }
+      quote = '\0';
+      continue;
+    }
+    if (character == '-' && next == '-') {
+      line_comment = true;
+      offset++;
+      continue;
+    }
+    if (character == '/' && next == '*') {
+      block_comment = true;
+      offset++;
+      continue;
+    }
+    if (character == '\'' || character == '"' || character == '`') {
+      quote = character;
+      continue;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(character)) ||
+          character == '_')) {
+      continue;
+    }
+    auto start = offset++;
+    while (offset < query.size() &&
+           (std::isalnum(static_cast<unsigned char>(query[offset])) ||
+            query[offset] == '_')) {
+      offset++;
+    }
+    if (StringUtil::CIEquals(query.substr(start, offset - start), keyword)) {
+      return true;
+    }
+    offset--;
+  }
+  return false;
 }
 
 unique_ptr<ParserExtensionParseData> GqlParseData::Copy() const {
@@ -86,7 +180,19 @@ static bool StartsWithGqlCommand(const string &query) {
          StartsWithMergePattern(query) ||
          StringUtil::StartsWith(normalized, "MATCH") ||
          StringUtil::StartsWith(normalized, "OPTIONAL MATCH") ||
-         StringUtil::StartsWith(normalized, "INSERT (");
+         StringUtil::StartsWith(normalized, "INSERT (") ||
+         StartsWithAlgorithmCall(query);
+}
+
+static bool RewriteAlgorithmCall(const string &query, string &rewritten) {
+  idx_t offset;
+  if (!FindAlgorithmCall(query, offset) ||
+      ContainsUnquotedKeyword(query, "YIELD")) {
+    return false;
+  }
+  rewritten = query;
+  rewritten.insert(offset, "system.");
+  return true;
 }
 
 static string StripTerminator(const string &query) {
@@ -97,6 +203,673 @@ static string StripTerminator(const string &query) {
     StringUtil::Trim(trimmed);
   }
   return trimmed;
+}
+
+// The imported ISO grammar intentionally has no Cypher-style += token. Accept
+// this project-owned compatibility form without forking the generated parser:
+// blank only the '+' in an unquoted += pair, preserving every source offset.
+// The transformer inspects the original query to distinguish merge from
+// replacement semantics.
+static string RewritePropertyMapMergeSyntax(const string &query) {
+  auto result = query;
+  char quote = '\0';
+  bool line_comment = false;
+  bool block_comment = false;
+  for (idx_t index = 0; index < result.size(); index++) {
+    auto character = result[index];
+    auto next = index + 1 < result.size() ? result[index + 1] : '\0';
+    if (line_comment) {
+      line_comment = character != '\n';
+      continue;
+    }
+    if (block_comment) {
+      if (character == '*' && next == '/') {
+        block_comment = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character != quote) {
+        continue;
+      }
+      if (next == quote) {
+        index++;
+        continue;
+      }
+      quote = '\0';
+      continue;
+    }
+    if (character == '-' && next == '-') {
+      line_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '/' && next == '*') {
+      block_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '\'' || character == '"' || character == '`') {
+      quote = character;
+      continue;
+    }
+    if (character == '+' && next == '=') {
+      auto map_offset = index + 2;
+      while (map_offset < result.size()) {
+        if (std::isspace(static_cast<unsigned char>(result[map_offset]))) {
+          map_offset++;
+          continue;
+        }
+        if (map_offset + 1 < result.size() && result[map_offset] == '-' &&
+            result[map_offset + 1] == '-') {
+          map_offset += 2;
+          while (map_offset < result.size() && result[map_offset] != '\n') {
+            map_offset++;
+          }
+          continue;
+        }
+        if (map_offset + 1 < result.size() && result[map_offset] == '/' &&
+            result[map_offset + 1] == '*') {
+          auto end = result.find("*/", map_offset + 2);
+          if (end == string::npos) {
+            break;
+          }
+          map_offset = end + 2;
+          continue;
+        }
+        break;
+      }
+      if (map_offset < result.size() &&
+          (result[map_offset] == '{' || result[map_offset] == '`' ||
+           result[map_offset] == '"' ||
+           std::isalpha(static_cast<unsigned char>(result[map_offset])) ||
+           result[map_offset] == '_')) {
+        result[index] = ' ';
+        index++;
+      }
+    }
+  }
+  return result;
+}
+
+// DuckDB-style named arguments are part of the public algo CALL surface, but
+// the imported ISO grammar only accepts positional procedure arguments. Blank
+// `name :=` outside quotes/comments while preserving byte offsets; the
+// transformer recovers the name from the original query using the value's
+// unchanged source position.
+static string RewriteCallNamedArgumentSyntax(const string &query) {
+  if (!StartsWithAlgorithmCall(query) ||
+      !ContainsUnquotedKeyword(query, "YIELD")) {
+    return query;
+  }
+  auto result = query;
+  char quote = '\0';
+  bool line_comment = false;
+  bool block_comment = false;
+  for (idx_t index = 0; index + 1 < result.size(); index++) {
+    auto character = result[index];
+    auto next = result[index + 1];
+    if (line_comment) {
+      line_comment = character != '\n';
+      continue;
+    }
+    if (block_comment) {
+      if (character == '*' && next == '/') {
+        block_comment = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character != quote) {
+        continue;
+      }
+      if (next == quote) {
+        index++;
+        continue;
+      }
+      quote = '\0';
+      continue;
+    }
+    if (character == '-' && next == '-') {
+      line_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '/' && next == '*') {
+      block_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '\'' || character == '"' || character == '`') {
+      quote = character;
+      continue;
+    }
+    if (character != ':' || next != '=') {
+      continue;
+    }
+    auto name_end = index;
+    while (name_end > 0 &&
+           std::isspace(static_cast<unsigned char>(result[name_end - 1]))) {
+      name_end--;
+    }
+    auto name_start = name_end;
+    while (name_start > 0 &&
+           (std::isalnum(static_cast<unsigned char>(result[name_start - 1])) ||
+            result[name_start - 1] == '_')) {
+      name_start--;
+    }
+    if (name_start == name_end ||
+        !(std::isalpha(static_cast<unsigned char>(result[name_start])) ||
+          result[name_start] == '_')) {
+      continue;
+    }
+    std::fill(result.begin() + name_start, result.begin() + index + 2, ' ');
+    index++;
+  }
+  return result;
+}
+
+// The ISO SET grammar accepts only an inline property-map constructor. LET is
+// the runtime value-producing seam used by the compiler, so accept a single
+// LET variable on the right hand side as a compatibility form. Replace only
+// that identifier with an empty map in the parser input; the transformer reads
+// the original identifier and the binder expands its record fields into the
+// ordinary typed mutation program. The rewritten query retains its byte count.
+static string RewritePropertyMapExpressionSyntax(const string &query) {
+  auto result = query;
+  auto skip_trivia = [&](idx_t offset) -> idx_t {
+    while (offset < query.size()) {
+      if (std::isspace(static_cast<unsigned char>(query[offset]))) {
+        offset++;
+        continue;
+      }
+      if (offset + 1 < query.size() && query[offset] == '-' &&
+          query[offset + 1] == '-') {
+        offset += 2;
+        while (offset < query.size() && query[offset] != '\n') {
+          offset++;
+        }
+        continue;
+      }
+      if (offset + 1 < query.size() && query[offset] == '/' &&
+          query[offset + 1] == '*') {
+        auto end = query.find("*/", offset + 2);
+        if (end == string::npos) {
+          return query.size();
+        }
+        offset = end + 2;
+        continue;
+      }
+      break;
+    }
+    return offset;
+  };
+  auto read_identifier = [&](idx_t offset, idx_t &end) {
+    if (offset >= query.size()) {
+      return false;
+    }
+    if (query[offset] == '`' || query[offset] == '"') {
+      auto quote = query[offset++];
+      while (offset < query.size()) {
+        if (query[offset] != quote) {
+          offset++;
+          continue;
+        }
+        if (offset + 1 < query.size() && query[offset + 1] == quote) {
+          offset += 2;
+          continue;
+        }
+        end = offset + 1;
+        return true;
+      }
+      return false;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(query[offset])) ||
+          query[offset] == '_')) {
+      return false;
+    }
+    offset++;
+    while (offset < query.size() &&
+           (std::isalnum(static_cast<unsigned char>(query[offset])) ||
+            query[offset] == '_')) {
+      offset++;
+    }
+    end = offset;
+    return true;
+  };
+  auto item_end = [&](idx_t offset) -> idx_t {
+    idx_t parentheses = 0;
+    idx_t brackets = 0;
+    idx_t braces = 0;
+    char quote = '\0';
+    bool line_comment = false;
+    bool block_comment = false;
+    for (; offset < query.size(); offset++) {
+      auto character = query[offset];
+      auto next = offset + 1 < query.size() ? query[offset + 1] : '\0';
+      if (line_comment) {
+        line_comment = character != '\n';
+        continue;
+      }
+      if (block_comment) {
+        if (character == '*' && next == '/') {
+          block_comment = false;
+          offset++;
+        }
+        continue;
+      }
+      if (quote) {
+        if (character == quote) {
+          if (next == quote) {
+            offset++;
+          } else {
+            quote = '\0';
+          }
+        }
+        continue;
+      }
+      if (character == '-' && next == '-') {
+        line_comment = true;
+        offset++;
+        continue;
+      }
+      if (character == '/' && next == '*') {
+        block_comment = true;
+        offset++;
+        continue;
+      }
+      if (character == '\'' || character == '"' || character == '`') {
+        quote = character;
+        continue;
+      }
+      switch (character) {
+      case '(':
+        parentheses++;
+        break;
+      case ')':
+        if (parentheses > 0) {
+          parentheses--;
+        }
+        break;
+      case '[':
+        brackets++;
+        break;
+      case ']':
+        if (brackets > 0) {
+          brackets--;
+        }
+        break;
+      case '{':
+        braces++;
+        break;
+      case '}':
+        if (braces > 0) {
+          braces--;
+        }
+        break;
+      case ',':
+        if (parentheses == 0 && brackets == 0 && braces == 0) {
+          return offset;
+        }
+        break;
+      default:
+        break;
+      }
+    }
+    return query.size();
+  };
+
+  idx_t set_offset = DConstants::INVALID_INDEX;
+  char quote = '\0';
+  bool line_comment = false;
+  bool block_comment = false;
+  for (idx_t index = 0; index < query.size(); index++) {
+    auto character = query[index];
+    auto next = index + 1 < query.size() ? query[index + 1] : '\0';
+    if (line_comment) {
+      line_comment = character != '\n';
+      continue;
+    }
+    if (block_comment) {
+      if (character == '*' && next == '/') {
+        block_comment = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character == quote) {
+        if (next == quote) {
+          index++;
+        } else {
+          quote = '\0';
+        }
+      }
+      continue;
+    }
+    if (character == '-' && next == '-') {
+      line_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '/' && next == '*') {
+      block_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '\'' || character == '"' || character == '`') {
+      quote = character;
+      continue;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(character)) ||
+          character == '_')) {
+      continue;
+    }
+    auto word_start = index;
+    while (index + 1 < query.size() &&
+           (std::isalnum(static_cast<unsigned char>(query[index + 1])) ||
+            query[index + 1] == '_')) {
+      index++;
+    }
+    if (StringUtil::CIEquals(query.substr(word_start, index - word_start + 1),
+                             "SET")) {
+      set_offset = index + 1;
+      break;
+    }
+  }
+  if (set_offset == DConstants::INVALID_INDEX) {
+    return result;
+  }
+
+  for (auto item = set_offset; item < query.size();) {
+    auto end = item_end(item);
+    auto cursor = skip_trivia(item);
+    idx_t target_end;
+    if (!read_identifier(cursor, target_end)) {
+      break;
+    }
+    cursor = skip_trivia(target_end);
+    if (cursor >= end || query[cursor] != '=') {
+      item = end < query.size() ? end + 1 : end;
+      continue;
+    }
+    auto rhs_start = skip_trivia(cursor + 1);
+    idx_t rhs_end;
+    if (rhs_start >= end || query[rhs_start] == '{' ||
+        !read_identifier(rhs_start, rhs_end) || skip_trivia(rhs_end) < end) {
+      item = end < query.size() ? end + 1 : end;
+      continue;
+    }
+    auto rewrite_start = rhs_start;
+    if (rhs_end - rhs_start < 2) {
+      if (rhs_start == cursor + 1 ||
+          !std::isspace(static_cast<unsigned char>(query[rhs_start - 1]))) {
+        item = end < query.size() ? end + 1 : end;
+        continue;
+      }
+      rewrite_start--;
+    }
+    for (idx_t offset = rewrite_start; offset < rhs_end; offset++) {
+      result[offset] = ' ';
+    }
+    result[rewrite_start] = '{';
+    result[rewrite_start + 1] = '}';
+    item = end < query.size() ? end + 1 : end;
+  }
+  return result;
+}
+
+// Compact Cypher-style label chains are a project-owned compatibility form.
+// The ISO grammar accepts one label per SET/REMOVE item, so blank the second
+// and later suffixes before parsing. The transformer reads those suffixes from
+// the untouched original query and emits one typed mutation per label. Keeping
+// the rewritten string byte-for-byte the same size preserves source ranges.
+static string RewriteChainedLabelSyntax(const string &query) {
+  auto result = query;
+  auto skip_trivia = [&](idx_t offset) -> idx_t {
+    while (offset < query.size()) {
+      if (std::isspace(static_cast<unsigned char>(query[offset]))) {
+        offset++;
+        continue;
+      }
+      if (offset + 1 < query.size() && query[offset] == '-' &&
+          query[offset + 1] == '-') {
+        offset += 2;
+        while (offset < query.size() && query[offset] != '\n') {
+          offset++;
+        }
+        continue;
+      }
+      if (offset + 1 < query.size() && query[offset] == '/' &&
+          query[offset + 1] == '*') {
+        auto end = query.find("*/", offset + 2);
+        if (end == string::npos) {
+          return query.size();
+        }
+        offset = end + 2;
+        continue;
+      }
+      break;
+    }
+    return offset;
+  };
+  auto read_identifier = [&](idx_t offset, idx_t &end) {
+    if (offset >= query.size()) {
+      return false;
+    }
+    if (query[offset] == '`' || query[offset] == '"') {
+      auto quote = query[offset++];
+      while (offset < query.size()) {
+        if (query[offset] != quote) {
+          offset++;
+          continue;
+        }
+        if (offset + 1 < query.size() && query[offset + 1] == quote) {
+          offset += 2;
+          continue;
+        }
+        end = offset + 1;
+        return true;
+      }
+      return false;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(query[offset])) ||
+          query[offset] == '_')) {
+      return false;
+    }
+    offset++;
+    while (offset < query.size() &&
+           (std::isalnum(static_cast<unsigned char>(query[offset])) ||
+            query[offset] == '_')) {
+      offset++;
+    }
+    end = offset;
+    return true;
+  };
+  auto next_item = [&](idx_t offset) -> idx_t {
+    idx_t parentheses = 0;
+    idx_t brackets = 0;
+    idx_t braces = 0;
+    char quote = '\0';
+    bool line_comment = false;
+    bool block_comment = false;
+    for (; offset < query.size(); offset++) {
+      auto character = query[offset];
+      auto next = offset + 1 < query.size() ? query[offset + 1] : '\0';
+      if (line_comment) {
+        line_comment = character != '\n';
+        continue;
+      }
+      if (block_comment) {
+        if (character == '*' && next == '/') {
+          block_comment = false;
+          offset++;
+        }
+        continue;
+      }
+      if (quote) {
+        if (character == quote) {
+          if (next == quote) {
+            offset++;
+          } else {
+            quote = '\0';
+          }
+        }
+        continue;
+      }
+      if (character == '-' && next == '-') {
+        line_comment = true;
+        offset++;
+        continue;
+      }
+      if (character == '/' && next == '*') {
+        block_comment = true;
+        offset++;
+        continue;
+      }
+      if (character == '\'' || character == '"' || character == '`') {
+        quote = character;
+        continue;
+      }
+      switch (character) {
+      case '(':
+        parentheses++;
+        break;
+      case ')':
+        if (parentheses > 0) {
+          parentheses--;
+        }
+        break;
+      case '[':
+        brackets++;
+        break;
+      case ']':
+        if (brackets > 0) {
+          brackets--;
+        }
+        break;
+      case '{':
+        braces++;
+        break;
+      case '}':
+        if (braces > 0) {
+          braces--;
+        }
+        break;
+      case ',':
+        if (parentheses == 0 && brackets == 0 && braces == 0) {
+          return offset + 1;
+        }
+        break;
+      default:
+        break;
+      }
+    }
+    return query.size();
+  };
+
+  idx_t mutation_offset = DConstants::INVALID_INDEX;
+  char quote = '\0';
+  bool line_comment = false;
+  bool block_comment = false;
+  for (idx_t index = 0; index < query.size(); index++) {
+    auto character = query[index];
+    auto next = index + 1 < query.size() ? query[index + 1] : '\0';
+    if (line_comment) {
+      line_comment = character != '\n';
+      continue;
+    }
+    if (block_comment) {
+      if (character == '*' && next == '/') {
+        block_comment = false;
+        index++;
+      }
+      continue;
+    }
+    if (quote) {
+      if (character == quote) {
+        if (next == quote) {
+          index++;
+        } else {
+          quote = '\0';
+        }
+      }
+      continue;
+    }
+    if (character == '-' && next == '-') {
+      line_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '/' && next == '*') {
+      block_comment = true;
+      index++;
+      continue;
+    }
+    if (character == '\'' || character == '"' || character == '`') {
+      quote = character;
+      continue;
+    }
+    if (!(std::isalpha(static_cast<unsigned char>(character)) ||
+          character == '_')) {
+      continue;
+    }
+    auto word_start = index;
+    while (index + 1 < query.size() &&
+           (std::isalnum(static_cast<unsigned char>(query[index + 1])) ||
+            query[index + 1] == '_')) {
+      index++;
+    }
+    auto word = query.substr(word_start, index - word_start + 1);
+    if (StringUtil::CIEquals(word, "SET") ||
+        StringUtil::CIEquals(word, "REMOVE")) {
+      mutation_offset = index + 1;
+      break;
+    }
+  }
+  if (mutation_offset == DConstants::INVALID_INDEX) {
+    return result;
+  }
+
+  for (auto item = mutation_offset; item < query.size();) {
+    auto cursor = skip_trivia(item);
+    idx_t identifier_end;
+    if (!read_identifier(cursor, identifier_end)) {
+      break;
+    }
+    cursor = skip_trivia(identifier_end);
+    if (cursor >= query.size() || query[cursor] != ':') {
+      item = next_item(cursor);
+      continue;
+    }
+    cursor = skip_trivia(cursor + 1);
+    if (!read_identifier(cursor, identifier_end)) {
+      item = next_item(cursor);
+      continue;
+    }
+    cursor = identifier_end;
+    while (true) {
+      auto colon = skip_trivia(cursor);
+      if (colon >= query.size() || query[colon] != ':') {
+        break;
+      }
+      auto label_start = skip_trivia(colon + 1);
+      idx_t label_end;
+      if (!read_identifier(label_start, label_end)) {
+        break;
+      }
+      for (idx_t index = colon; index < label_end; index++) {
+        if (result[index] != '\n' && result[index] != '\r') {
+          result[index] = ' ';
+        }
+      }
+      cursor = label_end;
+    }
+    item = next_item(cursor);
+  }
+  return result;
 }
 
 class CopyGraphParser {
@@ -453,10 +1226,9 @@ private:
         Error("expected exponent digits");
       }
     }
-    result.type = approximate
-                      ? GqlLiteralType::DOUBLE
-                      : decimal ? GqlLiteralType::DECIMAL
-                                : GqlLiteralType::INTEGER;
+    result.type = approximate ? GqlLiteralType::DOUBLE
+                  : decimal   ? GqlLiteralType::DECIMAL
+                              : GqlLiteralType::INTEGER;
     result.value = query.substr(start, offset - start);
     result.source = Range(start, offset);
     return result;
@@ -514,7 +1286,7 @@ private:
   idx_t pattern_start = 0;
 };
 
-static GqlExecutionMode ReadExecutionMode(const string &query) {
+static void ValidateExecutionHint(const string &query) {
   auto trimmed = query;
   StringUtil::Trim(trimmed);
   auto upper = StringUtil::Upper(trimmed);
@@ -524,14 +1296,14 @@ static GqlExecutionMode ReadExecutionMode(const string &query) {
   } else if (StringUtil::StartsWith(upper, "MATCH")) {
     offset = string("MATCH").size();
   } else {
-    return GqlExecutionMode::NATIVE;
+    return;
   }
   while (offset < trimmed.size() &&
          std::isspace(static_cast<unsigned char>(trimmed[offset]))) {
     offset++;
   }
   if (offset + 3 > trimmed.size() || trimmed.compare(offset, 3, "/*+") != 0) {
-    return GqlExecutionMode::NATIVE;
+    return;
   }
   auto end = trimmed.find("*/", offset + 3);
   if (end == string::npos) {
@@ -541,13 +1313,14 @@ static GqlExecutionMode ReadExecutionMode(const string &query) {
   StringUtil::Trim(hint);
   hint = StringUtil::Upper(hint);
   if (hint == "CSR" || hint == "GQL_CSR") {
-    return GqlExecutionMode::CSR;
+    throw ParserException("CSR is reserved for graph algorithms invoked with "
+                          "CALL; MATCH always uses native execution");
   }
   if (hint == "NATIVE" || hint == "GQL_NATIVE") {
-    return GqlExecutionMode::NATIVE;
+    return;
   }
-  throw ParserException(
-      "Unknown GQL execution hint '%s'; expected CSR or NATIVE", hint);
+  throw ParserException("Unknown GQL execution hint '%s'; expected NATIVE",
+                        hint);
 }
 
 ParserExtensionParseResult GqlParse(ParserExtensionInfo *,
@@ -571,7 +1344,10 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *,
     parse_data->statement = MergeParser(gql_query).Parse();
     return ParserExtensionParseResult(std::move(parse_data));
   }
-  antlr4::ANTLRInputStream input(gql_query);
+  auto parser_query = RewriteCallNamedArgumentSyntax(
+      RewriteChainedLabelSyntax(RewritePropertyMapExpressionSyntax(
+          RewritePropertyMapMergeSyntax(gql_query))));
+  antlr4::ANTLRInputStream input(parser_query);
   GQLLexer lexer(&input);
   antlr4::CommonTokenStream tokens(&lexer);
   GQLParser parser(&tokens);
@@ -589,13 +1365,115 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *,
 
   auto parse_data = make_uniq<GqlParseData>();
   parse_data->query = gql_query;
-  parse_data->execution_mode = ReadExecutionMode(gql_query);
-  GqlTransformer transformer;
+  ValidateExecutionHint(gql_query);
+  GqlTransformer transformer(gql_query);
   parse_data->statement = transformer.Transform(*tree);
   if (!parse_data->statement) {
     throw InternalException("GQL transformer returned no statement");
   }
   return ParserExtensionParseResult(std::move(parse_data));
+}
+
+static string QuoteSqlIdentifier(const string &identifier) {
+  string result = "\"";
+  for (auto character : identifier) {
+    if (character == '"') {
+      result += '"';
+    }
+    result += character;
+  }
+  result += '"';
+  return result;
+}
+
+static string QuoteSqlString(const string &value) {
+  string result = "'";
+  for (auto character : value) {
+    if (character == '\'') {
+      result += '\'';
+    }
+    result += character;
+  }
+  result += '\'';
+  return result;
+}
+
+static string LowerCallLiteral(const GqlLiteral &literal) {
+  switch (literal.type) {
+  case GqlLiteralType::BOOLEAN:
+    return StringUtil::Upper(literal.value);
+  case GqlLiteralType::INTEGER:
+  case GqlLiteralType::DECIMAL:
+  case GqlLiteralType::DOUBLE:
+    return literal.value;
+  case GqlLiteralType::STRING:
+    return QuoteSqlString(literal.value);
+  case GqlLiteralType::NULL_VALUE:
+    return "NULL";
+  }
+  throw InternalException("Unknown GQL CALL literal type");
+}
+
+static string LowerAlgorithmCall(const GqlCallStatement &call) {
+  string result = "SELECT ";
+  if (call.distinct) {
+    result += "DISTINCT ";
+  }
+  for (idx_t index = 0; index < call.projections.size(); index++) {
+    if (index > 0) {
+      result += ", ";
+    }
+    const auto &projection = call.projections[index];
+    result += QuoteSqlIdentifier(projection.expression->variable.value);
+    if (!projection.alias.IsEmpty()) {
+      result += " AS " + QuoteSqlIdentifier(projection.alias.value);
+    }
+  }
+  result += " FROM (SELECT ";
+  for (idx_t index = 0; index < call.yield_items.size(); index++) {
+    if (index > 0) {
+      result += ", ";
+    }
+    const auto &yield_item = call.yield_items[index];
+    result += QuoteSqlIdentifier(yield_item.field.value);
+    if (!yield_item.alias.IsEmpty()) {
+      result += " AS " + QuoteSqlIdentifier(yield_item.alias.value);
+    }
+  }
+  result += " FROM system.algo." +
+            QuoteSqlIdentifier(call.procedure_name.value) + "(";
+  for (idx_t index = 0; index < call.arguments.size(); index++) {
+    if (index > 0) {
+      result += ", ";
+    }
+    if (index < call.argument_names.size() &&
+        !call.argument_names[index].IsEmpty()) {
+      result += QuoteSqlIdentifier(call.argument_names[index].value) + " := ";
+    }
+    result += LowerCallLiteral(call.arguments[index]);
+  }
+  result += ")) AS __gql_yield";
+  if (!call.order_by.empty()) {
+    result += " ORDER BY ";
+    for (idx_t index = 0; index < call.order_by.size(); index++) {
+      if (index > 0) {
+        result += ", ";
+      }
+      const auto &order = call.order_by[index];
+      result += QuoteSqlIdentifier(order.expression->variable.value);
+      result += order.descending ? " DESC" : " ASC";
+      if (order.null_order_specified) {
+        result += order.nulls_first ? " NULLS FIRST" : " NULLS LAST";
+      }
+    }
+  }
+  if (call.has_limit) {
+    result += " LIMIT " + to_string(call.limit);
+  }
+  if (call.has_offset) {
+    result += " OFFSET " + to_string(call.offset);
+  }
+  return result;
 }
 
 ParserExtensionPlanResult
@@ -645,16 +1523,16 @@ GqlPlan(ParserExtensionInfo *, ClientContext &,
         "GQL INSERT on native graph tables is not implemented yet");
   case GqlStatementType::MERGE:
     throw InternalException("MERGE requires DuckDB parser-override lowering");
+  case GqlStatementType::CALL:
+    throw InternalException(
+        "GQL CALL pipeline requires DuckDB parser-override lowering");
   case GqlStatementType::MATCH: {
     GqlBinder binder;
     auto &match = statement.Cast<GqlMatchStatement>();
     auto alternatives = binder.BindAlternatives(match);
-    for (auto &alternative : alternatives) {
-      alternative.execution_mode = gql_ptr->execution_mode;
-    }
     if (match.has_mutation) {
-      throw NotImplementedException(
-          "SET, REMOVE, and DELETE on native graph tables are not implemented yet");
+      throw NotImplementedException("SET, REMOVE, and DELETE on native graph "
+                                    "tables are not implemented yet");
     }
     if (alternatives.size() != 1) {
       throw NotImplementedException(
@@ -674,14 +1552,27 @@ GqlPlan(ParserExtensionInfo *, ClientContext &,
 }
 
 ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
-                                       const string &query, ParserOptions &) {
+                                       const string &query,
+                                       ParserOptions &options) {
+  string rewritten;
+  if (RewriteAlgorithmCall(query, rewritten)) {
+    Parser parser(options);
+    parser.ParseQuery(rewritten);
+    for (auto &statement : parser.statements) {
+      statement->query = query;
+      statement->stmt_location = 0;
+      statement->stmt_length = query.size();
+    }
+    return ParserOverrideResult(std::move(parser.statements));
+  }
   auto normalized = query;
   StringUtil::Trim(normalized);
   normalized = StringUtil::Upper(normalized);
   if (!StartsWithMergePattern(query) &&
       !StringUtil::StartsWith(normalized, "INSERT (") &&
       !StringUtil::StartsWith(normalized, "MATCH") &&
-      !StringUtil::StartsWith(normalized, "OPTIONAL MATCH")) {
+      !StringUtil::StartsWith(normalized, "OPTIONAL MATCH") &&
+      !StartsWithAlgorithmCall(query)) {
     return ParserOverrideResult();
   }
   auto parsed = GqlParse(nullptr, query);
@@ -714,15 +1605,23 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
       }
       return ParserOverrideResult(std::move(statements));
     }
+    if (gql_ptr->statement->type == GqlStatementType::CALL) {
+      auto &call = gql_ptr->statement->Cast<GqlCallStatement>();
+      Parser parser(options);
+      parser.ParseQuery(LowerAlgorithmCall(call));
+      for (auto &statement : parser.statements) {
+        statement->query = query;
+        statement->stmt_location = 0;
+        statement->stmt_length = query.size();
+      }
+      return ParserOverrideResult(std::move(parser.statements));
+    }
     if (gql_ptr->statement->type != GqlStatementType::MATCH) {
       return ParserOverrideResult();
     }
     GqlBinder binder;
     auto &match = gql_ptr->statement->Cast<GqlMatchStatement>();
     auto plans = binder.BindAlternatives(match);
-    for (auto &plan : plans) {
-      plan.execution_mode = gql_ptr->execution_mode;
-    }
     vector<unique_ptr<SQLStatement>> statements;
     if (match.has_mutation) {
       statements = match.insertion ? GqlLowerMatchInsert(plans)

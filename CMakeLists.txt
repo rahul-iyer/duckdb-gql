@@ -24,12 +24,14 @@ set(EXTENSION_SOURCES
     src/gql_transformer.cpp
     src/gql_binder.cpp
     src/gql_ir.cpp
+    src/gql_optimizer.cpp
     src/gql_lowerer.cpp
     src/gql_mutation.cpp
     src/gql_relational.cpp
     src/gql_storage.cpp
     src/gql_import.cpp
     src/gql_csr.cpp
+    src/gql_algorithms.cpp
     src/parser/generated/GQLBaseVisitor.cpp
     src/parser/generated/GQLLexer.cpp
     src/parser/generated/GQLParser.cpp

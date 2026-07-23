@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark native DuckDB, COPY GRAPH GQL, and prepared CSR on roadNet-CA."""
+"""Benchmark native DuckDB and COPY GRAPH GQL queries on roadNet-CA."""
 
 from __future__ import annotations
 
@@ -367,15 +367,6 @@ RETURN COUNT(*);
 """
 
 
-def gql_csr_query(seed: int) -> str:
-    return f"""
-MATCH /*+ CSR */ (source:intersection)-[:road]->*(target:intersection)
-WHERE source.native_id = {seed}
-RETURN target.native_id
-LIMIT 100;
-"""
-
-
 def parse_profiles(stderr: str, query_prefix: str) -> list[dict[str, Any]]:
     decoder = json.JSONDecoder()
     profiles: list[dict[str, Any]] = []
@@ -536,14 +527,6 @@ def run_query_benchmarks(
                 "WITH RECURSIVE paths",
                 False,
                 False,
-                100,
-            ),
-            (
-                "prepared_csr_first_100",
-                gql_csr_query(seed),
-                "MATCH /*+ CSR */",
-                True,
-                True,
                 100,
             ),
         ]

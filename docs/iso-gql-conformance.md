@@ -38,7 +38,7 @@ python3 scripts/check_gql_conformance.py --release
 |---|---|---|
 | Program/session/transactions | Partial | All session set/reset/close, parameters, transaction modes, commit/rollback, multi-statement flow |
 | Catalog and graph types | Partial | Schema, graph, graph type, typed/open/closed/copy forms, qualification and replacement semantics |
-| Data modification | Partial | Standalone node/directed-path insert, one fixed directed match-and-insert path, and core matched property set/remove and edge/node/detach delete use native DuckDB DML; multiple-path/clause and undirected insert, whole-map replacement, open-graph schema evolution, and complete label-set semantics remain |
+| Data modification | Partial | Standalone node/directed-path insert, one fixed directed match-and-insert path, property and whole-map replacement, NULL property removal, ISO node/edge label sets, and order-independent constrained edge/node/fixed-path/detach delete use native DuckDB DML; compact chained labels, LET-backed record maps, and literal nested list/record delete targets are structurally expanded as compatibility coverage. Multiple-path/clause and undirected insert, runtime `collect`/parameter/list-index-derived delete targets, general runtime map producers, open-graph schema evolution, and broader modification pipelines remain. Explicit-map `+=` is compatibility syntax, not claimed as ISO conformance |
 | Query clauses | Partial | Match/optional, let, for, filter, calls, select/return/finish, grouping, ordering/paging, composition |
 | Graph patterns and paths | Partial | Complete pattern algebra, all directions, predicates, quantifiers, modes, searches, shortest paths/groups |
 | Expressions and types | Partial | Full value system, operators, predicates, functions, casts, coercion, null/unknown semantics |
@@ -50,6 +50,8 @@ python3 scripts/check_gql_conformance.py --release
 - Every manifest row must name its tests before it moves to `implemented`.
 - Parser tests must exercise token comments and formatting so no clause depends on raw-source regex matching.
 - Semantic tests must include syntactically valid but ill-typed/ill-scoped statements.
-- Query tests must compare CSR-backed execution with a canonical relational reference implementation.
+- Query tests must compare native GQL execution with canonical relational
+  references; separate algorithm tests must compare CSR results with known
+  traversal trees and numerical references.
 - Modification tests must prove same-transaction read-after-write, rollback, concurrent-reader isolation, and reopen persistence.
 - “Full ISO GQL” is a release claim only when every applicable manifest row is `implemented` and the pinned revision's conformance suite is green.

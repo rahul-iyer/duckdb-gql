@@ -8,7 +8,6 @@ namespace duckdb {
 struct GqlParseData : ParserExtensionParseData {
   string query;
   shared_ptr<GqlStatement> statement;
-  GqlExecutionMode execution_mode = GqlExecutionMode::NATIVE;
 
   unique_ptr<ParserExtensionParseData> Copy() const override;
   string ToString() const override;

@@ -70,6 +70,9 @@ static void SerializeNode(const GqlBoundExpression &expression, GqlExpressionPro
 	case GqlExpressionType::LITERAL:
 		operation = static_cast<uint8_t>(expression.literal.type);
 		break;
+	case GqlExpressionType::LIST_CONSTRUCTOR:
+	case GqlExpressionType::RECORD_CONSTRUCTOR:
+		throw InternalException("GQL collection constructor reached expression serialization");
 	case GqlExpressionType::UNARY:
 		operation = static_cast<uint8_t>(expression.unary_operator);
 		break;

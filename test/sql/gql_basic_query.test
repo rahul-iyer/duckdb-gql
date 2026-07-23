@@ -60,6 +60,21 @@ RETURN person
 ----
 NULL
 
+# A predicate owned by a leading OPTIONAL MATCH stays on the right side of
+# LEFT_APPLY, so a failed predicate still preserves the identity input row.
+query T
+OPTIONAL MATCH (person:Person) WHERE person.age > 100
+RETURN person.name AS name
+----
+NULL
+
+query T
+OPTIONAL MATCH (person:Person)
+FILTER person.age > 100
+RETURN person.name AS name
+----
+NULL
+
 query T
 MATCH p = (source:Person)-[relationship:KNOWS]->(target:Person)
 WHERE source.age = 42
@@ -156,6 +171,104 @@ OPTIONAL MATCH (middle)-[]->(destination) WHERE destination.age > 100
 RETURN middle.name AS middle_name, destination.name AS destination_name
 ----
 Grace	NULL
+
+# A leading OPTIONAL MATCH is a UNIT-backed LEFT_APPLY. A later mandatory
+# stage consumes its null-extended row without changing clause order.
+query TT
+OPTIONAL MATCH (missing:Missing)
+MATCH (person:Person) WHERE person.age = 42
+RETURN missing.name AS missing_name, person.name AS person_name
+----
+NULL	Ada
+
+# Mandatory stages can correlate with bindings introduced by an earlier
+# optional stage. A successful optional binding participates normally.
+query TT
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(middle:Person)
+MATCH (middle)-[]->(destination:Person)
+RETURN middle.name AS middle_name, destination.name AS destination_name
+----
+Grace	Ada
+
+# A mandatory stage that consumes a null-extended optional binding eliminates
+# that row, matching ordinary inner-apply semantics.
+query T
+MATCH (source:Person) WHERE source.age = 35
+OPTIONAL MATCH (source)-[]->(middle:Person) WHERE middle.age > 100
+MATCH (middle)-[]->(destination:Person)
+RETURN destination.name AS destination_name
+----
+
+# An optional stage may constrain only existing bindings and introduce no new
+# variables. Failure preserves the left binding rather than replacing it.
+query T
+MATCH (person:Person) WHERE person.age = 42
+OPTIONAL MATCH (person:Person) WHERE person.age > 100
+RETURN person.name AS person_name
+----
+Ada
+
+# LET terminates optional predicate ownership. This FILTER is post-join and
+# therefore removes the row instead of turning the failed predicate into a
+# null-extended optional result.
+query T
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(destination:Person)
+LET destination_age = destination.age
+FILTER destination_age > 100
+RETURN source.name AS source_name
+----
+
+# Linear FILTER clauses are bound in source order. Each MATCH extends the
+# current scope, and a later FILTER can see both earlier and newly introduced
+# variables.
+query TT
+MATCH (source:Person)
+FILTER source.age = 42
+MATCH (source)-[]->(target:Person)
+FILTER target.age = 35
+RETURN source.name AS source_name, target.name AS target_name
+----
+Ada	Grace
+
+# A predicate that only needs the left input can move below INNER_APPLY.
+query TT
+MATCH (source:Person)
+MATCH (source)-[]->(target:Person)
+FILTER source.age = 42
+RETURN source.name AS source_name, target.name AS target_name
+----
+Ada	Grace
+
+# A correlated predicate that needs both sides can move into the right MATCH
+# stage and become an INNER JOIN condition.
+query TT rowsort
+MATCH (source:Person)
+MATCH (source)-[]->(target:Person)
+FILTER source.age > target.age
+RETURN source.name AS source_name, target.name AS target_name
+----
+Ada	Grace
+Grace	Ada
+
+# FILTER ownership also follows clause order across OPTIONAL MATCH stages.
+query TT
+MATCH (source:Person) WHERE source.age = 42
+OPTIONAL MATCH (source)-[]->(destination:Person)
+FILTER destination.age > 100
+RETURN source.name AS source_name, destination.name AS destination_name
+----
+Ada	NULL
+
+# A FILTER cannot resolve a variable introduced by a later MATCH clause.
+statement error
+MATCH (source:Person)
+FILTER future.age = 35
+MATCH (source)-[]->(future:Person)
+RETURN future.name AS name
+----
+<REGEX>:.*GQL binding variable 'future' is not defined.*
 
 query I
 MATCH (person:Person)

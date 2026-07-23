@@ -8,8 +8,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/parser/expression/case_expression.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -18,7 +16,6 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/query_node/recursive_cte_node.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
@@ -26,7 +23,6 @@
 #include "duckdb/parser/tableref/emptytableref.hpp"
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
-#include "duckdb/parser/tableref/table_function_ref.hpp"
 
 namespace duckdb {
 
@@ -39,8 +35,17 @@ struct RelationalPatternElement {
 
 struct RelationalPattern {
   vector<RelationalPatternElement> elements;
-  bool optional = false;
-  idx_t optional_stage = 0;
+};
+
+struct RelationalMatchStage {
+  vector<RelationalPattern> patterns;
+};
+
+struct RelationalLogicalNode {
+  GqlLogicalOperatorType type;
+  idx_t child = DConstants::INVALID_INDEX;
+  idx_t right = DConstants::INVALID_INDEX;
+  idx_t payload = DConstants::INVALID_INDEX;
 };
 
 struct RelationalResultModifiers {
@@ -56,13 +61,13 @@ struct RelationalResultModifiers {
 };
 
 struct RelationalMatchInput {
-  vector<RelationalPattern> patterns;
+  vector<RelationalMatchStage> match_stages;
+  vector<RelationalLogicalNode> nodes;
+  idx_t root = DConstants::INVALID_INDEX;
   vector<GqlPatternElementType> binding_types;
   vector<GqlExpressionProgram> projections;
   vector<string> projection_names;
   vector<GqlExpressionProgram> predicates;
-  vector<GqlExpressionProgram> optional_predicates;
-  vector<idx_t> optional_predicate_stages;
   RelationalResultModifiers modifiers;
 };
 
@@ -76,7 +81,6 @@ struct RecursiveMatchInput {
   vector<string> target_labels;
   bool reverse;
   idx_t minimum_repetitions;
-  bool use_csr;
   vector<GqlExpressionProgram> projections;
   vector<string> projection_names;
   vector<GqlExpressionProgram> predicates;
@@ -128,21 +132,24 @@ static vector<bool> ReadBooleanList(const Value &value) {
 }
 
 static RelationalResultModifiers
-ReadResultModifiers(TableFunctionBindInput &input, idx_t offset) {
+ReadResultModifiers(TableFunctionBindInput &input, idx_t offset,
+                    bool includes_optional = true) {
   RelationalResultModifiers result;
-  result.optional = input.inputs[offset].GetValue<bool>();
-  result.distinct = input.inputs[offset + 1].GetValue<bool>();
-  for (const auto index : ReadIndexList(input.inputs[offset + 2])) {
+  if (includes_optional) {
+    result.optional = input.inputs[offset++].GetValue<bool>();
+  }
+  result.distinct = input.inputs[offset].GetValue<bool>();
+  for (const auto index : ReadIndexList(input.inputs[offset + 1])) {
     result.order_indices.push_back(NumericCast<idx_t>(index));
   }
-  result.order_descending = ReadBooleanList(input.inputs[offset + 3]);
-  result.order_nulls = ReadByteList(input.inputs[offset + 4]);
-  result.has_limit = input.inputs[offset + 5].GetValue<bool>();
+  result.order_descending = ReadBooleanList(input.inputs[offset + 2]);
+  result.order_nulls = ReadByteList(input.inputs[offset + 3]);
+  result.has_limit = input.inputs[offset + 4].GetValue<bool>();
   result.limit =
-      NumericCast<idx_t>(input.inputs[offset + 6].GetValue<uint64_t>());
-  result.has_offset = input.inputs[offset + 7].GetValue<bool>();
+      NumericCast<idx_t>(input.inputs[offset + 5].GetValue<uint64_t>());
+  result.has_offset = input.inputs[offset + 6].GetValue<bool>();
   result.offset =
-      NumericCast<idx_t>(input.inputs[offset + 8].GetValue<uint64_t>());
+      NumericCast<idx_t>(input.inputs[offset + 7].GetValue<uint64_t>());
   if (result.order_indices.size() != result.order_descending.size() ||
       result.order_indices.size() != result.order_nulls.size()) {
     throw BinderException("Invalid GQL result modifiers");
@@ -168,45 +175,51 @@ static void ValidateProgram(const GqlExpressionProgram &program,
 }
 
 static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
-  if (input.inputs.size() != 21) {
+  if (input.inputs.size() != 23) {
+    throw BinderException("Invalid GQL relational MATCH input");
+  }
+  auto program_version = input.inputs[0].GetValue<uint8_t>();
+  if (program_version != GQL_LOGICAL_PROGRAM_VERSION) {
     throw BinderException("Invalid GQL relational MATCH input");
   }
   RelationalMatchInput result;
-  auto pattern_sizes = ReadIndexList(input.inputs[0]);
-  auto element_types = ReadByteList(input.inputs[1]);
-  auto binding_indices = ReadIndexList(input.inputs[2]);
-  auto labels = ReadStringList(input.inputs[3]);
-  auto reverses = ReadBooleanList(input.inputs[4]);
-  auto optionals = ReadBooleanList(input.inputs[5]);
-  auto optional_stages = ReadIndexList(input.inputs[6]);
-  result.projection_names = ReadStringList(input.inputs[8]);
-  for (const auto &program : ListValue::GetChildren(input.inputs[7])) {
+  auto pattern_sizes = ReadIndexList(input.inputs[1]);
+  auto element_types = ReadByteList(input.inputs[2]);
+  auto binding_indices = ReadIndexList(input.inputs[3]);
+  auto labels = ReadStringList(input.inputs[4]);
+  auto reverses = ReadBooleanList(input.inputs[5]);
+  auto match_pattern_counts = ReadIndexList(input.inputs[6]);
+  auto node_types = ReadByteList(input.inputs[7]);
+  auto child_indices = ReadIndexList(input.inputs[8]);
+  auto right_indices = ReadIndexList(input.inputs[9]);
+  auto payload_indices = ReadIndexList(input.inputs[10]);
+  result.root = NumericCast<idx_t>(input.inputs[11].GetValue<uint64_t>());
+  result.projection_names = ReadStringList(input.inputs[13]);
+  for (const auto &program : ListValue::GetChildren(input.inputs[12])) {
     result.projections.push_back(GqlDeserializeExpression(program));
   }
-  for (const auto &program : ListValue::GetChildren(input.inputs[9])) {
+  for (const auto &program : ListValue::GetChildren(input.inputs[14])) {
     result.predicates.push_back(GqlDeserializeExpression(program));
   }
-  for (const auto &program : ListValue::GetChildren(input.inputs[10])) {
-    result.optional_predicates.push_back(GqlDeserializeExpression(program));
-  }
-  result.optional_predicate_stages = ReadIndexList(input.inputs[11]);
-  result.modifiers = ReadResultModifiers(input, 12);
+  result.modifiers = ReadResultModifiers(input, 15, false);
   if (result.projections.empty() ||
       result.projections.size() != result.projection_names.size()) {
     throw BinderException("Invalid GQL MATCH projections");
   }
-  if (pattern_sizes.empty() || optionals.size() != pattern_sizes.size() ||
-      optional_stages.size() != pattern_sizes.size() ||
-      result.optional_predicates.size() !=
-          result.optional_predicate_stages.size() ||
+  if (pattern_sizes.empty() || match_pattern_counts.empty() ||
       element_types.size() != binding_indices.size() ||
       element_types.size() != labels.size() ||
-      element_types.size() != reverses.size()) {
+      element_types.size() != reverses.size() || node_types.empty() ||
+      node_types.size() != child_indices.size() ||
+      node_types.size() != right_indices.size() ||
+      node_types.size() != payload_indices.size() ||
+      result.root >= node_types.size()) {
     throw BinderException("Invalid GQL MATCH patterns");
   }
 
   idx_t offset = 0;
   idx_t binding_count = 0;
+  vector<RelationalPattern> patterns;
   for (idx_t pattern_index = 0; pattern_index < pattern_sizes.size();
        pattern_index++) {
     auto pattern_size = NumericCast<idx_t>(pattern_sizes[pattern_index]);
@@ -215,14 +228,6 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
       throw BinderException("Invalid GQL fixed MATCH pattern");
     }
     RelationalPattern pattern;
-    pattern.optional = optionals[pattern_index];
-    pattern.optional_stage =
-        NumericCast<idx_t>(optional_stages[pattern_index]);
-    if ((!pattern.optional && pattern.optional_stage > 0) ||
-        (pattern.optional && pattern.optional_stage == 0 &&
-         !result.modifiers.optional)) {
-      throw BinderException("Invalid GQL optional MATCH stage");
-    }
     for (idx_t element_index = 0; element_index < pattern_size;
          element_index++) {
       auto flat_index = offset + element_index;
@@ -236,24 +241,161 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
       pattern.elements.push_back(
           {type, binding_index, labels[flat_index], reverses[flat_index]});
     }
-    result.patterns.push_back(std::move(pattern));
+    patterns.push_back(std::move(pattern));
     offset += pattern_size;
   }
   if (offset != element_types.size()) {
     throw BinderException("Invalid GQL MATCH pattern elements");
   }
 
+  idx_t pattern_offset = 0;
+  for (const auto count_value : match_pattern_counts) {
+    auto count = NumericCast<idx_t>(count_value);
+    if (count == 0 || count > patterns.size() - pattern_offset) {
+      throw BinderException("Invalid GQL MATCH stage pattern range");
+    }
+    RelationalMatchStage stage;
+    for (idx_t index = 0; index < count; index++) {
+      stage.patterns.push_back(std::move(patterns[pattern_offset++]));
+    }
+    result.match_stages.push_back(std::move(stage));
+  }
+  if (pattern_offset != patterns.size()) {
+    throw BinderException("Unowned GQL MATCH patterns");
+  }
+
+  auto read_node_index = [&](uint64_t value) {
+    return value == NumericLimits<uint64_t>::Maximum()
+               ? DConstants::INVALID_INDEX
+               : NumericCast<idx_t>(value);
+  };
+  for (idx_t index = 0; index < node_types.size(); index++) {
+    auto type = static_cast<GqlLogicalOperatorType>(node_types[index]);
+    if (type > GqlLogicalOperatorType::PROJECT) {
+      throw BinderException("Invalid GQL logical operator type");
+    }
+    result.nodes.push_back({type, read_node_index(child_indices[index]),
+                            read_node_index(right_indices[index]),
+                            read_node_index(payload_indices[index])});
+  }
+
+  vector<uint8_t> visit_state(result.nodes.size(), 0);
+  vector<bool> used_match_stages(result.match_stages.size(), false);
+  vector<bool> used_predicates(result.predicates.size(), false);
+  auto validate_node = [&](auto &self, idx_t node_index) -> void {
+    if (node_index >= result.nodes.size()) {
+      throw BinderException("Invalid GQL logical operator child");
+    }
+    if (visit_state[node_index] != 0) {
+      throw BinderException(visit_state[node_index] == 1
+                                ? "Cyclic GQL logical operator program"
+                                : "GQL logical operator program is not a tree");
+    }
+    visit_state[node_index] = 1;
+    const auto &node = result.nodes[node_index];
+    switch (node.type) {
+    case GqlLogicalOperatorType::UNIT:
+      if (node.child != DConstants::INVALID_INDEX ||
+          node.right != DConstants::INVALID_INDEX ||
+          node.payload != DConstants::INVALID_INDEX) {
+        throw BinderException("Invalid GQL UNIT operator");
+      }
+      break;
+    case GqlLogicalOperatorType::MATCH:
+      if (node.child != DConstants::INVALID_INDEX ||
+          node.right != DConstants::INVALID_INDEX ||
+          node.payload >= result.match_stages.size() ||
+          used_match_stages[node.payload]) {
+        throw BinderException("Invalid GQL MATCH operator");
+      }
+      used_match_stages[node.payload] = true;
+      break;
+    case GqlLogicalOperatorType::FILTER:
+      if (node.child == DConstants::INVALID_INDEX ||
+          node.right != DConstants::INVALID_INDEX ||
+          node.payload >= result.predicates.size() ||
+          used_predicates[node.payload]) {
+        throw BinderException("Invalid GQL FILTER operator");
+      }
+      used_predicates[node.payload] = true;
+      self(self, node.child);
+      break;
+    case GqlLogicalOperatorType::INNER_APPLY:
+      if (node.child == DConstants::INVALID_INDEX ||
+          node.right == DConstants::INVALID_INDEX ||
+          node.payload != DConstants::INVALID_INDEX) {
+        throw BinderException("Invalid GQL INNER_APPLY operator");
+      }
+      self(self, node.child);
+      self(self, node.right);
+      break;
+    case GqlLogicalOperatorType::LEFT_APPLY:
+      if (node.child == DConstants::INVALID_INDEX ||
+          node.right == DConstants::INVALID_INDEX ||
+          node.payload != DConstants::INVALID_INDEX) {
+        throw BinderException("Invalid GQL LEFT_APPLY operator");
+      }
+      self(self, node.child);
+      self(self, node.right);
+      break;
+    case GqlLogicalOperatorType::PROJECT:
+    case GqlLogicalOperatorType::CALL:
+      throw BinderException("Nested GQL PROJECT operator");
+    }
+    visit_state[node_index] = 2;
+  };
+  validate_node(validate_node, result.root);
+  for (const auto state : visit_state) {
+    if (state != 2) {
+      throw BinderException("Unreachable GQL logical operator");
+    }
+  }
+  idx_t unit_index = DConstants::INVALID_INDEX;
+  for (idx_t index = 0; index < result.nodes.size(); index++) {
+    if (result.nodes[index].type != GqlLogicalOperatorType::UNIT) {
+      continue;
+    }
+    if (unit_index != DConstants::INVALID_INDEX) {
+      throw BinderException("Multiple GQL UNIT operators");
+    }
+    unit_index = index;
+  }
+  if (unit_index != DConstants::INVALID_INDEX) {
+    idx_t leading_optional_inputs = 0;
+    for (const auto &node : result.nodes) {
+      if (node.type == GqlLogicalOperatorType::LEFT_APPLY &&
+          node.child == unit_index) {
+        leading_optional_inputs++;
+      }
+    }
+    if (leading_optional_inputs != 1) {
+      throw BinderException("GQL UNIT is not a leading LEFT_APPLY input");
+    }
+  }
+  for (const auto used : used_match_stages) {
+    if (!used) {
+      throw BinderException("Unreachable GQL MATCH stage");
+    }
+  }
+  for (const auto used : used_predicates) {
+    if (!used) {
+      throw BinderException("Unreachable GQL predicate");
+    }
+  }
+
   result.binding_types.resize(binding_count);
   vector<bool> binding_seen(binding_count, false);
-  for (const auto &pattern : result.patterns) {
-    for (const auto &element : pattern.elements) {
-      if (binding_seen[element.binding_index] &&
-          result.binding_types[element.binding_index] != element.type) {
-        throw BinderException(
-            "GQL MATCH binding has incompatible element types");
+  for (const auto &stage : result.match_stages) {
+    for (const auto &pattern : stage.patterns) {
+      for (const auto &element : pattern.elements) {
+        if (binding_seen[element.binding_index] &&
+            result.binding_types[element.binding_index] != element.type) {
+          throw BinderException(
+              "GQL MATCH binding has incompatible element types");
+        }
+        result.binding_types[element.binding_index] = element.type;
+        binding_seen[element.binding_index] = true;
       }
-      result.binding_types[element.binding_index] = element.type;
-      binding_seen[element.binding_index] = true;
     }
   }
   for (const auto seen : binding_seen) {
@@ -267,9 +409,6 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
   for (const auto &program : result.predicates) {
     ValidateProgram(program, binding_count, true);
   }
-  for (const auto &program : result.optional_predicates) {
-    ValidateProgram(program, binding_count, true);
-  }
   for (const auto index : result.modifiers.order_indices) {
     if (index >= result.projections.size()) {
       throw BinderException("Invalid GQL ORDER BY projection");
@@ -280,7 +419,7 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
 
 static RecursiveMatchInput
 ReadRecursiveMatchInput(TableFunctionBindInput &input) {
-  if (input.inputs.size() != 22) {
+  if (input.inputs.size() != 21) {
     throw BinderException("Invalid GQL recursive MATCH input");
   }
   RecursiveMatchInput result;
@@ -298,15 +437,14 @@ ReadRecursiveMatchInput(TableFunctionBindInput &input) {
   result.reverse = input.inputs[7].GetValue<bool>();
   result.minimum_repetitions =
       NumericCast<idx_t>(input.inputs[8].GetValue<uint64_t>());
-  result.use_csr = input.inputs[9].GetValue<bool>();
-  result.projection_names = ReadStringList(input.inputs[11]);
-  for (const auto &program : ListValue::GetChildren(input.inputs[10])) {
+  result.projection_names = ReadStringList(input.inputs[10]);
+  for (const auto &program : ListValue::GetChildren(input.inputs[9])) {
     result.projections.push_back(GqlDeserializeExpression(program));
   }
-  for (const auto &program : ListValue::GetChildren(input.inputs[12])) {
+  for (const auto &program : ListValue::GetChildren(input.inputs[11])) {
     result.predicates.push_back(GqlDeserializeExpression(program));
   }
-  result.modifiers = ReadResultModifiers(input, 13);
+  result.modifiers = ReadResultModifiers(input, 12);
   if (result.binding_count == 0 ||
       result.source_binding >= result.binding_count ||
       result.edge_binding >= result.binding_count ||
@@ -442,12 +580,12 @@ static void CollectProperties(const GqlExpressionProgram &program,
             GqlExpressionType::LABELED) {
       continue;
     }
-    auto key = PropertyKey(
-        program.binding_indices[node],
-        static_cast<GqlExpressionType>(program.node_types[node]) ==
-                GqlExpressionType::LABELED
-            ? GQL_LABEL_ACCESS
-            : program.properties[node]);
+    auto key =
+        PropertyKey(program.binding_indices[node],
+                    static_cast<GqlExpressionType>(program.node_types[node]) ==
+                            GqlExpressionType::LABELED
+                        ? GQL_LABEL_ACCESS
+                        : program.properties[node]);
     if (aliases.find(key) == aliases.end()) {
       auto alias = "gql_op_" + to_string(aliases.size());
       aliases.emplace(std::move(key),
@@ -509,6 +647,10 @@ static idx_t ExpressionEnd(const GqlExpressionProgram &program, idx_t node) {
   case GqlExpressionType::LITERAL:
   case GqlExpressionType::VARIABLE_REFERENCE:
     return cursor;
+  case GqlExpressionType::LIST_CONSTRUCTOR:
+  case GqlExpressionType::RECORD_CONSTRUCTOR:
+    throw InternalException(
+        "GQL collection constructor reached relational expression lowering");
   case GqlExpressionType::PROPERTY_REFERENCE:
   case GqlExpressionType::ELEMENT_ID:
   case GqlExpressionType::UNARY:
@@ -531,9 +673,9 @@ Function(const string &name, vector<unique_ptr<ParsedExpression>> arguments) {
   return make_uniq<FunctionExpression>(name, std::move(arguments));
 }
 
-static unique_ptr<ParsedExpression>
-VertexHasLabel(const string &table_alias, const string &label_column,
-               const string &label) {
+static unique_ptr<ParsedExpression> VertexHasLabel(const string &table_alias,
+                                                   const string &label_column,
+                                                   const string &label) {
   vector<unique_ptr<ParsedExpression>> split_arguments;
   split_arguments.push_back(Column(table_alias, label_column));
   split_arguments.push_back(Constant(Value(";")));
@@ -568,6 +710,10 @@ LowerExpression(const GqlExpressionProgram &program, idx_t &cursor,
   case GqlExpressionType::LITERAL:
     return Constant(LiteralValue(static_cast<GqlLiteralType>(operation),
                                  program.values[node]));
+  case GqlExpressionType::LIST_CONSTRUCTOR:
+  case GqlExpressionType::RECORD_CONSTRUCTOR:
+    throw InternalException(
+        "GQL collection constructor reached relational expression lowering");
   case GqlExpressionType::VARIABLE_REFERENCE:
     if (program.binding_indices[node] >= identities.size()) {
       throw InternalException("GQL identity binding is missing");
@@ -768,16 +914,15 @@ GraphElementValueAt(const GqlExpressionProgram &program, idx_t node,
   }
   auto type = static_cast<GqlTypeId>(program.result_types[node]);
   auto expected = type == GqlTypeId::NODE ? GqlPatternElementType::VERTEX
-                  : type == GqlTypeId::EDGE ? GqlPatternElementType::EDGE
-                                            : throw InternalException(
-                                                  "Invalid GQL graph-value type");
+                  : type == GqlTypeId::EDGE
+                      ? GqlPatternElementType::EDGE
+                      : throw InternalException("Invalid GQL graph-value type");
   if (binding_types[binding_index] != expected) {
     throw InternalException("GQL graph-value binding type is inconsistent");
   }
 
-  const auto &table = expected == GqlPatternElementType::VERTEX
-                          ? graph.vertex
-                          : graph.edge;
+  const auto &table =
+      expected == GqlPatternElementType::VERTEX ? graph.vertex : graph.edge;
   const auto &alias = identities[binding_index].table_alias;
   vector<unique_ptr<ParsedExpression>> fields;
   AppendStructField(fields, Column(alias, table.key_column), "__gql_id");
@@ -856,15 +1001,15 @@ GraphPathValue(const GqlExpressionProgram &program,
         binding_index >= identities.size()) {
       throw InternalException("GQL fixed path binding is missing");
     }
-    const auto &table = binding_types[binding_index] ==
-                                GqlPatternElementType::EDGE
-                            ? graph.edge
-                            : graph.vertex;
+    const auto &table =
+        binding_types[binding_index] == GqlPatternElementType::EDGE
+            ? graph.edge
+            : graph.vertex;
     missing_elements.push_back(make_uniq<OperatorExpression>(
         ExpressionType::OPERATOR_IS_NULL,
         Column(identities[binding_index].table_alias, table.key_column)));
-    auto value = GraphElementValueAt(program, node, graph, binding_types,
-                                     identities);
+    auto value =
+        GraphElementValueAt(program, node, graph, binding_types, identities);
     if (binding_types[binding_index] == GqlPatternElementType::EDGE) {
       edges.push_back(std::move(value));
     } else {
@@ -925,8 +1070,8 @@ AppendProjections(SelectNode &select,
       expression = GraphElementValue(projections[index], graph, binding_types,
                                      identities);
     } else if (projection_type == GqlTypeId::PATH) {
-      expression = GraphPathValue(projections[index], graph, binding_types,
-                                  identities);
+      expression =
+          GraphPathValue(projections[index], graph, binding_types, identities);
     } else {
       expression = LowerExpression(projections[index], property_aliases,
                                    identities, desired_type);
@@ -1045,9 +1190,6 @@ FinalizeMatchSelect(unique_ptr<SelectNode> select,
   return make_uniq<SubqueryRef>(std::move(statement));
 }
 
-static const string &FindPropertyColumn(const GqlElementTableBinding &table,
-                                        const string &property);
-
 static bool TryFindPropertyColumn(const GqlElementTableBinding &table,
                                   const string &property, string &column) {
   for (const auto &entry : table.property_columns) {
@@ -1060,415 +1202,265 @@ static bool TryFindPropertyColumn(const GqlElementTableBinding &table,
   return false;
 }
 
-struct CsrStartRestriction {
-  bool constrained = false;
-  vector<Value> ids;
-};
-
-static bool CsrSourceProperty(const GqlExpressionProgram &program, idx_t node,
-                              idx_t source_binding, string &property) {
-  if (node + 1 >= program.node_types.size() ||
-      static_cast<GqlExpressionType>(program.node_types[node]) !=
-          GqlExpressionType::PROPERTY_REFERENCE ||
-      static_cast<GqlExpressionType>(program.node_types[node + 1]) !=
-          GqlExpressionType::VARIABLE_REFERENCE ||
-      program.binding_indices[node] != source_binding ||
-      program.binding_indices[node + 1] != source_binding ||
-      ExpressionEnd(program, node) != node + 2) {
-    return false;
+static bool ReferencesOnlyBinding(const GqlExpressionProgram &program,
+                                  idx_t binding_index) {
+  for (const auto index : program.binding_indices) {
+    if (index != NumericLimits<uint64_t>::Maximum() && index != binding_index) {
+      return false;
+    }
   }
-  property = program.properties[node];
   return true;
 }
 
-static bool CsrLiteral(const GqlExpressionProgram &program, idx_t node,
-                       Value &value) {
-  if (node >= program.node_types.size() ||
-      static_cast<GqlExpressionType>(program.node_types[node]) !=
-          GqlExpressionType::LITERAL ||
-      ExpressionEnd(program, node) != node + 1) {
-    return false;
+static bool ReferencesBinding(const GqlExpressionProgram &program,
+                              idx_t binding_index) {
+  for (const auto index : program.binding_indices) {
+    if (index == binding_index) {
+      return true;
+    }
   }
-  value = LiteralValue(static_cast<GqlLiteralType>(program.operators[node]),
-                       program.values[node]);
-  return true;
+  return false;
 }
 
-static bool ExtractCsrSourceEquality(const GqlExpressionProgram &program,
-                                     idx_t source_binding, string &property,
-                                     Value &value) {
-  if (program.node_types.empty() ||
-      static_cast<GqlExpressionType>(program.node_types[0]) !=
-          GqlExpressionType::BINARY ||
-      static_cast<GqlBinaryOperator>(program.operators[0]) !=
-          GqlBinaryOperator::EQUAL ||
-      ExpressionEnd(program, 0) != program.node_types.size()) {
-    return false;
+static unique_ptr<TableRef>
+TableBackedNativeRecursiveMatch(const GqlTableGraphBinding &graph,
+                                const RecursiveMatchInput &match) {
+  if (match.edge_labels.size() > 1) {
+    throw NotImplementedException("Table-backed native paths currently support "
+                                  "at most one scalar edge label");
   }
-  const idx_t left = 1;
-  const idx_t right = ExpressionEnd(program, left);
-  return (CsrSourceProperty(program, left, source_binding, property) &&
-          CsrLiteral(program, right, value)) ||
-         (CsrLiteral(program, left, value) &&
-          CsrSourceProperty(program, right, source_binding, property));
-}
+  for (const auto &program : match.projections) {
+    for (const auto binding_index : program.binding_indices) {
+      if (binding_index == match.edge_binding) {
+        throw BinderException(
+            "Quantified GQL edge group variables are not supported");
+      }
+    }
+  }
+  for (const auto &program : match.predicates) {
+    for (const auto binding_index : program.binding_indices) {
+      if (binding_index == match.edge_binding) {
+        throw BinderException(
+            "Quantified GQL edge group variables are not supported");
+      }
+    }
+  }
 
-static string QuoteCsrIdentifier(const string &value) {
-  return KeywordHelper::WriteQuoted(value, '"');
-}
+  vector<RelationalIdentityAccess> identities(match.binding_count);
+  identities[match.source_binding] = {
+      "gql_object_" + to_string(match.source_binding), graph.vertex.key_column};
+  identities[match.target_binding] = {
+      "gql_object_" + to_string(match.target_binding), graph.vertex.key_column};
 
-static CsrStartRestriction
-ResolveCsrStartRestriction(ClientContext &context,
-                           const GqlTableGraphBinding &graph,
-                           const RecursiveMatchInput &match) {
-  CsrStartRestriction restriction;
-  string property;
-  Value literal;
-  for (const auto &predicate : match.predicates) {
-    if (!ExtractCsrSourceEquality(predicate, match.source_binding, property,
-                                  literal)) {
+  RelationalPropertyMap property_aliases;
+  for (const auto &program : match.projections) {
+    CollectProperties(program, property_aliases);
+  }
+  for (const auto &program : match.predicates) {
+    CollectProperties(program, property_aliases);
+  }
+  for (auto &entry : property_aliases) {
+    auto separator = entry.first.find('\x1f');
+    if (separator == string::npos) {
+      throw InternalException("Invalid GQL recursive property binding key");
+    }
+    auto binding_index =
+        NumericCast<idx_t>(std::stoull(entry.first.substr(0, separator)));
+    if (binding_index != match.source_binding &&
+        binding_index != match.target_binding) {
+      throw NotImplementedException(
+          "Quantified GQL edge group variables are not supported");
+    }
+    auto property = entry.first.substr(separator + 1);
+    entry.second.table_alias = identities[binding_index].table_alias;
+    if (property == GQL_LABEL_ACCESS) {
+      entry.second.column_name = graph.vertex.label_column;
+    } else {
+      TryFindPropertyColumn(graph.vertex, property, entry.second.column_name);
+    }
+  }
+
+  // Seed native recursion from the mapped vertex table. Source-only predicates
+  // are repeated here as well as above the CTE so a selective source property
+  // can prevent database-wide expansion.
+  const string anchor_alias = "gql_anchor_vertex";
+  auto anchor = make_uniq<SelectNode>();
+  anchor->from_table = ElementTable(graph.vertex, anchor_alias);
+  vector<unique_ptr<ParsedExpression>> anchor_filters;
+  for (const auto &label : match.source_labels) {
+    if (graph.vertex.label_column.empty()) {
+      anchor_filters.push_back(Constant(Value(false)));
+    } else {
+      anchor_filters.push_back(
+          VertexHasLabel(anchor_alias, graph.vertex.label_column, label));
+    }
+  }
+  vector<RelationalIdentityAccess> anchor_identities(match.binding_count);
+  anchor_identities[match.source_binding] = {anchor_alias,
+                                             graph.vertex.key_column};
+  RelationalPropertyMap anchor_properties;
+  for (const auto &entry : property_aliases) {
+    auto separator = entry.first.find('\x1f');
+    auto binding_index =
+        NumericCast<idx_t>(std::stoull(entry.first.substr(0, separator)));
+    if (binding_index != match.source_binding) {
       continue;
     }
-    restriction.constrained = true;
-    if (literal.IsNull()) {
-      return restriction;
-    }
-    const auto &column = FindPropertyColumn(graph.vertex, property);
-    auto qualified = QuoteCsrIdentifier(graph.vertex.catalog_name) + "." +
-                     QuoteCsrIdentifier(graph.vertex.schema_name) + "." +
-                     QuoteCsrIdentifier(graph.vertex.table_name);
-    auto sql = "SELECT CAST(" + QuoteCsrIdentifier(graph.vertex.key_column) +
-               " AS UBIGINT) FROM " + qualified + " WHERE " +
-               QuoteCsrIdentifier(column) + " = " + literal.ToSQLString();
-    Connection connection(*context.db);
-    auto result = connection.Query(sql);
-    if (result->HasError()) {
-      throw BinderException("Failed to resolve CSR source predicate: %s",
-                            result->GetError());
-    }
-    for (idx_t row = 0; row < result->RowCount(); row++) {
-      restriction.ids.push_back(
-          Value::UBIGINT(result->GetValue(0, row).GetValue<uint64_t>()));
-    }
-    return restriction;
+    auto access = entry.second;
+    access.table_alias = anchor_alias;
+    anchor_properties.emplace(entry.first, std::move(access));
   }
-  return restriction;
-}
+  for (const auto &predicate : match.predicates) {
+    if (ReferencesOnlyBinding(predicate, match.source_binding)) {
+      anchor_filters.push_back(LowerExpression(
+          predicate, anchor_properties, anchor_identities, GqlTypeId::BOOLEAN));
+    }
+  }
+  anchor->where_clause = And(std::move(anchor_filters));
+  anchor->select_list.push_back(
+      Aliased(Column(anchor_alias, graph.vertex.key_column), "start_id"));
+  anchor->select_list.push_back(
+      Aliased(Column(anchor_alias, graph.vertex.key_column), "end_id"));
+  vector<Value> empty_edges;
+  anchor->select_list.push_back(Aliased(
+      Constant(Value::LIST(LogicalType::VARCHAR, std::move(empty_edges))),
+      "edge_ids"));
+  anchor->select_list.push_back(Aliased(Constant(Value::UBIGINT(0)), "depth"));
 
-static bool ReferencesOnlyBinding(const GqlExpressionProgram &program, idx_t binding_index) {
-	for (const auto index : program.binding_indices) {
-		if (index != NumericLimits<uint64_t>::Maximum() && index != binding_index) {
-			return false;
-		}
-	}
-	return true;
-}
+  // Extend the current endpoint by one unused mapped edge. Casting the edge
+  // key to VARCHAR keeps trail identity generic across scalar key types.
+  unique_ptr<TableRef> step_from =
+      NamedTable("gql_recursive_path", "gql_path_previous");
+  const string edge_alias = "gql_path_edge";
+  vector<unique_ptr<ParsedExpression>> edge_conditions;
+  edge_conditions.push_back(
+      Equal(Column(edge_alias, match.reverse ? graph.edge_target_column
+                                             : graph.edge_source_column),
+            Column("gql_path_previous", "end_id")));
+  AppendJoin(step_from, ElementTable(graph.edge, edge_alias), JoinType::INNER,
+             std::move(edge_conditions));
 
-static bool ReferencesBinding(const GqlExpressionProgram &program, idx_t binding_index) {
-	for (const auto index : program.binding_indices) {
-		if (index == binding_index) {
-			return true;
-		}
-	}
-	return false;
-}
+  auto edge_identity = make_uniq<CastExpression>(
+      LogicalType::VARCHAR, Column(edge_alias, graph.edge.key_column));
+  vector<unique_ptr<ParsedExpression>> contains_arguments;
+  contains_arguments.push_back(Column("gql_path_previous", "edge_ids"));
+  contains_arguments.push_back(edge_identity->Copy());
+  vector<unique_ptr<ParsedExpression>> step_filters;
+  step_filters.push_back(make_uniq<OperatorExpression>(
+      ExpressionType::OPERATOR_NOT,
+      Function("list_contains", std::move(contains_arguments))));
+  for (const auto &label : match.edge_labels) {
+    if (graph.edge.label_column.empty()) {
+      step_filters.push_back(Constant(Value(false)));
+    } else {
+      step_filters.push_back(Equal(Column(edge_alias, graph.edge.label_column),
+                                   Constant(Value(label))));
+    }
+  }
 
-static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphBinding &graph,
-                                                            const RecursiveMatchInput &match) {
-	if (match.edge_labels.size() > 1) {
-		throw NotImplementedException("Table-backed native paths currently support "
-		                              "at most one scalar edge label");
-	}
-	for (const auto &program : match.projections) {
-		for (const auto binding_index : program.binding_indices) {
-			if (binding_index == match.edge_binding) {
-				throw BinderException("Quantified GQL edge group variables are not supported");
-			}
-		}
-	}
-	for (const auto &program : match.predicates) {
-		for (const auto binding_index : program.binding_indices) {
-			if (binding_index == match.edge_binding) {
-				throw BinderException("Quantified GQL edge group variables are not supported");
-			}
-		}
-	}
+  auto step = make_uniq<SelectNode>();
+  step->from_table = std::move(step_from);
+  step->where_clause = And(std::move(step_filters));
+  step->select_list.push_back(
+      Aliased(Column("gql_path_previous", "start_id"), "start_id"));
+  step->select_list.push_back(
+      Aliased(Column(edge_alias, match.reverse ? graph.edge_source_column
+                                               : graph.edge_target_column),
+              "end_id"));
+  vector<unique_ptr<ParsedExpression>> append_arguments;
+  append_arguments.push_back(Column("gql_path_previous", "edge_ids"));
+  append_arguments.push_back(std::move(edge_identity));
+  step->select_list.push_back(Aliased(
+      Function("list_append", std::move(append_arguments)), "edge_ids"));
+  vector<unique_ptr<ParsedExpression>> depth_arguments;
+  depth_arguments.push_back(Column("gql_path_previous", "depth"));
+  depth_arguments.push_back(Constant(Value::UBIGINT(1)));
+  auto next_depth = Function("+", std::move(depth_arguments));
+  next_depth->Cast<FunctionExpression>().is_operator = true;
+  step->select_list.push_back(Aliased(std::move(next_depth), "depth"));
 
-	vector<RelationalIdentityAccess> identities(match.binding_count);
-	identities[match.source_binding] = {"gql_object_" + to_string(match.source_binding), graph.vertex.key_column};
-	identities[match.target_binding] = {"gql_object_" + to_string(match.target_binding), graph.vertex.key_column};
+  auto recursive = make_uniq<RecursiveCTENode>();
+  recursive->ctename = "gql_recursive_path";
+  recursive->union_all = true;
+  recursive->aliases = {"start_id", "end_id", "edge_ids", "depth"};
+  recursive->left = std::move(anchor);
+  recursive->right = std::move(step);
+  auto recursive_statement = make_uniq<SelectStatement>();
+  recursive_statement->node = std::move(recursive);
+  unique_ptr<TableRef> from =
+      make_uniq<SubqueryRef>(std::move(recursive_statement), "gql_path");
 
-	RelationalPropertyMap property_aliases;
-	for (const auto &program : match.projections) {
-		CollectProperties(program, property_aliases);
-	}
-	for (const auto &program : match.predicates) {
-		CollectProperties(program, property_aliases);
-	}
-	for (auto &entry : property_aliases) {
-		auto separator = entry.first.find('\x1f');
-		if (separator == string::npos) {
-			throw InternalException("Invalid GQL recursive property binding key");
-		}
-		auto binding_index = NumericCast<idx_t>(std::stoull(entry.first.substr(0, separator)));
-		if (binding_index != match.source_binding && binding_index != match.target_binding) {
-			throw NotImplementedException("Quantified GQL edge group variables are not supported");
-		}
-		auto property = entry.first.substr(separator + 1);
-		entry.second.table_alias = identities[binding_index].table_alias;
-		if (property == GQL_LABEL_ACCESS) {
-			entry.second.column_name = graph.vertex.label_column;
-		} else {
-			TryFindPropertyColumn(graph.vertex, property,
-			                      entry.second.column_name);
-		}
-	}
+  bool source_needed_above = match.source_binding == match.target_binding;
+  for (const auto &projection : match.projections) {
+    source_needed_above |= ReferencesBinding(projection, match.source_binding);
+  }
+  for (const auto &predicate : match.predicates) {
+    source_needed_above |=
+        ReferencesBinding(predicate, match.source_binding) &&
+        !ReferencesOnlyBinding(predicate, match.source_binding);
+  }
+  if (source_needed_above) {
+    vector<unique_ptr<ParsedExpression>> source_conditions;
+    source_conditions.push_back(
+        Equal(Column(identities[match.source_binding].table_alias,
+                     graph.vertex.key_column),
+              Column("gql_path", "start_id")));
+    AppendJoin(from,
+               ElementTable(graph.vertex,
+                            identities[match.source_binding].table_alias),
+               JoinType::INNER, std::move(source_conditions));
+  }
+  if (match.target_binding != match.source_binding) {
+    vector<unique_ptr<ParsedExpression>> target_conditions;
+    target_conditions.push_back(
+        Equal(Column(identities[match.target_binding].table_alias,
+                     graph.vertex.key_column),
+              Column("gql_path", "end_id")));
+    AppendJoin(from,
+               ElementTable(graph.vertex,
+                            identities[match.target_binding].table_alias),
+               JoinType::INNER, std::move(target_conditions));
+  }
 
-	// Seed native recursion from the mapped vertex table. Source-only predicates
-	// are repeated here as well as above the CTE so a selective source property
-	// can prevent database-wide expansion.
-	const string anchor_alias = "gql_anchor_vertex";
-	auto anchor = make_uniq<SelectNode>();
-	anchor->from_table = ElementTable(graph.vertex, anchor_alias);
-	vector<unique_ptr<ParsedExpression>> anchor_filters;
-	for (const auto &label : match.source_labels) {
-		if (graph.vertex.label_column.empty()) {
-			anchor_filters.push_back(Constant(Value(false)));
-		} else {
-			anchor_filters.push_back(VertexHasLabel(anchor_alias, graph.vertex.label_column, label));
-		}
-	}
-	vector<RelationalIdentityAccess> anchor_identities(match.binding_count);
-	anchor_identities[match.source_binding] = {anchor_alias, graph.vertex.key_column};
-	RelationalPropertyMap anchor_properties;
-	for (const auto &entry : property_aliases) {
-		auto separator = entry.first.find('\x1f');
-		auto binding_index = NumericCast<idx_t>(std::stoull(entry.first.substr(0, separator)));
-		if (binding_index != match.source_binding) {
-			continue;
-		}
-		auto access = entry.second;
-		access.table_alias = anchor_alias;
-		anchor_properties.emplace(entry.first, std::move(access));
-	}
-	for (const auto &predicate : match.predicates) {
-		if (ReferencesOnlyBinding(predicate, match.source_binding)) {
-			anchor_filters.push_back(
-			    LowerExpression(predicate, anchor_properties, anchor_identities, GqlTypeId::BOOLEAN));
-		}
-	}
-	anchor->where_clause = And(std::move(anchor_filters));
-	anchor->select_list.push_back(Aliased(Column(anchor_alias, graph.vertex.key_column), "start_id"));
-	anchor->select_list.push_back(Aliased(Column(anchor_alias, graph.vertex.key_column), "end_id"));
-	vector<Value> empty_edges;
-	anchor->select_list.push_back(
-	    Aliased(Constant(Value::LIST(LogicalType::VARCHAR, std::move(empty_edges))), "edge_ids"));
-	anchor->select_list.push_back(Aliased(Constant(Value::UBIGINT(0)), "depth"));
+  vector<unique_ptr<ParsedExpression>> filters;
+  if (match.minimum_repetitions > 0) {
+    filters.push_back(
+        Compare(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
+                Column("gql_path", "depth"),
+                Constant(Value::UBIGINT(match.minimum_repetitions))));
+  }
+  auto append_labels = [&](const vector<string> &labels, idx_t binding_index) {
+    for (const auto &label : labels) {
+      if (graph.vertex.label_column.empty()) {
+        filters.push_back(Constant(Value(false)));
+      } else {
+        filters.push_back(VertexHasLabel(identities[binding_index].table_alias,
+                                         graph.vertex.label_column, label));
+      }
+    }
+  };
+  append_labels(match.target_labels, match.target_binding);
+  if (match.source_binding == match.target_binding) {
+    filters.push_back(
+        Equal(Column("gql_path", "start_id"), Column("gql_path", "end_id")));
+  }
+  for (const auto &predicate : match.predicates) {
+    if (!ReferencesOnlyBinding(predicate, match.source_binding)) {
+      filters.push_back(LowerExpression(predicate, property_aliases, identities,
+                                        GqlTypeId::BOOLEAN));
+    }
+  }
 
-	// Extend the current endpoint by one unused mapped edge. Casting the edge
-	// key to VARCHAR keeps trail identity generic across scalar key types.
-	unique_ptr<TableRef> step_from = NamedTable("gql_recursive_path", "gql_path_previous");
-	const string edge_alias = "gql_path_edge";
-	vector<unique_ptr<ParsedExpression>> edge_conditions;
-	edge_conditions.push_back(
-	    Equal(Column(edge_alias, match.reverse ? graph.edge_target_column : graph.edge_source_column),
-	          Column("gql_path_previous", "end_id")));
-	AppendJoin(step_from, ElementTable(graph.edge, edge_alias), JoinType::INNER, std::move(edge_conditions));
-
-	auto edge_identity = make_uniq<CastExpression>(LogicalType::VARCHAR, Column(edge_alias, graph.edge.key_column));
-	vector<unique_ptr<ParsedExpression>> contains_arguments;
-	contains_arguments.push_back(Column("gql_path_previous", "edge_ids"));
-	contains_arguments.push_back(edge_identity->Copy());
-	vector<unique_ptr<ParsedExpression>> step_filters;
-	step_filters.push_back(make_uniq<OperatorExpression>(ExpressionType::OPERATOR_NOT,
-	                                                     Function("list_contains", std::move(contains_arguments))));
-	for (const auto &label : match.edge_labels) {
-		if (graph.edge.label_column.empty()) {
-			step_filters.push_back(Constant(Value(false)));
-		} else {
-			step_filters.push_back(Equal(Column(edge_alias, graph.edge.label_column), Constant(Value(label))));
-		}
-	}
-
-	auto step = make_uniq<SelectNode>();
-	step->from_table = std::move(step_from);
-	step->where_clause = And(std::move(step_filters));
-	step->select_list.push_back(Aliased(Column("gql_path_previous", "start_id"), "start_id"));
-	step->select_list.push_back(
-	    Aliased(Column(edge_alias, match.reverse ? graph.edge_source_column : graph.edge_target_column), "end_id"));
-	vector<unique_ptr<ParsedExpression>> append_arguments;
-	append_arguments.push_back(Column("gql_path_previous", "edge_ids"));
-	append_arguments.push_back(std::move(edge_identity));
-	step->select_list.push_back(Aliased(Function("list_append", std::move(append_arguments)), "edge_ids"));
-	vector<unique_ptr<ParsedExpression>> depth_arguments;
-	depth_arguments.push_back(Column("gql_path_previous", "depth"));
-	depth_arguments.push_back(Constant(Value::UBIGINT(1)));
-	auto next_depth = Function("+", std::move(depth_arguments));
-	next_depth->Cast<FunctionExpression>().is_operator = true;
-	step->select_list.push_back(Aliased(std::move(next_depth), "depth"));
-
-	auto recursive = make_uniq<RecursiveCTENode>();
-	recursive->ctename = "gql_recursive_path";
-	recursive->union_all = true;
-	recursive->aliases = {"start_id", "end_id", "edge_ids", "depth"};
-	recursive->left = std::move(anchor);
-	recursive->right = std::move(step);
-	auto recursive_statement = make_uniq<SelectStatement>();
-	recursive_statement->node = std::move(recursive);
-	unique_ptr<TableRef> from = make_uniq<SubqueryRef>(std::move(recursive_statement), "gql_path");
-
-	bool source_needed_above = match.source_binding == match.target_binding;
-	for (const auto &projection : match.projections) {
-		source_needed_above |= ReferencesBinding(projection, match.source_binding);
-	}
-	for (const auto &predicate : match.predicates) {
-		source_needed_above |= ReferencesBinding(predicate, match.source_binding) &&
-		                       !ReferencesOnlyBinding(predicate, match.source_binding);
-	}
-	if (source_needed_above) {
-		vector<unique_ptr<ParsedExpression>> source_conditions;
-		source_conditions.push_back(Equal(Column(identities[match.source_binding].table_alias, graph.vertex.key_column),
-		                                  Column("gql_path", "start_id")));
-		AppendJoin(from, ElementTable(graph.vertex, identities[match.source_binding].table_alias), JoinType::INNER,
-		           std::move(source_conditions));
-	}
-	if (match.target_binding != match.source_binding) {
-		vector<unique_ptr<ParsedExpression>> target_conditions;
-		target_conditions.push_back(Equal(Column(identities[match.target_binding].table_alias, graph.vertex.key_column),
-		                                  Column("gql_path", "end_id")));
-		AppendJoin(from, ElementTable(graph.vertex, identities[match.target_binding].table_alias), JoinType::INNER,
-		           std::move(target_conditions));
-	}
-
-	vector<unique_ptr<ParsedExpression>> filters;
-	if (match.minimum_repetitions > 0) {
-		filters.push_back(Compare(ExpressionType::COMPARE_GREATERTHANOREQUALTO, Column("gql_path", "depth"),
-		                          Constant(Value::UBIGINT(match.minimum_repetitions))));
-	}
-	auto append_labels = [&](const vector<string> &labels, idx_t binding_index) {
-		for (const auto &label : labels) {
-			if (graph.vertex.label_column.empty()) {
-				filters.push_back(Constant(Value(false)));
-			} else {
-				filters.push_back(VertexHasLabel(identities[binding_index].table_alias, graph.vertex.label_column, label));
-			}
-		}
-	};
-	append_labels(match.target_labels, match.target_binding);
-	if (match.source_binding == match.target_binding) {
-		filters.push_back(Equal(Column("gql_path", "start_id"), Column("gql_path", "end_id")));
-	}
-	for (const auto &predicate : match.predicates) {
-		if (!ReferencesOnlyBinding(predicate, match.source_binding)) {
-			filters.push_back(LowerExpression(predicate, property_aliases, identities, GqlTypeId::BOOLEAN));
-		}
-	}
-
-	auto select = make_uniq<SelectNode>();
-	select->from_table = std::move(from);
-	select->where_clause = And(std::move(filters));
-	vector<GqlPatternElementType> binding_types(match.binding_count,
-	                                           GqlPatternElementType::VERTEX);
-	binding_types[match.edge_binding] = GqlPatternElementType::EDGE;
-	AppendProjections(*select, match.projections, match.projection_names,
-	                  property_aliases, identities, graph, binding_types);
-	return FinalizeMatchSelect(std::move(select), match.projections, match.projection_names, match.modifiers, false);
-}
-
-static unique_ptr<TableRef> CsrPathTable(const string &graph_name, const RecursiveMatchInput &match,
-                                         CsrStartRestriction restriction) {
-	vector<unique_ptr<ParsedExpression>> arguments;
-	arguments.push_back(Constant(Value(graph_name)));
-	arguments.push_back(Constant(Value(match.reverse)));
-	arguments.push_back(Constant(Value::UBIGINT(match.minimum_repetitions)));
-	arguments.push_back(Constant(Value(match.edge_labels.empty() ? string() : match.edge_labels[0])));
-	arguments.push_back(Constant(restriction.constrained ? Value::LIST(LogicalType::UBIGINT, std::move(restriction.ids))
-	                                                     : Value(LogicalType::LIST(LogicalType::UBIGINT))));
-	auto result = make_uniq<TableFunctionRef>();
-	result->function = make_uniq<FunctionExpression>("gql_csr_path_scan", std::move(arguments));
-	result->alias = "gql_path";
-	return std::move(result);
-}
-
-static unique_ptr<TableRef> TableBackedCsrRecursiveMatch(ClientContext &context, const GqlTableGraphBinding &graph,
-                                                         const string &graph_name, const RecursiveMatchInput &match) {
-	if (match.edge_labels.size() > 1) {
-		throw NotImplementedException("Table-backed CSR paths currently support at "
-		                              "most one scalar edge label");
-	}
-	auto start_restriction = ResolveCsrStartRestriction(context, graph, match);
-	unique_ptr<TableRef> from = CsrPathTable(graph_name, match, std::move(start_restriction));
-	vector<RelationalIdentityAccess> identities(match.binding_count);
-	identities[match.source_binding] = {"gql_object_" + to_string(match.source_binding), graph.vertex.key_column};
-	identities[match.target_binding] = {"gql_object_" + to_string(match.target_binding), graph.vertex.key_column};
-
-	vector<unique_ptr<ParsedExpression>> source_conditions;
-	source_conditions.push_back(Equal(Column(identities[match.source_binding].table_alias, graph.vertex.key_column),
-	                                  Column("gql_path", "start_id")));
-	AppendJoin(from, ElementTable(graph.vertex, identities[match.source_binding].table_alias), JoinType::INNER,
-	           std::move(source_conditions));
-	if (match.target_binding != match.source_binding) {
-		vector<unique_ptr<ParsedExpression>> target_conditions;
-		target_conditions.push_back(Equal(Column(identities[match.target_binding].table_alias, graph.vertex.key_column),
-		                                  Column("gql_path", "end_id")));
-		AppendJoin(from, ElementTable(graph.vertex, identities[match.target_binding].table_alias), JoinType::INNER,
-		           std::move(target_conditions));
-	}
-
-	RelationalPropertyMap property_aliases;
-	for (const auto &program : match.projections) {
-		CollectProperties(program, property_aliases);
-	}
-	for (const auto &program : match.predicates) {
-		CollectProperties(program, property_aliases);
-	}
-	for (auto &entry : property_aliases) {
-		auto separator = entry.first.find('\x1f');
-		if (separator == string::npos) {
-			throw InternalException("Invalid GQL CSR property binding key");
-		}
-		auto binding_index = NumericCast<idx_t>(std::stoull(entry.first.substr(0, separator)));
-		if (binding_index != match.source_binding && binding_index != match.target_binding) {
-			throw NotImplementedException("Quantified GQL edge group variables are not supported");
-		}
-		auto property = entry.first.substr(separator + 1);
-		entry.second.table_alias = identities[binding_index].table_alias;
-		if (property == GQL_LABEL_ACCESS) {
-			entry.second.column_name = graph.vertex.label_column;
-		} else {
-			TryFindPropertyColumn(graph.vertex, property,
-			                      entry.second.column_name);
-		}
-	}
-
-	vector<unique_ptr<ParsedExpression>> filters;
-	auto append_labels = [&](const vector<string> &labels, idx_t binding_index) {
-		for (const auto &label : labels) {
-			if (graph.vertex.label_column.empty()) {
-				filters.push_back(Constant(Value(false)));
-			} else {
-				filters.push_back(VertexHasLabel(identities[binding_index].table_alias, graph.vertex.label_column, label));
-			}
-		}
-	};
-	append_labels(match.source_labels, match.source_binding);
-	append_labels(match.target_labels, match.target_binding);
-	if (match.source_binding == match.target_binding) {
-		filters.push_back(Equal(Column("gql_path", "start_id"), Column("gql_path", "end_id")));
-	}
-	for (const auto &predicate : match.predicates) {
-		filters.push_back(LowerExpression(predicate, property_aliases, identities, GqlTypeId::BOOLEAN));
-	}
-
-	auto select = make_uniq<SelectNode>();
-	select->from_table = std::move(from);
-	select->where_clause = And(std::move(filters));
-	vector<GqlPatternElementType> binding_types(match.binding_count,
-	                                           GqlPatternElementType::VERTEX);
-	binding_types[match.edge_binding] = GqlPatternElementType::EDGE;
-	AppendProjections(*select, match.projections, match.projection_names,
-	                  property_aliases, identities, graph, binding_types);
-	return FinalizeMatchSelect(std::move(select), match.projections, match.projection_names, match.modifiers, false);
+  auto select = make_uniq<SelectNode>();
+  select->from_table = std::move(from);
+  select->where_clause = And(std::move(filters));
+  vector<GqlPatternElementType> binding_types(match.binding_count,
+                                              GqlPatternElementType::VERTEX);
+  binding_types[match.edge_binding] = GqlPatternElementType::EDGE;
+  AppendProjections(*select, match.projections, match.projection_names,
+                    property_aliases, identities, graph, binding_types);
+  return FinalizeMatchSelect(std::move(select), match.projections,
+                             match.projection_names, match.modifiers, false);
 }
 
 static unique_ptr<TableRef>
@@ -1486,39 +1478,13 @@ RecursiveMatchBindReplace(ClientContext &context,
         "Graph '%s' has no native tables; load it with COPY GRAPH before MATCH",
         graph_name);
   }
-  if (match.use_csr) {
-    return TableBackedCsrRecursiveMatch(context, table_graph, graph_name,
-                                        match);
-  }
   return TableBackedNativeRecursiveMatch(table_graph, match);
-}
-
-static const string &FindPropertyColumn(const GqlElementTableBinding &table,
-                                        const string &property) {
-  for (const auto &entry : table.property_columns) {
-    if (StringUtil::CIEquals(entry.first, property)) {
-      return entry.second;
-    }
-  }
-  throw BinderException(
-      "Property '%s' is not mapped for table-backed graph table %s.%s",
-      property, table.schema_name, table.table_name);
 }
 
 static unique_ptr<TableRef>
 TableBackedMatch(const GqlTableGraphBinding &graph,
                  const RelationalMatchInput &match) {
   vector<RelationalIdentityAccess> identities(match.binding_types.size());
-  vector<bool> mandatory_bindings(match.binding_types.size(), false);
-  for (const auto &pattern : match.patterns) {
-    if (pattern.optional_stage > 0 && !match.modifiers.optional) {
-      continue;
-    }
-    for (const auto &element : pattern.elements) {
-      mandatory_bindings[element.binding_index] = true;
-    }
-  }
-  unique_ptr<TableRef> from;
   for (idx_t index = 0; index < match.binding_types.size(); index++) {
     const auto &table =
         match.binding_types[index] == GqlPatternElementType::EDGE
@@ -1526,21 +1492,6 @@ TableBackedMatch(const GqlTableGraphBinding &graph,
             : graph.vertex;
     auto alias = "gql_object_" + to_string(index);
     identities[index] = {alias, table.key_column};
-    if (!mandatory_bindings[index]) {
-      continue;
-    }
-    auto source = ElementTable(table, alias);
-    if (!from) {
-      from = std::move(source);
-    } else {
-      vector<unique_ptr<ParsedExpression>> conditions;
-      conditions.push_back(Constant(Value(true)));
-      AppendJoin(from, std::move(source), JoinType::INNER,
-                 std::move(conditions));
-    }
-  }
-  if (!from) {
-    throw InternalException("Table-backed MATCH has no bindings");
   }
 
   RelationalPropertyMap property_aliases;
@@ -1548,9 +1499,6 @@ TableBackedMatch(const GqlTableGraphBinding &graph,
     CollectProperties(program, property_aliases);
   }
   for (const auto &program : match.predicates) {
-    CollectProperties(program, property_aliases);
-  }
-  for (const auto &program : match.optional_predicates) {
     CollectProperties(program, property_aliases);
   }
   for (auto &entry : property_aliases) {
@@ -1576,86 +1524,59 @@ TableBackedMatch(const GqlTableGraphBinding &graph,
     }
   }
 
-  vector<bool> available_bindings = mandatory_bindings;
-  idx_t maximum_optional_stage = 0;
-  for (const auto &pattern : match.patterns) {
-    maximum_optional_stage =
-        MaxValue(maximum_optional_stage, pattern.optional_stage);
-  }
-  for (const auto stage : match.optional_predicate_stages) {
-    if (stage == 0 || stage > maximum_optional_stage) {
-      throw BinderException("Invalid GQL OPTIONAL MATCH predicate stage");
+  struct StageState {
+    unique_ptr<TableRef> source;
+    vector<bool> introduced;
+    vector<unique_ptr<ParsedExpression>> conditions;
+  };
+  auto build_stage = [&](idx_t stage_index, const vector<bool> &available) {
+    if (stage_index >= match.match_stages.size()) {
+      throw InternalException("Invalid GQL MATCH stage index");
     }
-  }
-  for (idx_t stage = 1; stage <= maximum_optional_stage; stage++) {
-    vector<bool> stage_bindings(match.binding_types.size(), false);
-    bool found_stage = false;
-    for (const auto &pattern : match.patterns) {
-      if (pattern.optional_stage != stage) {
-        continue;
-      }
-      found_stage = true;
+    StageState result;
+    result.introduced.resize(match.binding_types.size(), false);
+    const auto &stage = match.match_stages[stage_index];
+    for (const auto &pattern : stage.patterns) {
       for (const auto &element : pattern.elements) {
-        if (!available_bindings[element.binding_index]) {
-          stage_bindings[element.binding_index] = true;
+        if (!available[element.binding_index]) {
+          result.introduced[element.binding_index] = true;
         }
       }
     }
-    if (!found_stage) {
-      throw BinderException("Invalid non-contiguous GQL OPTIONAL MATCH stages");
-    }
-
-    unique_ptr<TableRef> optional_source;
-    for (idx_t binding_index = 0; binding_index < stage_bindings.size();
+    for (idx_t binding_index = 0; binding_index < result.introduced.size();
          binding_index++) {
-      if (!stage_bindings[binding_index]) {
+      if (!result.introduced[binding_index]) {
         continue;
       }
       const auto &table =
           match.binding_types[binding_index] == GqlPatternElementType::EDGE
               ? graph.edge
               : graph.vertex;
-      auto source =
-          ElementTable(table, identities[binding_index].table_alias);
-      if (!optional_source) {
-        optional_source = std::move(source);
+      auto source = ElementTable(table, identities[binding_index].table_alias);
+      if (!result.source) {
+        result.source = std::move(source);
       } else {
         vector<unique_ptr<ParsedExpression>> cross_conditions;
         cross_conditions.push_back(Constant(Value(true)));
-        AppendJoin(optional_source, std::move(source), JoinType::INNER,
+        AppendJoin(result.source, std::move(source), JoinType::INNER,
                    std::move(cross_conditions));
       }
     }
-    if (!optional_source) {
-      throw NotImplementedException(
-          "OPTIONAL MATCH stages that introduce no new bindings");
-    }
-
-    vector<unique_ptr<ParsedExpression>> conditions;
-    vector<idx_t> stage_edges;
-    for (const auto &pattern : match.patterns) {
-      if (pattern.optional_stage != stage) {
-        continue;
-      }
+    for (const auto &pattern : stage.patterns) {
       for (const auto &element : pattern.elements) {
-        auto alias = identities[element.binding_index].table_alias;
-        if (element.type == GqlPatternElementType::VERTEX) {
-          for (const auto &label : StringUtil::Split(element.label, ';')) {
-            if (!label.empty()) {
-              conditions.push_back(VertexHasLabel(
-                  alias, graph.vertex.label_column, label));
-            }
-          }
+        if (element.label.empty()) {
+          continue;
+        }
+        const auto &table = element.type == GqlPatternElementType::EDGE
+                                ? graph.edge
+                                : graph.vertex;
+        if (table.label_column.empty()) {
+          result.conditions.push_back(Constant(Value(false)));
         } else {
-          if (!element.label.empty()) {
-            conditions.push_back(
-                Equal(Column(alias, graph.edge.label_column),
-                      Constant(Value(element.label))));
-          }
-          if (stage_bindings[element.binding_index] &&
-              std::find(stage_edges.begin(), stage_edges.end(),
-                        element.binding_index) == stage_edges.end()) {
-            stage_edges.push_back(element.binding_index);
+          for (const auto &label : StringUtil::Split(element.label, ';')) {
+            result.conditions.push_back(
+                VertexHasLabel(identities[element.binding_index].table_alias,
+                               table.label_column, label));
           }
         }
       }
@@ -1665,136 +1586,147 @@ TableBackedMatch(const GqlTableGraphBinding &graph,
         const auto &edge = pattern.elements[element_index];
         const auto &right = pattern.elements[element_index + 1];
         auto edge_alias = identities[edge.binding_index].table_alias;
-        conditions.push_back(Equal(
-            Column(edge_alias, edge.reverse ? graph.edge_target_column
-                                            : graph.edge_source_column),
-            Column(identities[left.binding_index].table_alias,
-                   graph.vertex.key_column)));
-        conditions.push_back(Equal(
-            Column(edge_alias, edge.reverse ? graph.edge_source_column
-                                            : graph.edge_target_column),
-            Column(identities[right.binding_index].table_alias,
-                   graph.vertex.key_column)));
+        result.conditions.push_back(
+            Equal(Column(edge_alias, edge.reverse ? graph.edge_target_column
+                                                  : graph.edge_source_column),
+                  Column(identities[left.binding_index].table_alias,
+                         graph.vertex.key_column)));
+        result.conditions.push_back(
+            Equal(Column(edge_alias, edge.reverse ? graph.edge_source_column
+                                                  : graph.edge_target_column),
+                  Column(identities[right.binding_index].table_alias,
+                         graph.vertex.key_column)));
       }
     }
-    for (idx_t left = 0; left < stage_edges.size(); left++) {
-      for (idx_t prior = 0; prior < match.binding_types.size(); prior++) {
-        if (available_bindings[prior] &&
-            match.binding_types[prior] == GqlPatternElementType::EDGE &&
-            prior != stage_edges[left]) {
-          conditions.push_back(NotEqual(
-              Column(identities[stage_edges[left]].table_alias,
+    vector<idx_t> introduced_edges;
+    for (idx_t binding_index = 0; binding_index < result.introduced.size();
+         binding_index++) {
+      if (result.introduced[binding_index] &&
+          match.binding_types[binding_index] == GqlPatternElementType::EDGE) {
+        introduced_edges.push_back(binding_index);
+      }
+    }
+    for (idx_t edge_index = 0; edge_index < introduced_edges.size();
+         edge_index++) {
+      auto edge_binding = introduced_edges[edge_index];
+      for (idx_t prior = 0; prior < available.size(); prior++) {
+        if (available[prior] &&
+            match.binding_types[prior] == GqlPatternElementType::EDGE) {
+          result.conditions.push_back(NotEqual(
+              Column(identities[edge_binding].table_alias,
                      graph.edge.key_column),
               Column(identities[prior].table_alias, graph.edge.key_column)));
         }
       }
-      for (idx_t right = left + 1; right < stage_edges.size(); right++) {
-        conditions.push_back(NotEqual(
-            Column(identities[stage_edges[left]].table_alias,
-                   graph.edge.key_column),
-            Column(identities[stage_edges[right]].table_alias,
+      for (idx_t prior = 0; prior < edge_index; prior++) {
+        result.conditions.push_back(NotEqual(
+            Column(identities[edge_binding].table_alias, graph.edge.key_column),
+            Column(identities[introduced_edges[prior]].table_alias,
                    graph.edge.key_column)));
       }
     }
-    for (idx_t predicate_index = 0;
-         predicate_index < match.optional_predicates.size();
-         predicate_index++) {
-      if (match.optional_predicate_stages[predicate_index] == stage) {
-        conditions.push_back(LowerExpression(
-            match.optional_predicates[predicate_index], property_aliases,
-            identities, GqlTypeId::BOOLEAN));
-      }
-    }
-    if (conditions.empty()) {
-      conditions.push_back(Constant(Value(true)));
-    }
-    AppendJoin(from, std::move(optional_source), JoinType::LEFT,
-               std::move(conditions));
-    for (idx_t binding_index = 0; binding_index < stage_bindings.size();
-         binding_index++) {
-      available_bindings[binding_index] =
-          available_bindings[binding_index] || stage_bindings[binding_index];
-    }
-  }
+    return result;
+  };
 
-  vector<unique_ptr<ParsedExpression>> filters;
-  for (const auto &pattern : match.patterns) {
-    if (pattern.optional_stage > 0 && !match.modifiers.optional) {
-      continue;
+  auto unit_relation = [&]() -> unique_ptr<TableRef> {
+    auto seed = make_uniq<SelectNode>();
+    seed->from_table = make_uniq<EmptyTableRef>();
+    seed->select_list.push_back(Aliased(Constant(Value(true)), "present"));
+    auto statement = make_uniq<SelectStatement>();
+    statement->node = std::move(seed);
+    return make_uniq<SubqueryRef>(std::move(statement), "gql_unit");
+  };
+
+  struct PipelineState {
+    unique_ptr<TableRef> from;
+    vector<bool> available;
+    vector<unique_ptr<ParsedExpression>> filters;
+  };
+  auto build_right_stage = [&](auto &self, idx_t node_index,
+                               const vector<bool> &available) -> StageState {
+    const auto &node = match.nodes[node_index];
+    if (node.type == GqlLogicalOperatorType::MATCH) {
+      return build_stage(node.payload, available);
     }
-    for (const auto &element : pattern.elements) {
-      if (element.label.empty()) {
-        continue;
+    if (node.type != GqlLogicalOperatorType::FILTER) {
+      throw BinderException("GQL APPLY right side is not one MATCH stage");
+    }
+    auto result = self(self, node.child, available);
+    result.conditions.push_back(LowerExpression(match.predicates[node.payload],
+                                                property_aliases, identities,
+                                                GqlTypeId::BOOLEAN));
+    return result;
+  };
+  auto build_pipeline = [&](auto &self, idx_t node_index) -> PipelineState {
+    const auto &node = match.nodes[node_index];
+    switch (node.type) {
+    case GqlLogicalOperatorType::UNIT: {
+      PipelineState result;
+      result.from = unit_relation();
+      result.available.resize(match.binding_types.size(), false);
+      return result;
+    }
+    case GqlLogicalOperatorType::MATCH: {
+      PipelineState result;
+      result.available.resize(match.binding_types.size(), false);
+      auto stage = build_stage(node.payload, result.available);
+      if (!stage.source) {
+        throw InternalException("Initial GQL MATCH introduces no bindings");
       }
-      const auto &table = element.type == GqlPatternElementType::EDGE
-                              ? graph.edge
-                              : graph.vertex;
-      if (table.label_column.empty()) {
-        filters.push_back(Constant(Value(false)));
-      } else {
-        if (element.type == GqlPatternElementType::VERTEX) {
-          for (const auto &label : StringUtil::Split(element.label, ';')) {
-            filters.push_back(VertexHasLabel(
-                identities[element.binding_index].table_alias,
-                table.label_column, label));
-          }
-        } else {
-          filters.push_back(
-              Equal(Column(identities[element.binding_index].table_alias,
-                           table.label_column),
-                    Constant(Value(element.label))));
+      result.from = std::move(stage.source);
+      result.available = std::move(stage.introduced);
+      result.filters = std::move(stage.conditions);
+      return result;
+    }
+    case GqlLogicalOperatorType::FILTER: {
+      auto result = self(self, node.child);
+      result.filters.push_back(LowerExpression(match.predicates[node.payload],
+                                               property_aliases, identities,
+                                               GqlTypeId::BOOLEAN));
+      return result;
+    }
+    case GqlLogicalOperatorType::INNER_APPLY:
+    case GqlLogicalOperatorType::LEFT_APPLY: {
+      auto result = self(self, node.child);
+      auto stage =
+          build_right_stage(build_right_stage, node.right, result.available);
+      if (!stage.source) {
+        if (node.type == GqlLogicalOperatorType::LEFT_APPLY) {
+          // Every binding on the right is fixed by the left row. Whether the
+          // optional condition succeeds or fails, the visible result is the
+          // same single left row because there is nothing to null-extend.
+          return result;
         }
+        for (auto &condition : stage.conditions) {
+          result.filters.push_back(std::move(condition));
+        }
+      } else {
+        if (stage.conditions.empty()) {
+          stage.conditions.push_back(Constant(Value(true)));
+        }
+        AppendJoin(result.from, std::move(stage.source),
+                   node.type == GqlLogicalOperatorType::LEFT_APPLY
+                       ? JoinType::LEFT
+                       : JoinType::INNER,
+                   std::move(stage.conditions));
       }
+      for (idx_t index = 0; index < result.available.size(); index++) {
+        result.available[index] =
+            result.available[index] || stage.introduced[index];
+      }
+      return result;
     }
-  }
-
-  vector<idx_t> edge_bindings;
-  for (idx_t binding_index = 0; binding_index < match.binding_types.size();
-       binding_index++) {
-    if (mandatory_bindings[binding_index] &&
-        match.binding_types[binding_index] == GqlPatternElementType::EDGE) {
-      edge_bindings.push_back(binding_index);
+    case GqlLogicalOperatorType::PROJECT:
+    case GqlLogicalOperatorType::CALL:
+      throw InternalException("Nested GQL projection in MATCH pipeline");
     }
-  }
-  for (idx_t left = 0; left < edge_bindings.size(); left++) {
-    for (idx_t right = left + 1; right < edge_bindings.size(); right++) {
-      filters.push_back(
-          NotEqual(Column(identities[edge_bindings[left]].table_alias,
-                          graph.edge.key_column),
-                   Column(identities[edge_bindings[right]].table_alias,
-                          graph.edge.key_column)));
-    }
-  }
-  for (const auto &pattern : match.patterns) {
-    if (pattern.optional_stage > 0 && !match.modifiers.optional) {
-      continue;
-    }
-    for (idx_t element_index = 1; element_index < pattern.elements.size();
-         element_index += 2) {
-      const auto &left = pattern.elements[element_index - 1];
-      const auto &edge = pattern.elements[element_index];
-      const auto &right = pattern.elements[element_index + 1];
-      auto edge_alias = identities[edge.binding_index].table_alias;
-      filters.push_back(
-          Equal(Column(edge_alias, edge.reverse ? graph.edge_target_column
-                                                : graph.edge_source_column),
-                Column(identities[left.binding_index].table_alias,
-                       graph.vertex.key_column)));
-      filters.push_back(
-          Equal(Column(edge_alias, edge.reverse ? graph.edge_source_column
-                                                : graph.edge_target_column),
-                Column(identities[right.binding_index].table_alias,
-                       graph.vertex.key_column)));
-    }
-  }
-  for (const auto &predicate : match.predicates) {
-    filters.push_back(LowerExpression(predicate, property_aliases, identities,
-                                      GqlTypeId::BOOLEAN));
-  }
+    throw InternalException("Unknown GQL logical operator");
+  };
+  auto pipeline = build_pipeline(build_pipeline, match.root);
 
   auto select = make_uniq<SelectNode>();
-  select->from_table = std::move(from);
-  select->where_clause = And(std::move(filters));
+  select->from_table = std::move(pipeline.from);
+  select->where_clause = And(std::move(pipeline.filters));
   AppendProjections(*select, match.projections, match.projection_names,
                     property_aliases, identities, graph, match.binding_types);
   return FinalizeMatchSelect(std::move(select), match.projections,
@@ -1820,25 +1752,31 @@ RelationalMatchBindReplace(ClientContext &context,
 }
 
 TableFunction GqlRelationalMatchFunction() {
-  TableFunction function(
-      "gql_match_relational",
-      {LogicalType::LIST(LogicalType::UBIGINT),
-       LogicalType::LIST(LogicalType::UTINYINT),
-       LogicalType::LIST(LogicalType::UBIGINT),
-       LogicalType::LIST(LogicalType::VARCHAR),
-       LogicalType::LIST(LogicalType::BOOLEAN),
-       LogicalType::LIST(LogicalType::BOOLEAN),
-       LogicalType::LIST(LogicalType::UBIGINT),
-       LogicalType::LIST(GqlExpressionProgramType()),
-       LogicalType::LIST(LogicalType::VARCHAR),
-       LogicalType::LIST(GqlExpressionProgramType()),
-       LogicalType::LIST(GqlExpressionProgramType()),
-       LogicalType::LIST(LogicalType::UBIGINT), LogicalType::BOOLEAN,
-       LogicalType::BOOLEAN, LogicalType::LIST(LogicalType::UBIGINT),
-       LogicalType::LIST(LogicalType::BOOLEAN),
-       LogicalType::LIST(LogicalType::UTINYINT), LogicalType::BOOLEAN,
-       LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT},
-      nullptr, nullptr);
+  TableFunction function("gql_match_relational",
+                         {LogicalType::UTINYINT,
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::UTINYINT),
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::VARCHAR),
+                          LogicalType::LIST(LogicalType::BOOLEAN),
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::UTINYINT),
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::UBIGINT,
+                          LogicalType::LIST(GqlExpressionProgramType()),
+                          LogicalType::LIST(LogicalType::VARCHAR),
+                          LogicalType::LIST(GqlExpressionProgramType()),
+                          LogicalType::BOOLEAN,
+                          LogicalType::LIST(LogicalType::UBIGINT),
+                          LogicalType::LIST(LogicalType::BOOLEAN),
+                          LogicalType::LIST(LogicalType::UTINYINT),
+                          LogicalType::BOOLEAN,
+                          LogicalType::UBIGINT,
+                          LogicalType::BOOLEAN,
+                          LogicalType::UBIGINT},
+                         nullptr, nullptr);
   function.bind_replace = RelationalMatchBindReplace;
   return function;
 }
@@ -1854,7 +1792,6 @@ TableFunction GqlRecursiveMatchFunction() {
                           LogicalType::LIST(LogicalType::VARCHAR),
                           LogicalType::BOOLEAN,
                           LogicalType::UBIGINT,
-                          LogicalType::BOOLEAN,
                           LogicalType::LIST(GqlExpressionProgramType()),
                           LogicalType::LIST(LogicalType::VARCHAR),
                           LogicalType::LIST(GqlExpressionProgramType()),

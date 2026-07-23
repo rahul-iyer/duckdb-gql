@@ -15,6 +15,7 @@ vector<unique_ptr<SQLStatement>>
 GqlLowerMatchInsert(const vector<GqlLogicalPlan> &plans);
 vector<unique_ptr<SQLStatement>> GqlLowerMerge(const GqlMergeStatement &merge);
 TableFunction GqlMutationTargetFunction();
+TableFunction GqlClearPropertiesSourceFunction();
 TableFunction GqlMutationGraphFunction();
 TableFunction GqlInsertTargetFunction();
 TableFunction GqlInsertIdsFunction();

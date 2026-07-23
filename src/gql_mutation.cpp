@@ -241,22 +241,6 @@ static unique_ptr<SQLStatement> DropSnapshot(const string &snapshot_name) {
   return std::move(drop);
 }
 
-static unique_ptr<ParsedExpression> NonNullSnapshotValue(idx_t mutation_index) {
-  auto value = Column("gql_mutation_match", ValueColumn(mutation_index));
-  auto result = make_uniq<CaseExpression>();
-  CaseCheck check;
-  check.when_expr = make_uniq<OperatorExpression>(
-      ExpressionType::OPERATOR_IS_NULL, value->Copy());
-  vector<unique_ptr<ParsedExpression>> arguments;
-  arguments.push_back(
-      Constant(Value("GQL SET property expression produced NULL")));
-  check.then_expr =
-      make_uniq<FunctionExpression>("error", std::move(arguments));
-  result->case_checks.push_back(std::move(check));
-  result->else_expr = std::move(value);
-  return std::move(result);
-}
-
 static unique_ptr<SQLStatement> SetProperty(const string &snapshot_name,
                                             idx_t mutation_index,
                                             const GqlBoundMutation &mutation) {
@@ -265,7 +249,8 @@ static unique_ptr<SQLStatement> SetProperty(const string &snapshot_name,
   update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
   update->set_info = make_uniq<UpdateSetInfo>();
   update->set_info->columns.push_back(mutation.name);
-  update->set_info->expressions.push_back(NonNullSnapshotValue(mutation_index));
+  update->set_info->expressions.push_back(
+      Column("gql_mutation_match", ValueColumn(mutation_index)));
   update->set_info->condition =
       Equal(Column("gql_mutation_target", KeyColumn(mutation)),
             Column("gql_mutation_match", TargetColumn(mutation_index)));
@@ -287,6 +272,28 @@ static unique_ptr<SQLStatement> SetLabel(const string &snapshot_name,
       Equal(Column("gql_mutation_target", KeyColumn(mutation)),
             Column("gql_mutation_match", TargetColumn(mutation_index)));
   return std::move(update);
+}
+
+static unique_ptr<SQLStatement> ClearProperties(const string &snapshot_name, idx_t mutation_index,
+                                                const GqlBoundMutation &mutation) {
+	auto statement = make_uniq<MergeIntoStatement>();
+	statement->target = MutationTarget(mutation, "DELETE", "gql_clear_target");
+	statement->source = FunctionTable(
+	    "gql_clear_properties_source",
+	    {Value(ElementKind(mutation)), Value(snapshot_name), Value(TargetColumn(mutation_index))}, "gql_clear_source");
+	statement->join_condition =
+	    Equal(Column("gql_clear_target", KeyColumn(mutation)), Column("gql_clear_source", KeyColumn(mutation)));
+
+	// The bind replacement exposes the key unchanged and every mapped property
+	// as a typed NULL. UPDATE BY NAME therefore adapts to the managed wide-table
+	// schema without making the parser-side mutation plan depend on catalog
+	// metadata. Including the unchanged key also keeps an empty property map a
+	// valid no-op update for element tables with no mapped properties.
+	auto action = make_uniq<MergeIntoAction>();
+	action->action_type = MergeActionType::MERGE_UPDATE;
+	action->column_order = InsertColumnOrder::INSERT_BY_NAME;
+	statement->actions[MergeActionCondition::WHEN_MATCHED].push_back(std::move(action));
+	return std::move(statement);
 }
 
 static unique_ptr<SQLStatement>
@@ -381,7 +388,7 @@ DeleteElement(const string &snapshot_name, idx_t mutation_index,
 }
 
 static unique_ptr<SQLStatement>
-UpdateGraphVersion(const string &snapshot_name) {
+UpdateGraphVersion(const string &snapshot_name, idx_t mutation_count = 0) {
   auto update = make_uniq<UpdateStatement>();
   auto graph_table = make_uniq<BaseTableRef>();
   graph_table->schema_name = "gql_internal";
@@ -402,6 +409,17 @@ UpdateGraphVersion(const string &snapshot_name) {
   auto exists_select = make_uniq<SelectNode>();
   exists_select->from_table = Snapshot(snapshot_name, "gql_mutation_match");
   exists_select->select_list.push_back(Constant(Value::INTEGER(1)));
+  if (mutation_count > 0) {
+    unique_ptr<ParsedExpression> has_target;
+    for (idx_t mutation_index = 0; mutation_index < mutation_count; mutation_index++) {
+      auto present = make_uniq<OperatorExpression>(
+          ExpressionType::OPERATOR_IS_NOT_NULL,
+          Column("gql_mutation_match", TargetColumn(mutation_index)));
+      has_target = has_target ? Or(std::move(has_target), std::move(present))
+                              : std::move(present);
+    }
+    exists_select->where_clause = std::move(has_target);
+  }
   auto exists_statement = make_uniq<SelectStatement>();
   exists_statement->node = std::move(exists_select);
   auto exists = make_uniq<SubqueryExpression>();
@@ -528,6 +546,62 @@ TableFunction GqlMutationTargetFunction() {
       nullptr, nullptr);
   function.bind_replace = MutationTargetBindReplace;
   return function;
+}
+
+static unique_ptr<TableRef> ClearPropertiesSourceBindReplace(ClientContext &context, TableFunctionBindInput &input) {
+	if (input.inputs.size() != 3 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull()) {
+		throw BinderException("GQL property-map replacement requires element kind, "
+		                      "snapshot, and target column");
+	}
+	auto graph = LoadSelectedGraph(context);
+	auto kind = input.inputs[0].GetValue<string>();
+	auto snapshot_name = input.inputs[1].GetValue<string>();
+	auto target_column = input.inputs[2].GetValue<string>();
+	const auto &table = kind == "EDGE"     ? graph.edge
+	                    : kind == "VERTEX" ? graph.vertex
+	                                       : throw BinderException("Invalid GQL element kind");
+	auto expected_key = kind == "EDGE" ? "__gql_edge_id" : "__gql_id";
+	if (!StringUtil::CIEquals(table.key_column, expected_key)) {
+		throw NotImplementedException("Managed GQL property-map replacement requires canonical %s keys", expected_key);
+	}
+
+	auto target = make_uniq<BaseTableRef>();
+	target->catalog_name = table.catalog_name;
+	target->schema_name = table.schema_name;
+	target->table_name = table.table_name;
+	target->alias = "gql_clear_input";
+	auto snapshot = Snapshot(snapshot_name, "gql_clear_snapshot");
+	auto join = make_uniq<JoinRef>(JoinRefType::REGULAR);
+	join->left = std::move(target);
+	join->right = std::move(snapshot);
+	join->type = JoinType::INNER;
+	join->condition = Equal(Column("gql_clear_input", table.key_column), Column("gql_clear_snapshot", target_column));
+
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(join);
+	select->modifiers.push_back(make_uniq<DistinctModifier>());
+	auto key = Column("gql_clear_input", table.key_column);
+	key->SetAlias(table.key_column);
+	select->select_list.push_back(std::move(key));
+	case_insensitive_set_t physical_properties;
+	for (const auto &entry : table.property_columns) {
+		if (!physical_properties.insert(entry.second).second) {
+			continue;
+		}
+		auto value = Constant(Value());
+		value->SetAlias(entry.second);
+		select->select_list.push_back(std::move(value));
+	}
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement));
+}
+
+TableFunction GqlClearPropertiesSourceFunction() {
+	TableFunction function("gql_clear_properties_source",
+	                       {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}, nullptr, nullptr);
+	function.bind_replace = ClearPropertiesSourceBindReplace;
+	return function;
 }
 
 TableFunction GqlMutationGraphFunction() {
@@ -1136,51 +1210,87 @@ GqlLowerMutation(const vector<GqlLogicalPlan> &plans) {
     throw InternalException("GQL mutation lowering requires a bound mutation");
   }
   static atomic<uint64_t> next_command_id(0);
-  auto command_id =
-      "gql_mutation_" +
-      to_string(next_command_id.fetch_add(1, std::memory_order_relaxed));
+  auto command_id = "gql_mutation_" + to_string(next_command_id.fetch_add(1, std::memory_order_relaxed));
   auto snapshot_name = "_" + command_id;
   vector<unique_ptr<SQLStatement>> statements;
   statements.push_back(ControlStatement(command_id, true));
   statements.push_back(CreateSnapshot(plans, snapshot_name));
-  for (idx_t mutation_index = 0; mutation_index < plans[0].mutations.size();
-       mutation_index++) {
-    const auto &mutation = plans[0].mutations[mutation_index];
-    switch (mutation.type) {
-    case GqlMutationType::SET_PROPERTY:
-      statements.push_back(
-          SetProperty(snapshot_name, mutation_index, mutation));
-      break;
-    case GqlMutationType::SET_LABEL:
-      statements.push_back(SetLabel(snapshot_name, mutation_index, mutation));
-      break;
-    case GqlMutationType::REMOVE_PROPERTY:
-      statements.push_back(
-          RemoveProperty(snapshot_name, mutation_index, mutation));
-      break;
-    case GqlMutationType::REMOVE_LABEL:
-      statements.push_back(
-          RemoveLabel(snapshot_name, mutation_index, mutation));
-      break;
-    case GqlMutationType::DELETE_ELEMENT: {
-      auto node = mutation.binding_type.id == GqlTypeId::NODE;
-      if (node && mutation.detach) {
+  auto delete_program = plans[0].mutations[0].type == GqlMutationType::DELETE_ELEMENT;
+  bool changes_graph = false;
+  if (delete_program) {
+	  // DELETE item order is not execution order. Remove every explicitly
+	  // targeted edge first, then evaluate node constraints against the
+	  // post-edge-delete topology, and only then remove nodes. A later
+	  // constraint failure rolls the earlier edge deletes back with the command.
+	  for (idx_t mutation_index = 0; mutation_index < plans[0].mutations.size(); mutation_index++) {
+		  const auto &mutation = plans[0].mutations[mutation_index];
+		  if (mutation.type != GqlMutationType::DELETE_ELEMENT) {
+			  throw InternalException("GQL DELETE program contains a non-delete mutation");
+		  }
+		  if (mutation.binding_type.id == GqlTypeId::EDGE) {
+			  statements.push_back(DeleteElement(snapshot_name, mutation_index, mutation));
+		  }
+	  }
+	  for (idx_t mutation_index = 0; mutation_index < plans[0].mutations.size(); mutation_index++) {
+		  const auto &mutation = plans[0].mutations[mutation_index];
+		  if (mutation.binding_type.id != GqlTypeId::NODE) {
+			  continue;
+		  }
+		  statements.push_back(mutation.detach ? DeleteIncidentEdges(snapshot_name, mutation_index)
+			                                   : RejectAttachedNodeDelete(snapshot_name, mutation_index));
+	  }
+	  for (idx_t mutation_index = 0; mutation_index < plans[0].mutations.size(); mutation_index++) {
+		  const auto &mutation = plans[0].mutations[mutation_index];
+		  if (mutation.binding_type.id == GqlTypeId::NODE) {
+                    statements.push_back(
+                        DeleteElement(snapshot_name, mutation_index, mutation));
+                  }
+          }
+          changes_graph = true;
+  } else {
+    for (idx_t mutation_index = 0; mutation_index < plans[0].mutations.size();
+         mutation_index++) {
+      const auto &mutation = plans[0].mutations[mutation_index];
+      switch (mutation.type) {
+      case GqlMutationType::SET_PROPERTY:
         statements.push_back(
-            DeleteIncidentEdges(snapshot_name, mutation_index));
-      } else if (node) {
+            SetProperty(snapshot_name, mutation_index, mutation));
+        changes_graph = true;
+        break;
+      case GqlMutationType::SET_PROPERTIES:
+        throw InternalException(
+            "Unexpanded GQL property-map mutation reached physical lowering");
+      case GqlMutationType::SET_LABEL:
+        statements.push_back(SetLabel(snapshot_name, mutation_index, mutation));
+        changes_graph = true;
+        break;
+      case GqlMutationType::CLEAR_PROPERTIES:
         statements.push_back(
-            RejectAttachedNodeDelete(snapshot_name, mutation_index));
+            ClearProperties(snapshot_name, mutation_index, mutation));
+        changes_graph = true;
+        break;
+      case GqlMutationType::MERGE_PROPERTIES:
+        break;
+      case GqlMutationType::REMOVE_PROPERTY:
+        statements.push_back(
+            RemoveProperty(snapshot_name, mutation_index, mutation));
+        changes_graph = true;
+        break;
+      case GqlMutationType::REMOVE_LABEL:
+        statements.push_back(
+            RemoveLabel(snapshot_name, mutation_index, mutation));
+        changes_graph = true;
+        break;
+      case GqlMutationType::DELETE_ELEMENT:
+        throw InternalException(
+            "GQL non-delete program contains a delete mutation");
       }
-      statements.push_back(
-          DeleteElement(snapshot_name, mutation_index, mutation));
-      break;
-    }
-    case GqlMutationType::CLEAR_PROPERTIES:
-      throw NotImplementedException(
-          "SET variable = {...} over managed wide tables");
     }
   }
-  statements.push_back(UpdateGraphVersion(snapshot_name));
+  if (changes_graph) {
+    statements.push_back(
+        UpdateGraphVersion(snapshot_name, plans[0].mutations.size()));
+  }
   statements.push_back(DropSnapshot(snapshot_name));
   statements.push_back(ControlStatement(command_id, false));
   statements.push_back(ResultStatement());

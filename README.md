@@ -34,7 +34,8 @@ RETURN a.name AS source_name,
 - Exact and ranged anonymous edge quantifiers plus one anonymous unbounded directed `*`, `+`, or `{n,}` factor.
 - Native variable-length execution through DuckDB recursive CTEs with different-edge/trail semantics.
 - Common numeric and string functions lowered to DuckDB expressions.
-- Optional prepared CSR execution for eligible unbounded paths through `MATCH /*+ CSR */`.
+- Explicit CSR-backed BFS, DFS, PageRank, weak/strong components, and triangle
+  counting exposed through native DuckDB `CALL` statements.
 
 Native DuckDB relations are authoritative. Fixed MATCH and the default variable-length path implementation lower to ordinary DuckDB scans, joins, filters, projections, aggregation, ordering, and recursive CTE operators.
 
@@ -115,26 +116,99 @@ COPY GRAPH social FROM (
 ) FORMAT NEO4J OPTIONS (VALIDATE FALSE);
 ```
 
-## CSR
+## CSR algorithms
 
-Native DuckDB execution is the correctness default. CSR construction is explicit and offline:
+`MATCH` always uses native DuckDB relational or recursive execution. CSR is a
+separate, derived algorithm substrate whose construction is explicit:
 
-```sql
-SELECT * FROM gql_build_csr('social');
+```gql
+CALL gql_build_csr('social');
 
-MATCH /*+ CSR */ (a:Person)-[:KNOWS]->+(b:Person)
-WHERE a.name = 'Ada'
-RETURN b.name;
+CALL algo.bfs('social', 1, direction := 'out', max_depth := 4);
+CALL algo.dfs('social', 1, edge_label := 'knows');
+CALL algo.sssp('social', 1, direction := 'out');
+CALL algo.pagerank(
+    'social', damping := 0.85, max_iterations := 100,
+    tolerance := 1e-8, vertex_label := 'person', edge_label := 'knows'
+);
+CALL algo.wcc('social', edge_label := 'knows');
+CALL algo.scc('social');
+CALL algo.degree('social', vertex_label := 'person');
+CALL algo.closeness('social', direction := 'out');
+CALL algo.triangle_count('social')
+YIELD vertex_id, triangle_count, local_clustering_coefficient
+RETURN vertex_id, triangle_count, local_clustering_coefficient
+ORDER BY triangle_count DESC
+LIMIT 20;
+
+MATCH (seed:Person)
+FILTER seed.region = 'west'
+CALL algo.bfs('social', element_id(seed), 'person')
+YIELD vertex_id, depth, parent_vertex_id
+RETURN vertex_id, depth, parent_vertex_id;
 ```
 
-The CSR cache is connection-local. Rebuild it after direct SQL topology changes. Explicit caller transactions are currently ineligible because transaction-local CSR deltas are not implemented.
+`algo.bfs` and `algo.dfs` return `vertex_id`, `depth`, `parent_vertex_id`,
+`edge_id`, and `visit_order`. `algo.sssp` is the exactly-one-source,
+unweighted shortest-path contract and returns `distance` plus its predecessor
+tree and settled order. These traversals accept `target_vertex_id` for early
+termination and `direction := 'in'|'out'|'both'`.
+
+`algo.degree` returns exact outgoing, incoming, and total CSR edge-incidence
+counts. Parallel edges count independently; a self-loop contributes once to
+both incoming and outgoing degree. `algo.closeness` computes exact generalized
+normalized closeness and returns `reachable_count` and `distance_sum` beside
+the score. It defaults to outbound directed distances and accepts
+`direction := 'in'|'out'|'both'`. Exact closeness costs `O(V(V+E))` on an
+unweighted graph and is intended for graphs where that work is acceptable.
+
+`algo.pagerank` returns each vertex's score plus the iteration count and
+convergence flag. `algo.wcc` and `algo.scc` return deterministic component IDs
+and sizes. `algo.triangle_count` returns per-vertex counts, simple-projection
+degree, local clustering coefficient, and the graph-wide triangle count.
+`algo.lcc` implements the direction-preserving LDBC Graphalytics coefficient:
+neighbors are the unique union of incoming and outgoing neighbors, while arcs
+between neighbors retain their direction. All ten algorithms accept
+independently optional `vertex_label` and `edge_label`
+filters. With neither filter, the full CSR is used. `vertex_label` forms an
+induced vertex projection: only matching vertices are emitted and edges to
+nonmatching vertices are excluded. `edge_label` then filters edges within that
+projection. Standalone table-function calls use named arguments; the typed GQL
+procedure pipeline accepts the optional vertex label as its trailing positional
+configuration argument.
+
+Algorithm result composition is a GQL `CALL ... YIELD ... RETURN` pipeline.
+`CALL` is a generic logical operator with a declared input mode. `bfs` and
+`dfs` use `BATCH`, so the matched element IDs become one deduplicated,
+deterministically ordered frontier. SSSP also uses `BATCH` but enforces exactly
+one distinct source. PageRank, WCC, SCC, degree, closeness, LCC, and triangle
+counting use `NONE`: their upstream relation remains a sequencing child in the
+same plan, but the algorithm executes once after that child is exhausted. The
+compiler lowers both modes to one DuckDB table-in/out node, keeping `MATCH`,
+algorithm execution, `YIELD`, and `RETURN` in one statement transaction.
+
+The procedure boundary replaces the upstream row set. Only names listed by
+`YIELD` remain visible after a blocking `CALL`; this avoids inventing a false
+row-by-row correlation between a whole-frontier result and its input rows.
+Customer queries never need the internal table function or SQL `SELECT FROM`
+syntax.
+
+The CSR cache is connection-local and version checked. Construction streams
+DuckDB chunks into exactly allocated outgoing/incoming arrays through a linear
+count/prefix/scatter build, with a dense managed-ID fast path. Rebuild it after
+a graph mutation or direct SQL topology change. Explicit caller transactions
+are currently ineligible because transaction-local CSR deltas are not
+implemented. `MATCH /*+ CSR */` is rejected: CSR is not a query-plan backend.
+Weighted SSSP is not yet exposed: it requires an explicitly configured edge
+weight array in the immutable CSR snapshot rather than per-call property
+lookups against canonical tables.
 
 Inspection functions:
 
 ```sql
 SELECT * FROM gql_graphs();
-SELECT * FROM gql_build_csr('social');
-SELECT * FROM gql_neighbors('social', 1, 'out');
+CALL gql_build_csr('social');
+CALL gql_neighbors('social', 1, 'out');
 SELECT * FROM gql_csr_stats('social');
 ```
 
