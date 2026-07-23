@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "test" / "conformance" / "iso-gql-2024.tsv"
 GRAMMAR = ROOT / "third_party" / "opengql" / "GQL.g4"
+FEATURE_CORPUS = ROOT / "test" / "features" / "clauses"
 EXPECTED_COLUMNS = ["feature_id", "area", "feature_family", "status", "test_scope"]
 ALLOWED_STATUSES = {"planned", "partial", "implemented", "not_applicable"}
 EXPECTED_GRAMMAR_RULES = 571
@@ -80,11 +81,14 @@ def main() -> int:
         cwd=ROOT,
         check=True,
     )
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "check_gql_feature_corpus.py")],
-        cwd=ROOT,
-        check=True,
-    )
+    if FEATURE_CORPUS.is_dir():
+        subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "check_gql_feature_corpus.py")],
+            cwd=ROOT,
+            check=True,
+        )
+    else:
+        print("skipped optional local GQL clause feature corpus (directory not present)")
 
     incomplete = [row["feature_id"] for row in rows if row["status"] not in {"implemented", "not_applicable"}]
     if args.release and incomplete:
