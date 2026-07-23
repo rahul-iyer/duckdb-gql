@@ -37,7 +37,7 @@
 # COPY GRAPH port_withwhere1_33 FROM (
 #     VERTICES '__TEST_DIR__/port_withwhere1_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withwhere1_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withwhere1_33
@@ -89,7 +89,7 @@
 # COPY GRAPH port_withwhere1_53 FROM (
 #     VERTICES '__TEST_DIR__/port_withwhere1_53_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withwhere1_53_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withwhere1_53
@@ -143,7 +143,7 @@
 # COPY GRAPH port_withwhere1_73 FROM (
 #     VERTICES '__TEST_DIR__/port_withwhere1_73_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withwhere1_73_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withwhere1_73
@@ -197,7 +197,7 @@
 # COPY GRAPH port_withwhere1_92 FROM (
 #     VERTICES '__TEST_DIR__/port_withwhere1_92_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withwhere1_92_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withwhere1_92

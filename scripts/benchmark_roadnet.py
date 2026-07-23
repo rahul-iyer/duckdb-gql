@@ -129,7 +129,7 @@ def setup_sql(
 COPY GRAPH roadnet FROM (
     VERTICES {sql_literal(nodes)},
     EDGES {sql_literal(edges)}
-) FORMAT NEO4J OPTIONS (VALIDATE {validate})
+) FORMAT GRAPH OPTIONS (VALIDATE {validate})
 """
         if timed:
             sql += ".timer on\n"

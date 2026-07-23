@@ -37,7 +37,7 @@ query ITII
 COPY GRAPH algo_graph FROM (
     VERTICES '__TEST_DIR__/gql_csr_algo_vertices.csv',
     EDGES '__TEST_DIR__/gql_csr_algo_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 ----
 true	algo_graph	6	6
 

@@ -135,7 +135,7 @@ The catalog never stores one row per vertex property or label membership.
 
 ## Bulk load
 
-`COPY GRAPH` accepts Neo4j semantic headers in CSV/Parquet inputs. Loading uses DuckDB's native readers and set-at-a-time SQL:
+`COPY GRAPH` accepts graph-header semantic headers in CSV/Parquet inputs. Loading uses DuckDB's native readers and set-at-a-time SQL:
 
 1. Scan each file through `read_csv` or `read_parquet` into temporary staging tables.
 2. Parse and validate semantic headers.

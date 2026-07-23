@@ -889,7 +889,7 @@ public:
     auto edge_path = ParseString();
     ExpectCharacter(')');
     ExpectKeyword("FORMAT");
-    ExpectKeyword("NEO4J");
+    ExpectKeyword("GRAPH");
     bool validate = true;
     SkipWhitespace();
     if (!AtEnd()) {

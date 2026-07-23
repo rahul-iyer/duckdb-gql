@@ -39,7 +39,7 @@
 # COPY GRAPH port_returnorderby2_33 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_33
@@ -94,7 +94,7 @@
 # COPY GRAPH port_returnorderby2_54 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_54_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_54_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_54
@@ -150,7 +150,7 @@
 # COPY GRAPH port_returnorderby2_75 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_75_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_75_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_75
@@ -204,7 +204,7 @@
 # COPY GRAPH port_returnorderby2_98 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_98_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_98_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_98
@@ -258,7 +258,7 @@
 # COPY GRAPH port_returnorderby2_119 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_119_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_119_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_119
@@ -309,7 +309,7 @@
 # COPY GRAPH port_returnorderby2_136 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_136_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_136_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_136
@@ -360,7 +360,7 @@
 # COPY GRAPH port_returnorderby2_155 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_155_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_155_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_155
@@ -408,7 +408,7 @@
 # COPY GRAPH port_returnorderby2_172 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_172_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_172_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_172
@@ -459,7 +459,7 @@
 # COPY GRAPH port_returnorderby2_190 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_190_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_190_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_190
@@ -508,7 +508,7 @@
 # COPY GRAPH port_returnorderby2_208 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_208_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_208_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_208
@@ -560,7 +560,7 @@
 # COPY GRAPH port_returnorderby2_226 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_226_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_226_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_226
@@ -617,7 +617,7 @@
 # COPY GRAPH port_returnorderby2_243 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_243_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_243_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_243
@@ -672,7 +672,7 @@
 # COPY GRAPH port_returnorderby2_266 FROM (
 #     VERTICES '__TEST_DIR__/port_returnorderby2_266_nodes.csv',
 #     EDGES '__TEST_DIR__/port_returnorderby2_266_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_returnorderby2_266

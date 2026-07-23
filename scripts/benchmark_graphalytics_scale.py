@@ -195,7 +195,7 @@ def run_workloads(
         (
             "COPY GRAPH bench_graph FROM ("
             f"VERTICES {sql_literal(nodes)}, EDGES {sql_literal(edges)}"
-            ") FORMAT NEO4J;"
+            ") FORMAT GRAPH;"
         ),
         "SESSION SET GRAPH bench_graph;",
         f".print {MARKER_PREFIX}csr_build",

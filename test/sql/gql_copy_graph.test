@@ -30,7 +30,7 @@ query ITII
 COPY GRAPH managed_native FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
-) FORMAT NEO4J OPTIONS (VALIDATE TRUE)
+) FORMAT GRAPH OPTIONS (VALIDATE TRUE)
 ----
 true	managed_native	2	1
 
@@ -97,7 +97,7 @@ statement error
 COPY GRAPH managed_native FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 ----
 <REGEX>:.*must be empty before COPY GRAPH.*
 
@@ -116,7 +116,7 @@ statement error
 COPY GRAPH failed_native FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_bad_edges.csv'
-) FORMAT NEO4J OPTIONS (VALIDATE TRUE)
+) FORMAT GRAPH OPTIONS (VALIDATE TRUE)
 ----
 <REGEX>:.*relationship endpoints must reference imported node.*
 
@@ -146,7 +146,7 @@ statement error
 COPY GRAPH duplicate_native FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_duplicate_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 ----
 <REGEX>:.*node :ID values must be unique.*
 
@@ -186,7 +186,7 @@ statement error
 COPY GRAPH explicit_copy FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 ----
 <REGEX>:.*not eligible inside an explicit transaction.*
 
@@ -216,7 +216,7 @@ statement ok
 COPY GRAPH managed_parquet FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_nodes.parquet',
     EDGES '__TEST_DIR__/gql_copy_graph_edges.parquet'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH managed_parquet

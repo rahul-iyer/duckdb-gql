@@ -127,7 +127,7 @@ def copy_graph_sql(nodes: Path, edges: Path, validate: bool) -> str:
 COPY GRAPH roadnet FROM (
     VERTICES {sql_literal(nodes)},
     EDGES {sql_literal(edges)}
-) FORMAT NEO4J OPTIONS (VALIDATE {validation})
+) FORMAT GRAPH OPTIONS (VALIDATE {validation})
 """
 
 
@@ -300,7 +300,7 @@ def main() -> None:
         "--source", type=Path, default=Path("data/roadnet-ca/roadNet-CA.txt.gz")
     )
     parser.add_argument(
-        "--prepared-dir", type=Path, default=Path("data/roadnet-ca/neo4j")
+        "--prepared-dir", type=Path, default=Path("data/roadnet-ca/graph-import")
     )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--runs", type=int, default=10)
@@ -367,7 +367,7 @@ def main() -> None:
         "runs": args.runs,
         "warmups": args.warmups,
         "dataset": {
-            "name": f"{args.dataset_name} Neo4j CSV pair",
+            "name": f"{args.dataset_name} graph-header CSV pair",
             "source": str(source),
             "vertices": str(nodes),
             "edges": str(edges),

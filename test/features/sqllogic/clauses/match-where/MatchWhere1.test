@@ -42,7 +42,7 @@
 # COPY GRAPH port_matchwhere1_33 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_33
@@ -89,7 +89,7 @@
 # COPY GRAPH port_matchwhere1_50 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_50_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_50_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_50
@@ -137,7 +137,7 @@
 # COPY GRAPH port_matchwhere1_66 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_66_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_66_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_66
@@ -192,7 +192,7 @@
 # COPY GRAPH port_matchwhere1_83 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_83_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_83_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_83
@@ -247,7 +247,7 @@
 # COPY GRAPH port_matchwhere1_103 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_103_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_103_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_103
@@ -297,7 +297,7 @@
 # COPY GRAPH port_matchwhere1_120 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_120_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_120_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_120
@@ -351,7 +351,7 @@
 # COPY GRAPH port_matchwhere1_139 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_139_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_139_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_139
@@ -409,7 +409,7 @@
 # COPY GRAPH port_matchwhere1_160 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_160_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_160_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_160
@@ -459,7 +459,7 @@
 # COPY GRAPH port_matchwhere1_177 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_177_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_177_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_177
@@ -512,7 +512,7 @@
 # COPY GRAPH port_matchwhere1_196 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_196_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_196_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_196
@@ -568,7 +568,7 @@
 # COPY GRAPH port_matchwhere1_216 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_216_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_216_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_216
@@ -624,7 +624,7 @@
 # COPY GRAPH port_matchwhere1_239 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_239_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_239_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_239
@@ -674,7 +674,7 @@
 # COPY GRAPH port_matchwhere1_256 FROM (
 #     VERTICES '__TEST_DIR__/port_matchwhere1_256_nodes.csv',
 #     EDGES '__TEST_DIR__/port_matchwhere1_256_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_matchwhere1_256

@@ -39,7 +39,7 @@
 # COPY GRAPH port_withskiplimit3_62 FROM (
 #     VERTICES '__TEST_DIR__/port_withskiplimit3_62_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withskiplimit3_62_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withskiplimit3_62
@@ -98,7 +98,7 @@
 # COPY GRAPH port_withskiplimit3_87 FROM (
 #     VERTICES '__TEST_DIR__/port_withskiplimit3_87_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withskiplimit3_87_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withskiplimit3_87
@@ -171,7 +171,7 @@
 # COPY GRAPH port_withskiplimit3_115 FROM (
 #     VERTICES '__TEST_DIR__/port_withskiplimit3_115_nodes.csv',
 #     EDGES '__TEST_DIR__/port_withskiplimit3_115_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_withskiplimit3_115

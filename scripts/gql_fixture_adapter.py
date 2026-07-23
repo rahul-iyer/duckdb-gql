@@ -605,7 +605,7 @@ def compile_fixture_sql(text: str, fixture_name: str) -> str:
                 f"statement ok\nCOPY GRAPH {name} FROM (\n"
                 f"    VERTICES {quote_sql_string(node_path)},\n"
                 f"    EDGES {quote_sql_string(edge_path)}\n"
-                ") FORMAT NEO4J"
+                ") FORMAT GRAPH"
             ),
             f"statement ok\nSESSION SET GRAPH {name}",
         ]

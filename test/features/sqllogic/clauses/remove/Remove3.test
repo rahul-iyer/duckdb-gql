@@ -35,7 +35,7 @@
 # COPY GRAPH port_remove3_33 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_33
@@ -83,7 +83,7 @@
 # COPY GRAPH port_remove3_51 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_51_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_51_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_51
@@ -135,7 +135,7 @@
 # COPY GRAPH port_remove3_69 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_69_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_69_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_69
@@ -193,7 +193,7 @@
 # COPY GRAPH port_remove3_93 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_93_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_93_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_93
@@ -254,7 +254,7 @@
 # COPY GRAPH port_remove3_120 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_120_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_120_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_120
@@ -313,7 +313,7 @@
 # COPY GRAPH port_remove3_145 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_145_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_145_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_145
@@ -369,7 +369,7 @@
 # COPY GRAPH port_remove3_167 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_167_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_167_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_167
@@ -422,7 +422,7 @@
 # COPY GRAPH port_remove3_190 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_190_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_190_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_190
@@ -470,7 +470,7 @@
 # COPY GRAPH port_remove3_208 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_208_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_208_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_208
@@ -522,7 +522,7 @@
 # COPY GRAPH port_remove3_226 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_226_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_226_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_226
@@ -580,7 +580,7 @@
 # COPY GRAPH port_remove3_250 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_250_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_250_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_250
@@ -641,7 +641,7 @@
 # COPY GRAPH port_remove3_277 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_277_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_277_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_277
@@ -700,7 +700,7 @@
 # COPY GRAPH port_remove3_302 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_302_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_302_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_302
@@ -756,7 +756,7 @@
 # COPY GRAPH port_remove3_324 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_324_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_324_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_324
@@ -812,7 +812,7 @@
 # COPY GRAPH port_remove3_347 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_347_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_347_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_347
@@ -863,7 +863,7 @@
 # COPY GRAPH port_remove3_365 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_365_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_365_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_365
@@ -926,7 +926,7 @@
 # COPY GRAPH port_remove3_383 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_383_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_383_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_383
@@ -995,7 +995,7 @@
 # COPY GRAPH port_remove3_407 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_407_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_407_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_407
@@ -1067,7 +1067,7 @@
 # COPY GRAPH port_remove3_434 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_434_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_434_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_434
@@ -1137,7 +1137,7 @@
 # COPY GRAPH port_remove3_459 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_459_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_459_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_459
@@ -1204,7 +1204,7 @@
 # COPY GRAPH port_remove3_481 FROM (
 #     VERTICES '__TEST_DIR__/port_remove3_481_nodes.csv',
 #     EDGES '__TEST_DIR__/port_remove3_481_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_remove3_481

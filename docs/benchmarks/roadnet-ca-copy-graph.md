@@ -3,7 +3,7 @@
 Measured on 2026-07-19 with the Release build on arm64 macOS, 15 DuckDB
 threads, and a warm filesystem cache. The workload contains 1,965,206
 vertices and 5,533,214 directed edges (7,498,420 graph rows) in a
-150,082,167-byte Neo4j-format CSV pair derived from SNAP `roadNet-CA`.
+150,082,167-byte graph-header CSV pair derived from SNAP `roadNet-CA`.
 Preparing that pair is offline and excluded from every measurement.
 
 The normalized EAV compatibility backend is intentionally excluded. The
@@ -41,9 +41,9 @@ The fast managed load is:
 CREATE GRAPH roadnet ANY;
 
 COPY GRAPH roadnet FROM (
-    VERTICES 'data/roadnet-ca/neo4j/nodes.csv',
-    EDGES 'data/roadnet-ca/neo4j/edges.csv'
-) FORMAT NEO4J OPTIONS (VALIDATE FALSE);
+    VERTICES 'data/roadnet-ca/graph-import/nodes.csv',
+    EDGES 'data/roadnet-ca/graph-import/edges.csv'
+) FORMAT GRAPH OPTIONS (VALIDATE FALSE);
 ```
 
 Omit `OPTIONS (VALIDATE FALSE)` to use strict validation. Fast mode should be
@@ -69,13 +69,13 @@ python3 scripts/benchmark_copy_graph.py \
   --duckdb build/release/duckdb \
   --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --source data/roadnet-ca/roadNet-CA.txt.gz \
-  --prepared-dir data/roadnet-ca/neo4j \
+  --prepared-dir data/roadnet-ca/graph-import \
   --runs 10 \
   --warmups 2 \
   --threads 15 \
   --output build/benchmarks/copy-graph-roadnet-current.json
 ```
 
-The runner creates the Neo4j CSV pair once if it is absent, before timing. The
+The runner creates the graph-header CSV pair once if it is absent, before timing. The
 ignored JSON output preserves all trial timings, database sizes, row counts,
 and process peak-RSS measurements.

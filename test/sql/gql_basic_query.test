@@ -29,7 +29,7 @@ statement ok
 COPY GRAPH basic_queries FROM (
     VERTICES '__TEST_DIR__/gql_basic_vertices.csv',
     EDGES '__TEST_DIR__/gql_basic_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH basic_queries

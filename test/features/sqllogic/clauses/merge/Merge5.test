@@ -36,7 +36,7 @@
 # COPY GRAPH port_merge5_33 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_33
@@ -87,7 +87,7 @@
 # COPY GRAPH port_merge5_51 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_51_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_51_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_51
@@ -139,7 +139,7 @@
 # COPY GRAPH port_merge5_69 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_69_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_69_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_69
@@ -212,7 +212,7 @@
 # COPY GRAPH port_merge5_103 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_103_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_103_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_103
@@ -264,7 +264,7 @@
 # COPY GRAPH port_merge5_122 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_122_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_122_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_122
@@ -318,7 +318,7 @@
 # COPY GRAPH port_merge5_142 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_142_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_142_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_142
@@ -368,7 +368,7 @@
 # COPY GRAPH port_merge5_161 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_161_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_161_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_161
@@ -418,7 +418,7 @@
 # COPY GRAPH port_merge5_180 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_180_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_180_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_180
@@ -510,7 +510,7 @@
 # COPY GRAPH port_merge5_229 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_229_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_229_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_229
@@ -564,7 +564,7 @@
 # COPY GRAPH port_merge5_247 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_247_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_247_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_247
@@ -642,7 +642,7 @@
 # COPY GRAPH port_merge5_287 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_287_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_287_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_287
@@ -690,7 +690,7 @@
 # COPY GRAPH port_merge5_305 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_305_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_305_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_305
@@ -740,7 +740,7 @@
 # COPY GRAPH port_merge5_325 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_325_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_325_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_325
@@ -789,7 +789,7 @@
 # COPY GRAPH port_merge5_344 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_344_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_344_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_344
@@ -843,7 +843,7 @@
 # COPY GRAPH port_merge5_368 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_368_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_368_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_368
@@ -905,7 +905,7 @@
 # COPY GRAPH port_merge5_391 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_391_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_391_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_391
@@ -969,7 +969,7 @@
 # COPY GRAPH port_merge5_421 FROM (
 #     VERTICES '__TEST_DIR__/port_merge5_421_nodes.csv',
 #     EDGES '__TEST_DIR__/port_merge5_421_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_merge5_421

@@ -26,7 +26,7 @@ statement ok
 COPY GRAPH native_insert FROM (
     VERTICES '__TEST_DIR__/gql_native_insert_nodes.csv',
     EDGES '__TEST_DIR__/gql_native_insert_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement error
 INSERT (:Person {external_id: 'not-selected', name: 'Nobody', age: 0})

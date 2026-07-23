@@ -130,9 +130,9 @@ Create the managed query database outside measurement:
 CREATE GRAPH livejournal ANY;
 
 COPY GRAPH livejournal FROM (
-    VERTICES 'data/livejournal/neo4j/nodes.csv',
-    EDGES 'data/livejournal/neo4j/edges.csv'
-) FORMAT NEO4J OPTIONS (VALIDATE FALSE);
+    VERTICES 'data/livejournal/graph-import/nodes.csv',
+    EDGES 'data/livejournal/graph-import/edges.csv'
+) FORMAT GRAPH OPTIONS (VALIDATE FALSE);
 
 CHECKPOINT;
 ```

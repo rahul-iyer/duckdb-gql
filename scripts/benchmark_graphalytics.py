@@ -120,7 +120,7 @@ def read_reference(path: Path, floating: bool) -> dict[int, int | float]:
     return result
 
 
-def write_neo4j_inputs(
+def write_graph_inputs(
     case: TestCase, extracted: Path, destination: Path
 ) -> tuple[Path, Path, list[int], int, int]:
     vertices = read_ids(extracted / f"{case.name}.v")
@@ -208,7 +208,7 @@ def run_cli(
         (
             "COPY GRAPH bench_graph FROM ("
             f"VERTICES {sql_literal(nodes_csv)}, EDGES {sql_literal(edges_csv)}"
-            ") FORMAT NEO4J;"
+            ") FORMAT GRAPH;"
         ),
         f".print {MARKER_PREFIX}csr_build",
         "CALL gql_build_csr('bench_graph');",
@@ -392,7 +392,7 @@ def run_case(
     with tempfile.TemporaryDirectory(prefix=f"duckgql-{case.name}-") as temporary:
         directory = Path(temporary)
         extracted = extract_archive(archive, directory / "official")
-        nodes_csv, edges_csv, vertices, logical_edges, stored_arcs = write_neo4j_inputs(
+        nodes_csv, edges_csv, vertices, logical_edges, stored_arcs = write_graph_inputs(
             case, extracted, directory
         )
         timers, mapping_csv, result_csv = run_cli(

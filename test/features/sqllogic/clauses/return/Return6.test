@@ -37,7 +37,7 @@
 # COPY GRAPH port_return6_33 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_33
@@ -83,7 +83,7 @@
 # COPY GRAPH port_return6_49 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_49_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_49_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_49
@@ -130,7 +130,7 @@
 # COPY GRAPH port_return6_65 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_65_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_65_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_65
@@ -7429,7 +7429,7 @@
 # COPY GRAPH port_return6_82 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_82_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_82_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_82
@@ -7486,7 +7486,7 @@
 # COPY GRAPH port_return6_99 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_99_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_99_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_99
@@ -7553,7 +7553,7 @@
 # COPY GRAPH port_return6_127 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_127_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_127_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_127
@@ -7607,7 +7607,7 @@
 # COPY GRAPH port_return6_146 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_146_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_146_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_146
@@ -7657,7 +7657,7 @@
 # COPY GRAPH port_return6_164 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_164_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_164_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_164
@@ -7703,7 +7703,7 @@
 # COPY GRAPH port_return6_180 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_180_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_180_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_180
@@ -7850,7 +7850,7 @@
 # COPY GRAPH port_return6_196 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_196_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_196_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_196
@@ -7904,7 +7904,7 @@
 # COPY GRAPH port_return6_213 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_213_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_213_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_213
@@ -7957,7 +7957,7 @@
 # COPY GRAPH port_return6_230 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_230_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_230_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_230
@@ -8048,7 +8048,7 @@
 # COPY GRAPH port_return6_267 FROM (
 #     VERTICES '__TEST_DIR__/port_return6_267_nodes.csv',
 #     EDGES '__TEST_DIR__/port_return6_267_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_return6_267

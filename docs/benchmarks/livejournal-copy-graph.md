@@ -7,7 +7,7 @@ threads, and a warm filesystem cache. The input is SNAP's directed
 
 The official 259,619,239-byte gzip had SHA-256
 `d7bcd5a87b88c896c35fdb9611e804c3f4033c39b58c4c9ea3ba53c680d516d8`.
-It was converted once to a 1,625,461,646-byte Neo4j-format CSV pair. Download,
+It was converted once to a 1,625,461,646-byte graph-header CSV pair. Download,
 decompression, and conversion are offline and excluded from every load
 measurement.
 
@@ -44,9 +44,9 @@ optional validation.
 CREATE GRAPH livejournal ANY;
 
 COPY GRAPH livejournal FROM (
-    VERTICES 'data/livejournal/neo4j/nodes.csv',
-    EDGES 'data/livejournal/neo4j/edges.csv'
-) FORMAT NEO4J OPTIONS (VALIDATE FALSE);
+    VERTICES 'data/livejournal/graph-import/nodes.csv',
+    EDGES 'data/livejournal/graph-import/edges.csv'
+) FORMAT GRAPH OPTIONS (VALIDATE FALSE);
 ```
 
 Omit `OPTIONS (VALIDATE FALSE)` for strict validation. Fast mode should be used
@@ -66,7 +66,7 @@ python3 scripts/benchmark_copy_graph.py \
   --duckdb build/release/duckdb \
   --extension build/release/extension/duckgql/duckgql.duckdb_extension \
   --source data/livejournal/soc-LiveJournal1.txt.gz \
-  --prepared-dir data/livejournal/neo4j \
+  --prepared-dir data/livejournal/graph-import \
   --dataset-name soc-LiveJournal1 \
   --skip-rows 4 \
   --vertex-label user \
@@ -79,6 +79,6 @@ python3 scripts/benchmark_copy_graph.py \
   --output build/benchmarks/copy-graph-livejournal-current.json
 ```
 
-The runner creates the Neo4j CSV pair once if absent, before timing. The
+The runner creates the graph-header CSV pair once if absent, before timing. The
 ignored JSON output preserves every trial timing, checkpoint, row count,
 database size, and process peak-RSS measurement.

@@ -11,26 +11,26 @@
 
 namespace duckdb {
 
-static constexpr const char *IMPORT_ROW_ID = "__gql_neo4j_import_row_id";
+static constexpr const char *IMPORT_ROW_ID = "__gql_import_row_id";
 
-enum class Neo4jFieldRole : uint8_t { PROPERTY, ID, LABEL, START_ID, END_ID, TYPE };
+enum class GraphHeaderFieldRole : uint8_t { PROPERTY, ID, LABEL, START_ID, END_ID, TYPE };
 
-struct Neo4jField {
+struct GraphHeaderField {
 	string column_name;
 	string property_name;
 	string declared_type;
 	string id_group;
 	LogicalType source_type;
-	Neo4jFieldRole role = Neo4jFieldRole::PROPERTY;
+	GraphHeaderFieldRole role = GraphHeaderFieldRole::PROPERTY;
 };
 
-struct Neo4jSchema {
-	Neo4jField id;
-	Neo4jField start_id;
-	Neo4jField end_id;
-	vector<Neo4jField> labels;
-	vector<Neo4jField> types;
-	vector<Neo4jField> properties;
+struct GraphHeaderSchema {
+	GraphHeaderField id;
+	GraphHeaderField start_id;
+	GraphHeaderField end_id;
+	vector<GraphHeaderField> labels;
+	vector<GraphHeaderField> types;
+	vector<GraphHeaderField> properties;
 	bool has_id = false;
 	bool has_start_id = false;
 	bool has_end_id = false;
@@ -67,7 +67,7 @@ static string Trimmed(string value) {
 
 static void ThrowOnError(const MaterializedQueryResult &result) {
 	if (result.HasError()) {
-		throw InvalidInputException("Neo4j import failed: %s", result.GetError());
+		throw InvalidInputException("Graph import failed: %s", result.GetError());
 	}
 }
 
@@ -108,15 +108,15 @@ static bool ParseSpecialField(const string &raw_name, const string &marker, stri
 	return true;
 }
 
-static Neo4jField ParseField(const string &column_name, const LogicalType &source_type) {
-	Neo4jField result;
+static GraphHeaderField ParseField(const string &column_name, const LogicalType &source_type) {
+	GraphHeaderField result;
 	result.column_name = column_name;
 	result.source_type = source_type;
 	string header = Trimmed(column_name);
 	auto options = header.find('{');
 	if (options != string::npos) {
 		if (header.back() != '}') {
-			throw InvalidInputException("Invalid Neo4j header field '%s'", column_name);
+			throw InvalidInputException("Invalid graph-header field '%s'", column_name);
 		}
 		header = Trimmed(header.substr(0, options));
 	}
@@ -124,25 +124,25 @@ static Neo4jField ParseField(const string &column_name, const LogicalType &sourc
 	string prefix;
 	string group;
 	if (ParseSpecialField(header, ":START_ID", prefix, group)) {
-		result.role = Neo4jFieldRole::START_ID;
+		result.role = GraphHeaderFieldRole::START_ID;
 		result.id_group = group;
 		return result;
 	}
 	if (ParseSpecialField(header, ":END_ID", prefix, group)) {
-		result.role = Neo4jFieldRole::END_ID;
+		result.role = GraphHeaderFieldRole::END_ID;
 		result.id_group = group;
 		return result;
 	}
 	if (ParseSpecialField(header, ":LABEL", prefix, group)) {
-		result.role = Neo4jFieldRole::LABEL;
+		result.role = GraphHeaderFieldRole::LABEL;
 		return result;
 	}
 	if (ParseSpecialField(header, ":TYPE", prefix, group)) {
-		result.role = Neo4jFieldRole::TYPE;
+		result.role = GraphHeaderFieldRole::TYPE;
 		return result;
 	}
 	if (ParseSpecialField(header, ":ID", prefix, group)) {
-		result.role = Neo4jFieldRole::ID;
+		result.role = GraphHeaderFieldRole::ID;
 		result.property_name = StringUtil::Lower(prefix);
 		result.id_group = group;
 		return result;
@@ -156,30 +156,30 @@ static Neo4jField ParseField(const string &column_name, const LogicalType &sourc
 		result.declared_type = StringUtil::Lower(Trimmed(header.substr(separator + 1)));
 	}
 	if (result.property_name.empty()) {
-		throw InvalidInputException("Neo4j property header '%s' has no property name", column_name);
+		throw InvalidInputException("Graph-header property field '%s' has no property name", column_name);
 	}
 	return result;
 }
 
-static Neo4jSchema ReadSchema(Connection &connection, const string &table_name, bool relationships) {
+static GraphHeaderSchema ReadSchema(Connection &connection, const string &table_name, bool relationships) {
 	auto result = Query(connection, "SELECT * FROM " + QuoteIdentifier(table_name) + " LIMIT 0");
-	Neo4jSchema schema;
+	GraphHeaderSchema schema;
 	for (idx_t index = 0; index < result->names.size(); index++) {
 		if (result->names[index] == IMPORT_ROW_ID) {
 			continue;
 		}
 		auto field = ParseField(result->names[index], result->types[index]);
-		if (field.role != Neo4jFieldRole::PROPERTY && field.source_type.IsNested()) {
-			throw InvalidInputException("Neo4j structural field '%s' must be scalar in the initial importer",
+		if (field.role != GraphHeaderFieldRole::PROPERTY && field.source_type.IsNested()) {
+			throw InvalidInputException("Graph structural field '%s' must be scalar in the initial importer",
 			                            field.column_name);
 		}
 		switch (field.role) {
-		case Neo4jFieldRole::ID:
+		case GraphHeaderFieldRole::ID:
 			if (relationships) {
-				throw InvalidInputException("Relationship :ID fields are not supported by the initial Neo4j importer");
+				throw InvalidInputException("Relationship :ID fields are not supported by the graph-header importer");
 			}
 			if (schema.has_id) {
-				throw InvalidInputException("Neo4j node input must contain exactly one :ID field");
+				throw InvalidInputException("Graph-header node input must contain exactly one :ID field");
 			}
 			schema.id = field;
 			schema.has_id = true;
@@ -187,43 +187,43 @@ static Neo4jSchema ReadSchema(Connection &connection, const string &table_name, 
 				schema.properties.push_back(field);
 			}
 			break;
-		case Neo4jFieldRole::START_ID:
+		case GraphHeaderFieldRole::START_ID:
 			if (!relationships || schema.has_start_id) {
-				throw InvalidInputException("Neo4j relationship input must contain exactly one :START_ID field");
+				throw InvalidInputException("Graph-header relationship input must contain exactly one :START_ID field");
 			}
 			schema.start_id = field;
 			schema.has_start_id = true;
 			break;
-		case Neo4jFieldRole::END_ID:
+		case GraphHeaderFieldRole::END_ID:
 			if (!relationships || schema.has_end_id) {
-				throw InvalidInputException("Neo4j relationship input must contain exactly one :END_ID field");
+				throw InvalidInputException("Graph-header relationship input must contain exactly one :END_ID field");
 			}
 			schema.end_id = field;
 			schema.has_end_id = true;
 			break;
-		case Neo4jFieldRole::LABEL:
+		case GraphHeaderFieldRole::LABEL:
 			if (relationships) {
-				throw InvalidInputException("Use :TYPE, not :LABEL, for Neo4j relationships");
+				throw InvalidInputException("Use :TYPE, not :LABEL, for graph-header relationships");
 			}
 			schema.labels.push_back(field);
 			break;
-		case Neo4jFieldRole::TYPE:
+		case GraphHeaderFieldRole::TYPE:
 			if (!relationships) {
-				throw InvalidInputException("Neo4j node input cannot contain a :TYPE field");
+				throw InvalidInputException("Graph-header node input cannot contain a :TYPE field");
 			}
 			schema.types.push_back(field);
 			break;
-		case Neo4jFieldRole::PROPERTY:
+		case GraphHeaderFieldRole::PROPERTY:
 			schema.properties.push_back(field);
 			break;
 		}
 	}
 	if (!relationships && !schema.has_id) {
-		throw InvalidInputException("Neo4j node input requires one :ID field");
+		throw InvalidInputException("Graph-header node input requires one :ID field");
 	}
 	if (relationships && (!schema.has_start_id || !schema.has_end_id || schema.types.size() != 1)) {
 		throw InvalidInputException(
-		    "Neo4j relationship input requires :START_ID, :END_ID, and exactly one :TYPE field");
+		    "Graph-header relationship input requires :START_ID, :END_ID, and exactly one :TYPE field");
 	}
 	return schema;
 }
@@ -241,11 +241,11 @@ static void CreateRawTable(Connection &connection, const string &table_name, con
 	                      ", * FROM " + ScanExpression(path, format));
 }
 
-static string Column(const string &alias, const Neo4jField &field) {
+static string Column(const string &alias, const GraphHeaderField &field) {
 	return alias + "." + QuoteIdentifier(field.column_name);
 }
 
-static string ExternalId(const string &alias, const Neo4jField &field) {
+static string ExternalId(const string &alias, const GraphHeaderField &field) {
 	return "CAST(" + Column(alias, field) + " AS VARCHAR)";
 }
 
@@ -301,7 +301,7 @@ static string InferFileFormat(const string &path) {
 	                            path);
 }
 
-static string NativeValueExpression(const Neo4jField &field, const string &alias) {
+static string NativeValueExpression(const GraphHeaderField &field, const string &alias) {
 	auto source = Column(alias, field);
 	auto type = StringUtil::Lower(field.declared_type);
 	if (EndsWith(type, "[]")) {
@@ -365,7 +365,7 @@ static string NativeValueExpression(const Neo4jField &field, const string &alias
 	throw InvalidInputException("COPY GRAPH property type '%s' is not supported yet", field.declared_type);
 }
 
-static void ValidateNativeProperties(const vector<Neo4jField> &properties, const char *kind) {
+static void ValidateNativeProperties(const vector<GraphHeaderField> &properties, const char *kind) {
 	unordered_set<string> names;
 	for (const auto &property : properties) {
 		if (StringUtil::StartsWith(property.property_name, "__gql_")) {
@@ -379,7 +379,7 @@ static void ValidateNativeProperties(const vector<Neo4jField> &properties, const
 	}
 }
 
-static string NativePropertyProjection(const vector<Neo4jField> &properties, const string &alias) {
+static string NativePropertyProjection(const vector<GraphHeaderField> &properties, const string &alias) {
 	string result;
 	for (const auto &property : properties) {
 		result += ", " + NativeValueExpression(property, alias) + " AS " + QuoteIdentifier(property.property_name);
@@ -387,7 +387,7 @@ static string NativePropertyProjection(const vector<Neo4jField> &properties, con
 	return result;
 }
 
-static string NativeLabelExpression(const Neo4jSchema &schema, const string &alias) {
+static string NativeLabelExpression(const GraphHeaderSchema &schema, const string &alias) {
 	if (schema.labels.empty()) {
 		return "CAST('' AS VARCHAR)";
 	}
@@ -396,7 +396,7 @@ static string NativeLabelExpression(const Neo4jSchema &schema, const string &ali
 	       ", ';'), item -> lower(trim(item))), ';')";
 }
 
-static void ValidateNativeInput(Connection &connection, const Neo4jSchema &nodes, const Neo4jSchema &edges) {
+static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema &nodes, const GraphHeaderSchema &edges) {
 	if (nodes.labels.size() > 1) {
 		throw InvalidInputException("COPY GRAPH currently supports at most one node :LABEL column");
 	}
@@ -406,10 +406,10 @@ static void ValidateNativeInput(Connection &connection, const Neo4jSchema &nodes
 	                                             ") FROM gql_copy_nodes n");
 	auto node_count = node_validation->GetValue(0, 0).GetValue<int64_t>();
 	if (node_validation->GetValue(1, 0).GetValue<int64_t>() != 0) {
-		throw InvalidInputException("Neo4j node :ID values must be non-null and non-empty");
+		throw InvalidInputException("Graph-header node :ID values must be non-null and non-empty");
 	}
 	if (node_validation->GetValue(2, 0).GetValue<int64_t>() != node_count) {
-		throw InvalidInputException("Neo4j node :ID values must be unique");
+		throw InvalidInputException("Graph-header node :ID values must be unique");
 	}
 	auto relationship_type = ExternalId("r", edges.types[0]);
 	auto start_id = ExternalId("r", edges.start_id);

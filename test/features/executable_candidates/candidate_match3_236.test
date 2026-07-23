@@ -26,7 +26,7 @@ statement ok
 COPY GRAPH candidate_match3_236 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_236_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_236_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_236

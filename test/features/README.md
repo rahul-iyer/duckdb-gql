@@ -27,7 +27,7 @@ vertex/edge counts and a precise reason for setups that still require work.
 ## INSERT fixture adaptation
 
 `scripts/gql_fixture_adapter.py` compiles deterministic literal `INSERT`
-patterns into DuckDB `COPY` statements, typed Neo4j-format node and edge CSVs,
+patterns into DuckDB `COPY` statements, typed graph-header node and edge CSVs,
 `CREATE GRAPH`, `COPY GRAPH`, and `SESSION SET GRAPH`. It supports scalar and
 scalar-list properties, directed paths, multiple labels in the semantic label
 column, variables bound within the same setup, and bounded deterministic `FOR`

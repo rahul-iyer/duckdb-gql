@@ -28,7 +28,7 @@ statement ok
 COPY GRAPH persistent_native FROM (
     VERTICES '__TEST_DIR__/gql_copy_graph_persistence_nodes.csv',
     EDGES '__TEST_DIR__/gql_copy_graph_persistence_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 restart
 

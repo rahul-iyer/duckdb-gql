@@ -35,7 +35,7 @@
 # COPY GRAPH port_set1_33 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_33_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_33_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_33
@@ -85,7 +85,7 @@
 # COPY GRAPH port_set1_53 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_53_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_53_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_53
@@ -135,7 +135,7 @@
 # COPY GRAPH port_set1_73 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_73_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_73_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_73
@@ -150,12 +150,12 @@
 #     When executing query:
 #       """
 #       MATCH (n:A)
-#       SET (n).name = 'neo4j'
+#       SET (n).name = 'graphdb'
 #       RETURN n
 #       """
 #     Then the result should be, in any order:
 #       | n                    |
-#       | (:A {name: 'neo4j'}) |
+#       | (:A {name: 'graphdb'}) |
 #     And the side effects should be:
 #       | +properties | 1 |
 
@@ -186,7 +186,7 @@
 # COPY GRAPH port_set1_91 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_91_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_91_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_91
@@ -201,12 +201,12 @@
 #     When executing query:
 #       """
 #       MATCH ()-[r:REL]->()
-#       SET (r).name = 'neo4j'
+#       SET (r).name = 'graphdb'
 #       RETURN r
 #       """
 #     Then the result should be, in any order:
 #       | r                      |
-#       | [:REL {name: 'neo4j'}] |
+#       | [:REL {name: 'graphdb'}] |
 #     And the side effects should be:
 #       | +properties | 1 |
 
@@ -234,7 +234,7 @@
 # COPY GRAPH port_set1_109 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_109_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_109_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_109
@@ -369,7 +369,7 @@
 # COPY GRAPH port_set1_189 FROM (
 #     VERTICES '__TEST_DIR__/port_set1_189_nodes.csv',
 #     EDGES '__TEST_DIR__/port_set1_189_edges.csv'
-# ) FORMAT NEO4J
+# ) FORMAT GRAPH
 #
 # statement ok
 # SESSION SET GRAPH port_set1_189

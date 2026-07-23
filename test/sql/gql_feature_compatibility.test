@@ -36,7 +36,7 @@ statement ok
 COPY GRAPH candidate_matchwhere1_33 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere1_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere1_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere1_33
@@ -77,7 +77,7 @@ statement ok
 COPY GRAPH candidate_matchwhere1_83 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere1_83_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere1_83_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere1_83
@@ -117,7 +117,7 @@ statement ok
 COPY GRAPH candidate_matchwhere1_160 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere1_160_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere1_160_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere1_160
@@ -154,7 +154,7 @@ statement ok
 COPY GRAPH candidate_matchwhere1_196 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere1_196_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere1_196_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere1_196
@@ -193,7 +193,7 @@ statement ok
 COPY GRAPH candidate_matchwhere3_51 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere3_51_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere3_51_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere3_51
@@ -236,7 +236,7 @@ statement ok
 COPY GRAPH candidate_matchwhere3_71 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere3_71_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere3_71_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere3_71
@@ -279,7 +279,7 @@ statement ok
 COPY GRAPH candidate_matchwhere6_33 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere6_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere6_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere6_33
@@ -319,7 +319,7 @@ statement ok
 COPY GRAPH candidate_matchwhere6_101 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere6_101_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere6_101_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere6_101
@@ -364,7 +364,7 @@ statement ok
 COPY GRAPH candidate_matchwhere6_140 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere6_140_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere6_140_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere6_140
@@ -411,7 +411,7 @@ statement ok
 COPY GRAPH candidate_matchwhere6_163 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere6_163_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere6_163_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere6_163
@@ -458,7 +458,7 @@ statement ok
 COPY GRAPH candidate_matchwhere6_186 FROM (
     VERTICES '__TEST_DIR__/candidate_matchwhere6_186_nodes.csv',
     EDGES '__TEST_DIR__/candidate_matchwhere6_186_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_matchwhere6_186
@@ -499,7 +499,7 @@ statement ok
 COPY GRAPH candidate_match1_97 FROM (
     VERTICES '__TEST_DIR__/candidate_match1_97_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match1_97_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match1_97
@@ -553,7 +553,7 @@ statement ok
 COPY GRAPH candidate_match2_44 FROM (
     VERTICES '__TEST_DIR__/candidate_match2_44_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match2_44_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match2_44
@@ -590,7 +590,7 @@ statement ok
 COPY GRAPH candidate_match3_33 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_33
@@ -627,7 +627,7 @@ statement ok
 COPY GRAPH candidate_match3_49 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_49_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_49_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_49
@@ -664,7 +664,7 @@ statement ok
 COPY GRAPH candidate_match3_65 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_65_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_65_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_65
@@ -704,7 +704,7 @@ statement ok
 COPY GRAPH candidate_match3_82 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_82_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_82_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_82
@@ -744,7 +744,7 @@ statement ok
 COPY GRAPH candidate_match3_118 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_118_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_118_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_118
@@ -783,7 +783,7 @@ statement ok
 COPY GRAPH candidate_match3_171 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_171_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_171_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_171
@@ -819,7 +819,7 @@ statement ok
 COPY GRAPH candidate_match3_236 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_236_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_236_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_236
@@ -855,7 +855,7 @@ statement ok
 COPY GRAPH candidate_match3_252 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_252_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_252_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_252
@@ -895,7 +895,7 @@ statement ok
 COPY GRAPH candidate_match3_310 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_310_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_310_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_310
@@ -935,7 +935,7 @@ statement ok
 COPY GRAPH candidate_match3_329 FROM (
     VERTICES '__TEST_DIR__/candidate_match3_329_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match3_329_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match3_329
@@ -998,7 +998,7 @@ statement ok
 COPY GRAPH candidate_match5_69 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_69_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_69_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_69
@@ -1074,7 +1074,7 @@ statement ok
 COPY GRAPH candidate_match5_94 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_94_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_94_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_94
@@ -1150,7 +1150,7 @@ statement ok
 COPY GRAPH candidate_match5_131 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_131_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_131_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_131
@@ -1214,7 +1214,7 @@ statement ok
 COPY GRAPH candidate_match5_144 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_144_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_144_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_144
@@ -1280,7 +1280,7 @@ statement ok
 COPY GRAPH candidate_match5_177 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_177_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_177_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_177
@@ -1348,7 +1348,7 @@ statement ok
 COPY GRAPH candidate_match5_206 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_206_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_206_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_206
@@ -1412,7 +1412,7 @@ statement ok
 COPY GRAPH candidate_match5_219 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_219_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_219_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_219
@@ -1478,7 +1478,7 @@ statement ok
 COPY GRAPH candidate_match5_267 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_267_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_267_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_267
@@ -1542,7 +1542,7 @@ statement ok
 COPY GRAPH candidate_match5_280 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_280_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_280_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_280
@@ -1610,7 +1610,7 @@ statement ok
 COPY GRAPH candidate_match5_297 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_297_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_297_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_297
@@ -1687,7 +1687,7 @@ statement ok
 COPY GRAPH candidate_match5_323 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_323_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_323_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_323
@@ -1763,7 +1763,7 @@ statement ok
 COPY GRAPH candidate_match5_348 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_348_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_348_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_348
@@ -1837,7 +1837,7 @@ statement ok
 COPY GRAPH candidate_match5_397 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_397_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_397_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_397
@@ -1903,7 +1903,7 @@ statement ok
 COPY GRAPH candidate_match5_412 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_412_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_412_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_412
@@ -1969,7 +1969,7 @@ statement ok
 COPY GRAPH candidate_match5_427 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_427_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_427_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_427
@@ -2039,7 +2039,7 @@ statement ok
 COPY GRAPH candidate_match5_446 FROM (
     VERTICES '__TEST_DIR__/candidate_match5_446_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match5_446_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match5_446
@@ -2083,7 +2083,7 @@ statement ok
 COPY GRAPH candidate_match6_98 FROM (
     VERTICES '__TEST_DIR__/candidate_match6_98_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match6_98_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match6_98
@@ -2120,7 +2120,7 @@ statement ok
 COPY GRAPH candidate_match6_114 FROM (
     VERTICES '__TEST_DIR__/candidate_match6_114_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match6_114_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match6_114
@@ -2152,7 +2152,7 @@ statement ok
 COPY GRAPH candidate_match7_34 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_34_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_34_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_34
@@ -2194,7 +2194,7 @@ statement ok
 COPY GRAPH candidate_match7_63 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_63_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_63_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_63
@@ -2237,7 +2237,7 @@ statement ok
 COPY GRAPH candidate_match7_161 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_161_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_161_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_161
@@ -2280,7 +2280,7 @@ statement ok
 COPY GRAPH candidate_match7_183 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_183_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_183_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_183
@@ -2323,7 +2323,7 @@ statement ok
 COPY GRAPH candidate_match7_325 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_325_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_325_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_325
@@ -2366,7 +2366,7 @@ statement ok
 COPY GRAPH candidate_match7_367 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_367_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_367_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_367
@@ -2407,7 +2407,7 @@ statement ok
 COPY GRAPH candidate_match7_477 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_477_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_477_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_477
@@ -2452,7 +2452,7 @@ statement ok
 COPY GRAPH candidate_match7_520 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_520_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_520_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_520
@@ -2498,7 +2498,7 @@ statement ok
 COPY GRAPH candidate_match7_545 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_545_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_545_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_545
@@ -2538,7 +2538,7 @@ statement ok
 COPY GRAPH candidate_match7_615 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_615_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_615_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_615
@@ -2576,7 +2576,7 @@ statement ok
 COPY GRAPH candidate_match7_634 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_634_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_634_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_634
@@ -2616,7 +2616,7 @@ statement ok
 COPY GRAPH candidate_match7_652 FROM (
     VERTICES '__TEST_DIR__/candidate_match7_652_nodes.csv',
     EDGES '__TEST_DIR__/candidate_match7_652_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_match7_652
@@ -2653,7 +2653,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_33 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_33
@@ -2692,7 +2692,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_54 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_54_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_54_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_54
@@ -2732,7 +2732,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_75 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_75_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_75_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_75
@@ -2771,7 +2771,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_136 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_136_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_136_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_136
@@ -2808,7 +2808,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_155 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_155_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_155_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_155
@@ -2844,7 +2844,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_190 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_190_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_190_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_190
@@ -2882,7 +2882,7 @@ statement ok
 COPY GRAPH candidate_returnorderby2_226 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby2_226_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby2_226_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby2_226
@@ -2920,7 +2920,7 @@ statement ok
 COPY GRAPH candidate_returnorderby3_33 FROM (
     VERTICES '__TEST_DIR__/candidate_returnorderby3_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnorderby3_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnorderby3_33
@@ -2958,7 +2958,7 @@ statement ok
 COPY GRAPH candidate_returnskiplimit2_86 FROM (
     VERTICES '__TEST_DIR__/candidate_returnskiplimit2_86_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnskiplimit2_86_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnskiplimit2_86
@@ -2996,7 +2996,7 @@ statement ok
 COPY GRAPH candidate_returnskiplimit2_136 FROM (
     VERTICES '__TEST_DIR__/candidate_returnskiplimit2_136_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnskiplimit2_136_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnskiplimit2_136
@@ -3043,7 +3043,7 @@ statement ok
 COPY GRAPH candidate_returnskiplimit2_156 FROM (
     VERTICES '__TEST_DIR__/candidate_returnskiplimit2_156_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnskiplimit2_156_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnskiplimit2_156
@@ -3095,7 +3095,7 @@ statement ok
 COPY GRAPH candidate_returnskiplimit3_84 FROM (
     VERTICES '__TEST_DIR__/candidate_returnskiplimit3_84_nodes.csv',
     EDGES '__TEST_DIR__/candidate_returnskiplimit3_84_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_returnskiplimit3_84
@@ -3137,7 +3137,7 @@ statement ok
 COPY GRAPH candidate_return2_44 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_44_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_44_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_44
@@ -3171,7 +3171,7 @@ statement ok
 COPY GRAPH candidate_return2_60 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_60_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_60_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_60
@@ -3208,7 +3208,7 @@ statement ok
 COPY GRAPH candidate_return2_76 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_76_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_76_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_76
@@ -3245,7 +3245,7 @@ statement ok
 COPY GRAPH candidate_return2_92 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_92_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_92_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_92
@@ -3279,7 +3279,7 @@ statement ok
 COPY GRAPH candidate_return2_108 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_108_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_108_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_108
@@ -3314,7 +3314,7 @@ statement ok
 COPY GRAPH candidate_return2_140 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_140_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_140_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_140
@@ -3347,7 +3347,7 @@ statement ok
 COPY GRAPH candidate_return2_172 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_172_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_172_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_172
@@ -3381,7 +3381,7 @@ statement ok
 COPY GRAPH candidate_return2_184 FROM (
     VERTICES '__TEST_DIR__/candidate_return2_184_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return2_184_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return2_184
@@ -3415,7 +3415,7 @@ statement ok
 COPY GRAPH candidate_return3_33 FROM (
     VERTICES '__TEST_DIR__/candidate_return3_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return3_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return3_33
@@ -3452,7 +3452,7 @@ statement ok
 COPY GRAPH candidate_return3_65 FROM (
     VERTICES '__TEST_DIR__/candidate_return3_65_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return3_65_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return3_65
@@ -3486,7 +3486,7 @@ statement ok
 COPY GRAPH candidate_return4_50 FROM (
     VERTICES '__TEST_DIR__/candidate_return4_50_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return4_50_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return4_50
@@ -3520,7 +3520,7 @@ statement ok
 COPY GRAPH candidate_return4_66 FROM (
     VERTICES '__TEST_DIR__/candidate_return4_66_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return4_66_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return4_66
@@ -3554,7 +3554,7 @@ statement ok
 COPY GRAPH candidate_return4_82 FROM (
     VERTICES '__TEST_DIR__/candidate_return4_82_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return4_82_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return4_82
@@ -3588,7 +3588,7 @@ statement ok
 COPY GRAPH candidate_return4_130 FROM (
     VERTICES '__TEST_DIR__/candidate_return4_130_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return4_130_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return4_130
@@ -3632,7 +3632,7 @@ statement ok
 COPY GRAPH candidate_return4_146 FROM (
     VERTICES '__TEST_DIR__/candidate_return4_146_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return4_146_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return4_146
@@ -3668,7 +3668,7 @@ statement ok
 COPY GRAPH candidate_return5_49 FROM (
     VERTICES '__TEST_DIR__/candidate_return5_49_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return5_49_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return5_49
@@ -3703,7 +3703,7 @@ statement ok
 COPY GRAPH candidate_return6_33 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_33_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_33_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_33
@@ -10987,7 +10987,7 @@ statement ok
 COPY GRAPH candidate_return6_82 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_82_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_82_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_82
@@ -11023,7 +11023,7 @@ statement ok
 COPY GRAPH candidate_return6_127 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_127_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_127_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_127
@@ -11058,7 +11058,7 @@ statement ok
 COPY GRAPH candidate_return6_164 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_164_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_164_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_164
@@ -11191,7 +11191,7 @@ statement ok
 COPY GRAPH candidate_return6_196 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_196_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_196_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_196
@@ -11230,7 +11230,7 @@ statement ok
 COPY GRAPH candidate_return6_213 FROM (
     VERTICES '__TEST_DIR__/candidate_return6_213_nodes.csv',
     EDGES '__TEST_DIR__/candidate_return6_213_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 
 statement ok
 SESSION SET GRAPH candidate_return6_213

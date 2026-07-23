@@ -30,7 +30,7 @@ query ITII
 COPY GRAPH table_native FROM (
     VERTICES '__TEST_DIR__/gql_native_vertices.csv',
     EDGES '__TEST_DIR__/gql_native_edges.csv'
-) FORMAT NEO4J
+) FORMAT GRAPH
 ----
 true	table_native	3	2
 
