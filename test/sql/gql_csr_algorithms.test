@@ -702,6 +702,38 @@ run CALL gql_build_csr('algo_graph') first
 statement ok
 CALL gql_build_csr('algo_graph')
 
+# Direct SQL writes invalidate snapshots even though they do not pass through
+# GQL mutation lowering or bump graph_version.
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_type = __gql_type
+
+statement error
+SELECT * FROM gql_csr_stats('algo_graph')
+----
+<REGEX>:.*CSR for table-backed graph 'algo_graph' has not been built.*
+
+statement ok
+PREPARE update_graph_edge AS
+UPDATE gql_data.graph_1_edges SET __gql_type = __gql_type
+
+# Rebuilding after PREPARE must not let the later EXECUTE reuse stale data.
+statement ok
+CALL gql_build_csr('algo_graph')
+
+statement ok
+EXECUTE update_graph_edge
+
+statement error
+SELECT * FROM gql_csr_stats('algo_graph')
+----
+<REGEX>:.*CSR for table-backed graph 'algo_graph' has not been built.*
+
+statement ok
+DEALLOCATE update_graph_edge
+
+statement ok
+CALL gql_build_csr('algo_graph')
+
 statement ok
 BEGIN
 

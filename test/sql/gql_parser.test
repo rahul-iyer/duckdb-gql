@@ -45,6 +45,13 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
+# Leading lexical trivia must not make the parser override miss GQL.
+statement error
+/* leading GQL comment */
+MATCH (n) RETURN n
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
 query IT
 DROP GRAPH mixed
 ----

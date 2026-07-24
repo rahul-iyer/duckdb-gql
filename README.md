@@ -25,8 +25,9 @@ storage and execution engine, plus an explicit CSR layer for graph algorithms.
 - Explicit CSR-backed BFS, DFS, unweighted SSSP, PageRank, weak and strong
   components, degree, closeness, local clustering coefficient, and triangle
   counting.
-- DuckDB transactions, persistence, vectorized scans, joins, aggregation, and
-  recursive CTE execution beneath the GQL layer.
+- Caller-controlled DuckDB transactions for graph queries and mutations, plus
+  persistence, vectorized scans, joins, aggregation, and recursive CTE
+  execution beneath the GQL layer.
 
 ## Build from source
 
@@ -137,6 +138,10 @@ COPY GRAPH social FROM (
 ```
 
 `DROP GRAPH social` removes both the graph metadata and its managed tables.
+`CREATE GRAPH`, `DROP GRAPH`, and `COPY GRAPH` are lifecycle operations that
+must run in autocommit mode; DuckGQL rejects them inside an explicit
+transaction. Graph queries and mutations can participate in an explicit
+caller-controlled DuckDB transaction.
 
 ## Explain query plans
 
@@ -186,9 +191,14 @@ RETURN vertex_id, rank
 ORDER BY rank DESC;
 ```
 
-CSR snapshots are connection-local and version checked. Rebuild the snapshot
-after graph mutations or direct SQL topology changes. Weighted SSSP and using
-CSR as an automatic `MATCH` execution backend are not implemented.
+CSR snapshots are connection-local and version checked. Graph mutations and
+direct SQL writes to a graph's vertex or edge tables invalidate the affected
+snapshot instead of allowing an algorithm to use stale data. Run
+`CALL gql_build_csr('social')` again before the next algorithm call. CSR
+construction and CSR algorithms must run in autocommit mode.
+
+Weighted SSSP and using CSR as an automatic `MATCH` execution backend are not
+implemented.
 
 Inspection helpers:
 
@@ -223,7 +233,10 @@ read-only referenced-table mode is planned.
 
 - ISO GQL feature families remain partial or planned; grammar recognition does
   not imply semantic or transactional conformance.
-- `COPY GRAPH` is a full-load, autocommit-only operation for an empty graph.
+- `CREATE GRAPH`, `DROP GRAPH`, and the full-load `COPY GRAPH` operation are
+  autocommit-only. `COPY GRAPH` requires an empty graph.
+- CSR construction and CSR algorithms are autocommit-only and snapshots are
+  local to the connection that built them.
 - Bulk import currently accepts one vertex file, one edge file, at most one
   scalar vertex label column, and one edge type column.
 - Multiple-path and undirected insertion, general runtime property maps, and

@@ -352,6 +352,30 @@ RETURN person.age, person.city
 ----
 43	NULL
 
+# An error inside a caller-owned transaction must also release the extension's
+# multi-statement command envelope after the caller rolls back.
+statement ok
+BEGIN TRANSACTION
+
+statement error
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.city = 'Should Roll Back', person.age = 'not an integer'
+----
+<REGEX>:.*Could not convert string.*
+
+statement ok
+ROLLBACK
+
+statement ok
+MATCH (person:Person) WHERE person.name = 'Ada'
+SET person.age = person.age
+
+query IT
+MATCH (person:Person) WHERE person.name = 'Ada'
+RETURN person.age, person.city
+----
+43	NULL
+
 # Plain node deletion rejects incident edges.
 statement error
 MATCH (person:Person) WHERE person.name = 'Ada'

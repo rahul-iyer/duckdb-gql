@@ -81,8 +81,7 @@ public:
 	}
 
 	idx_t operator[](idx_t index) const {
-		return compact ? static_cast<idx_t>(compact_values[index])
-		               : wide_values[index];
+		return compact ? static_cast<idx_t>(compact_values[index]) : wide_values[index];
 	}
 
 	idx_t size() const {
@@ -94,8 +93,7 @@ public:
 	}
 
 	idx_t AllocatedBytes() const {
-		return compact ? compact_values.capacity() * sizeof(uint32_t)
-		               : wide_values.capacity() * sizeof(idx_t);
+		return compact ? compact_values.capacity() * sizeof(uint32_t) : wide_values.capacity() * sizeof(idx_t);
 	}
 
 private:
@@ -159,35 +157,49 @@ private:
 };
 
 struct GqlCsrSnapshot {
-  uint64_t graph_id;
-  uint64_t graph_version;
-  bool dense_vertex_ids = false;
-  GqlCsrVertexIds vertex_ids;
-  unordered_map<uint64_t, idx_t> ordinal_by_id;
-  vector<idx_t> vertex_label_offsets;
-  vector<uint32_t> vertex_label_ids;
-  vector<uint64_t> outgoing_offsets;
-  GqlCsrOrdinals outgoing_neighbors;
-  vector<uint64_t> outgoing_edge_ids;
-  GqlCsrEdgeLabels outgoing_label_ids;
-  vector<uint64_t> incoming_offsets;
-  GqlCsrOrdinals incoming_neighbors;
-  vector<uint64_t> incoming_edge_ids;
-  GqlCsrEdgeLabels incoming_label_ids;
-  unordered_map<string, uint32_t> label_ids;
-  idx_t topology_bytes = 0;
-  idx_t identity_bytes = 0;
-  idx_t label_bytes = 0;
-  idx_t auxiliary_bytes = 0;
-  idx_t build_auxiliary_bytes = 0;
-  idx_t memory_bytes = 0;
+	uint64_t graph_id;
+	uint64_t graph_version;
+	uint64_t write_generation;
+	uint64_t vertex_write_generation;
+	uint64_t edge_write_generation;
+	string vertex_table_key;
+	string edge_table_key;
+	bool dense_vertex_ids = false;
+	GqlCsrVertexIds vertex_ids;
+	unordered_map<uint64_t, idx_t> ordinal_by_id;
+	vector<idx_t> vertex_label_offsets;
+	vector<uint32_t> vertex_label_ids;
+	vector<uint64_t> outgoing_offsets;
+	GqlCsrOrdinals outgoing_neighbors;
+	vector<uint64_t> outgoing_edge_ids;
+	GqlCsrEdgeLabels outgoing_label_ids;
+	vector<uint64_t> incoming_offsets;
+	GqlCsrOrdinals incoming_neighbors;
+	vector<uint64_t> incoming_edge_ids;
+	GqlCsrEdgeLabels incoming_label_ids;
+	unordered_map<string, uint32_t> label_ids;
+	idx_t topology_bytes = 0;
+	idx_t identity_bytes = 0;
+	idx_t label_bytes = 0;
+	idx_t auxiliary_bytes = 0;
+	idx_t build_auxiliary_bytes = 0;
+	idx_t memory_bytes = 0;
 };
 
-bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id,
-                         idx_t &ordinal);
+bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
 
-shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context,
-                                                   const string &graph_name);
+shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name);
+
+//! Register a lightweight observer that invalidates snapshots when a prepared
+//! write executes.
+void GqlRegisterCsrWriteObserver(ClientContext &context);
+
+//! Advance the generation for a table when a write is planned.
+void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog_name, const string &schema_name,
+                                   const string &table_name);
+
+//! Conservatively invalidate snapshots when a prepared write executes.
+void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);
 
 TableFunction GqlNeighborsFunction();
 TableFunction GqlBuildCsrFunction();

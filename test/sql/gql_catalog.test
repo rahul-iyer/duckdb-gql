@@ -18,6 +18,24 @@ SELECT * FROM gql_load_graph('legacy', 'nodes.csv', 'edges.csv', 'csv')
 ----
 <REGEX>:.*gql_load_graph does not exist.*
 
+# Catalog DDL must not escape an explicit caller transaction through the
+# extension's internal connection.
+statement ok
+BEGIN
+
+statement error
+CREATE GRAPH transaction_graph ANY
+----
+<REGEX>:.*CREATE GRAPH is not eligible inside an explicit transaction.*
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM gql_graphs() WHERE graph_name = 'transaction_graph'
+----
+0
+
 query IT
 CREATE GRAPH social ANY
 ----
@@ -48,6 +66,22 @@ statement error
 SESSION SET GRAPH missing
 ----
 Graph 'missing' does not exist
+
+statement ok
+BEGIN
+
+statement error
+DROP GRAPH social
+----
+<REGEX>:.*DROP GRAPH is not eligible inside an explicit transaction.*
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM gql_graphs() WHERE graph_name = 'social'
+----
+1
 
 query IT
 DROP GRAPH social

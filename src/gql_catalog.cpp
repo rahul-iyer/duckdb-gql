@@ -1,5 +1,6 @@
 #include "gql_catalog.hpp"
 
+#include "gql_sql_utils.hpp"
 #include "gql_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -8,33 +9,13 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/table_description.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
-static string QuoteLiteral(const string &value) {
-	return KeywordHelper::WriteQuoted(value, '\'');
-}
-
-static string QuoteIdentifier(const string &value) {
-	return KeywordHelper::WriteQuoted(value, '"');
-}
-
-static void ThrowOnError(const MaterializedQueryResult &result) {
-	if (result.HasError()) {
-		throw InvalidInputException("GQL graph catalog error: %s", result.GetError());
-	}
-}
-
-static unique_ptr<MaterializedQueryResult> Query(Connection &connection, const string &sql) {
-	auto result = connection.Query(sql);
-	ThrowOnError(*result);
-	return result;
-}
-
 static string QualifiedTable(const TableDescription &table) {
-	return QuoteIdentifier(table.database) + "." + QuoteIdentifier(table.schema) + "." + QuoteIdentifier(table.table);
+	return GqlQuoteIdentifier(table.database) + "." + GqlQuoteIdentifier(table.schema) + "." +
+	       GqlQuoteIdentifier(table.table);
 }
 
 static unique_ptr<TableDescription> ResolveTable(Connection &connection, const string &input) {
@@ -43,7 +24,7 @@ static unique_ptr<TableDescription> ResolveTable(Connection &connection, const s
 		throw BinderException("A registered graph table name cannot be empty");
 	}
 	if (qualified.catalog == INVALID_CATALOG || qualified.schema == INVALID_SCHEMA) {
-		auto defaults = Query(connection, "SELECT current_database(), current_schema()");
+		auto defaults = GqlQuery(connection, "SELECT current_database(), current_schema()");
 		if (qualified.catalog == INVALID_CATALOG) {
 			qualified.catalog = defaults->GetValue(0, 0).GetValue<string>();
 		}
@@ -81,9 +62,9 @@ static void ValidateLabelColumn(const TableDescription &table, const ColumnDefin
 }
 
 static void ValidateKey(Connection &connection, const TableDescription &table, const ColumnDefinition &key) {
-	auto column = QuoteIdentifier(key.Name());
-	auto result = Query(connection, "SELECT count(*)::UBIGINT, count(" + column + ")::UBIGINT, count(DISTINCT " +
-	                                    column + ")::UBIGINT FROM " + QualifiedTable(table));
+	auto column = GqlQuoteIdentifier(key.Name());
+	auto result = GqlQuery(connection, "SELECT count(*)::UBIGINT, count(" + column + ")::UBIGINT, count(DISTINCT " +
+	                                       column + ")::UBIGINT FROM " + QualifiedTable(table));
 	auto rows = result->GetValue(0, 0).GetValue<uint64_t>();
 	auto non_null = result->GetValue(1, 0).GetValue<uint64_t>();
 	auto distinct = result->GetValue(2, 0).GetValue<uint64_t>();
@@ -99,12 +80,12 @@ static void ValidateKey(Connection &connection, const TableDescription &table, c
 
 static void ValidateEndpoint(Connection &connection, const TableDescription &edge, const ColumnDefinition &endpoint,
                              const TableDescription &vertex, const ColumnDefinition &key, const char *role) {
-	auto edge_column = QuoteIdentifier(endpoint.Name());
-	auto vertex_column = QuoteIdentifier(key.Name());
+	auto edge_column = GqlQuoteIdentifier(endpoint.Name());
+	auto vertex_column = GqlQuoteIdentifier(key.Name());
 	auto sql = "SELECT count(*)::UBIGINT FROM " + QualifiedTable(edge) + " e LEFT JOIN " + QualifiedTable(vertex) +
 	           " v ON e." + edge_column + " = v." + vertex_column + " WHERE e." + edge_column + " IS NULL OR v." +
 	           vertex_column + " IS NULL";
-	auto result = Query(connection, sql);
+	auto result = GqlQuery(connection, sql);
 	if (result->GetValue(0, 0).GetValue<uint64_t>() != 0) {
 		throw InvalidInputException("Registered graph %s endpoints contain NULL or missing vertex keys", role);
 	}
@@ -125,26 +106,26 @@ static void InsertProperties(Connection &connection, uint64_t element_table_id, 
 		if (column.Generated() || IsStructuralColumn(column.Name(), structural)) {
 			continue;
 		}
-		Query(connection, "INSERT INTO gql_internal.graph_property_mappings "
-		                  "(element_table_id, property_name, column_name, "
-		                  "gql_type, nullable, writable) VALUES (" +
-		                      to_string(element_table_id) + ", " + QuoteLiteral(column.Name()) + ", " +
-		                      QuoteLiteral(column.Name()) + ", " + QuoteLiteral(column.Type().ToString()) + ", true, " +
-		                      (table.readonly ? "false" : "true") + ")");
+		GqlQuery(connection, "INSERT INTO gql_internal.graph_property_mappings "
+		                     "(element_table_id, property_name, column_name, "
+		                     "gql_type, nullable, writable) VALUES (" +
+		                         to_string(element_table_id) + ", " + GqlQuoteLiteral(column.Name()) + ", " +
+		                         GqlQuoteLiteral(column.Name()) + ", " + GqlQuoteLiteral(column.Type().ToString()) +
+		                         ", true, " + (table.readonly ? "false" : "true") + ")");
 	}
 }
 
 static uint64_t InsertElementTable(Connection &connection, uint64_t graph_id, const char *kind,
                                    const TableDescription &table, const string &key_column, const char *ownership) {
-	auto result =
-	    Query(connection, "INSERT INTO gql_internal.graph_element_tables "
-	                      "(graph_id, element_kind, catalog_name, schema_name, "
-	                      "table_name, key_columns, "
-	                      "ownership, access_mode) VALUES (" +
-	                          to_string(graph_id) + ", " + QuoteLiteral(kind) + ", " + QuoteLiteral(table.database) +
-	                          ", " + QuoteLiteral(table.schema) + ", " + QuoteLiteral(table.table) + ", [" +
-	                          QuoteLiteral(key_column) + "], " + QuoteLiteral(ownership) + ", " +
-	                          (table.readonly ? "'READ_ONLY'" : "'READ_WRITE'") + ") RETURNING element_table_id");
+	auto result = GqlQuery(
+	    connection, "INSERT INTO gql_internal.graph_element_tables "
+	                "(graph_id, element_kind, catalog_name, schema_name, "
+	                "table_name, key_columns, "
+	                "ownership, access_mode) VALUES (" +
+	                    to_string(graph_id) + ", " + GqlQuoteLiteral(kind) + ", " + GqlQuoteLiteral(table.database) +
+	                    ", " + GqlQuoteLiteral(table.schema) + ", " + GqlQuoteLiteral(table.table) + ", [" +
+	                    GqlQuoteLiteral(key_column) + "], " + GqlQuoteLiteral(ownership) + ", " +
+	                    (table.readonly ? "'READ_ONLY'" : "'READ_WRITE'") + ") RETURNING element_table_id");
 	return result->GetValue(0, 0).GetValue<uint64_t>();
 }
 
@@ -152,9 +133,9 @@ static void InsertLabelMapping(Connection &connection, uint64_t element_table_id
 	if (column_name.empty()) {
 		return;
 	}
-	Query(connection, "INSERT INTO gql_internal.graph_label_mappings "
-	                  "(element_table_id, mapping_kind, column_name) VALUES (" +
-	                      to_string(element_table_id) + ", 'SCALAR_COLUMN', " + QuoteLiteral(column_name) + ")");
+	GqlQuery(connection, "INSERT INTO gql_internal.graph_label_mappings "
+	                     "(element_table_id, mapping_kind, column_name) VALUES (" +
+	                         to_string(element_table_id) + ", 'SCALAR_COLUMN', " + GqlQuoteLiteral(column_name) + ")");
 }
 
 void GqlAttachManagedGraphTables(Connection &connection, const string &graph_name, const string &vertex_table,
@@ -184,11 +165,11 @@ void GqlAttachManagedGraphTables(Connection &connection, const string &graph_nam
 		ValidateEndpoint(connection, *edge, resolved_edge_target, *vertex, resolved_vertex_key, "destination");
 	}
 
-	auto graph = Query(connection, "SELECT g.graph_id, coalesce(gs.storage_mode, 'EMPTY'), "
-	                               "(SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = "
-	                               "g.graph_id) FROM gql_internal.graphs g LEFT JOIN "
-	                               "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
-	                                   QuoteLiteral(graph_name));
+	auto graph = GqlQuery(connection, "SELECT g.graph_id, coalesce(gs.storage_mode, 'EMPTY'), "
+	                                  "(SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = "
+	                                  "g.graph_id) FROM gql_internal.graphs g LEFT JOIN "
+	                                  "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
+	                                      GqlQuoteLiteral(graph_name));
 	if (graph->RowCount() == 0) {
 		throw InvalidInputException("Graph '%s' does not exist; create it before COPY GRAPH", graph_name);
 	}
@@ -212,19 +193,21 @@ void GqlAttachManagedGraphTables(Connection &connection, const string &graph_nam
 	InsertProperties(connection, edge_id, *edge,
 	                 {resolved_edge_key.Name(), resolved_edge_source.Name(), resolved_edge_target.Name(),
 	                  resolved_edge_label.Name()});
-	Query(connection,
-	      "INSERT INTO gql_internal.graph_edge_endpoints "
-	      "(edge_table_id, source_vertex_table_id, target_vertex_table_id, source_columns, "
-	      "target_columns, source_key_columns, target_key_columns) VALUES (" +
-	          to_string(edge_id) + ", " + to_string(vertex_id) + ", " + to_string(vertex_id) + ", [" +
-	          QuoteLiteral(resolved_edge_source.Name()) + "], [" + QuoteLiteral(resolved_edge_target.Name()) + "], [" +
-	          QuoteLiteral(resolved_vertex_key.Name()) + "], [" + QuoteLiteral(resolved_vertex_key.Name()) + "])");
-	Query(connection,
-	      "UPDATE gql_internal.graph_storage SET storage_mode = 'TABLE_BACKED', default_catalog = " +
-	          QuoteLiteral(vertex->database) + ", default_schema = " + QuoteLiteral(vertex->schema) +
-	          ", schema_version = schema_version + 1, csr_policy = 'MANUAL' WHERE graph_id = " + to_string(graph_id));
-	Query(connection,
-	      "UPDATE gql_internal.graphs SET graph_version = graph_version + 1 WHERE graph_id = " + to_string(graph_id));
+	GqlQuery(connection, "INSERT INTO gql_internal.graph_edge_endpoints "
+	                     "(edge_table_id, source_vertex_table_id, target_vertex_table_id, source_columns, "
+	                     "target_columns, source_key_columns, target_key_columns) VALUES (" +
+	                         to_string(edge_id) + ", " + to_string(vertex_id) + ", " + to_string(vertex_id) + ", [" +
+	                         GqlQuoteLiteral(resolved_edge_source.Name()) + "], [" +
+	                         GqlQuoteLiteral(resolved_edge_target.Name()) + "], [" +
+	                         GqlQuoteLiteral(resolved_vertex_key.Name()) + "], [" +
+	                         GqlQuoteLiteral(resolved_vertex_key.Name()) + "])");
+	GqlQuery(
+	    connection,
+	    "UPDATE gql_internal.graph_storage SET storage_mode = 'TABLE_BACKED', default_catalog = " +
+	        GqlQuoteLiteral(vertex->database) + ", default_schema = " + GqlQuoteLiteral(vertex->schema) +
+	        ", schema_version = schema_version + 1, csr_policy = 'MANUAL' WHERE graph_id = " + to_string(graph_id));
+	GqlQuery(connection, "UPDATE gql_internal.graphs SET graph_version = graph_version + 1 WHERE graph_id = " +
+	                         to_string(graph_id));
 }
 
 static string ReadSingleColumn(const Value &value, const char *description) {
@@ -236,9 +219,9 @@ static string ReadSingleColumn(const Value &value, const char *description) {
 }
 
 static void LoadProperties(Connection &connection, GqlElementTableBinding &table) {
-	auto result = Query(connection, "SELECT property_name, column_name FROM "
-	                                "gql_internal.graph_property_mappings WHERE element_table_id = " +
-	                                    to_string(table.element_table_id));
+	auto result = GqlQuery(connection, "SELECT property_name, column_name FROM "
+	                                   "gql_internal.graph_property_mappings WHERE element_table_id = " +
+	                                       to_string(table.element_table_id));
 	for (idx_t row = 0; row < result->RowCount(); row++) {
 		table.property_columns.emplace(result->GetValue(0, row).GetValue<string>(),
 		                               result->GetValue(1, row).GetValue<string>());
@@ -246,10 +229,10 @@ static void LoadProperties(Connection &connection, GqlElementTableBinding &table
 }
 
 static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
-	auto result = Query(connection, "SELECT mapping_kind, column_name FROM "
-	                                "gql_internal.graph_label_mappings WHERE "
-	                                "element_table_id = " +
-	                                    to_string(table.element_table_id));
+	auto result = GqlQuery(connection, "SELECT mapping_kind, column_name FROM "
+	                                   "gql_internal.graph_label_mappings WHERE "
+	                                   "element_table_id = " +
+	                                       to_string(table.element_table_id));
 	if (result->RowCount() == 0) {
 		return;
 	}
@@ -261,9 +244,9 @@ static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
 
 bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result) {
 	Connection connection(*context.db);
-	auto storage = Query(connection, "SELECT g.graph_id, gs.storage_mode FROM gql_internal.graphs g JOIN "
-	                                 "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
-	                                     QuoteLiteral(graph_name));
+	auto storage = GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode FROM gql_internal.graphs g JOIN "
+	                                    "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
+	                                        GqlQuoteLiteral(graph_name));
 	if (storage->RowCount() == 0) {
 		throw InvalidInputException("Graph '%s' does not exist", graph_name);
 	}
@@ -272,10 +255,11 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 		return false;
 	}
 
-	auto tables = Query(connection, "SELECT element_table_id, element_kind, catalog_name, schema_name, "
-	                                "table_name, "
-	                                "key_columns, ownership FROM gql_internal.graph_element_tables WHERE graph_id = " +
-	                                    to_string(result.graph_id) + " ORDER BY element_kind");
+	auto tables =
+	    GqlQuery(connection, "SELECT element_table_id, element_kind, catalog_name, schema_name, "
+	                         "table_name, "
+	                         "key_columns, ownership FROM gql_internal.graph_element_tables WHERE graph_id = " +
+	                             to_string(result.graph_id) + " ORDER BY element_kind");
 	if (tables->RowCount() != 2) {
 		throw InvalidInputException("Table-backed graph '%s' must contain one vertex and one edge table", graph_name);
 	}
@@ -295,10 +279,10 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 		LoadProperties(connection, *target);
 	}
 
-	auto endpoints = Query(connection, "SELECT source_vertex_table_id, target_vertex_table_id, source_columns, "
-	                                   "target_columns FROM gql_internal.graph_edge_endpoints WHERE "
-	                                   "edge_table_id = " +
-	                                       to_string(result.edge.element_table_id));
+	auto endpoints = GqlQuery(connection, "SELECT source_vertex_table_id, target_vertex_table_id, source_columns, "
+	                                      "target_columns FROM gql_internal.graph_edge_endpoints WHERE "
+	                                      "edge_table_id = " +
+	                                          to_string(result.edge.element_table_id));
 	if (endpoints->RowCount() != 1 ||
 	    endpoints->GetValue(0, 0).GetValue<uint64_t>() != result.vertex.element_table_id ||
 	    endpoints->GetValue(1, 0).GetValue<uint64_t>() != result.vertex.element_table_id) {

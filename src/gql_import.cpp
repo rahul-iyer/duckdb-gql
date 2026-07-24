@@ -1,6 +1,7 @@
 #include "gql_import.hpp"
 
 #include "gql_catalog.hpp"
+#include "gql_sql_utils.hpp"
 #include "gql_storage.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -44,41 +45,13 @@ static unique_ptr<GlobalTableFunctionState> CopyGraphInit(ClientContext &, Table
 	return make_uniq<CopyGraphState>();
 }
 
-static string QuoteLiteral(const string &value) {
-	string result = "'";
-	for (const auto character : value) {
-		result += character == '\'' ? "''" : string(1, character);
-	}
-	return result + "'";
-}
-
-static string QuoteIdentifier(const string &value) {
-	string result = "\"";
-	for (const auto character : value) {
-		result += character == '"' ? "\"\"" : string(1, character);
-	}
-	return result + "\"";
-}
-
 static string Trimmed(string value) {
 	StringUtil::Trim(value);
 	return value;
 }
 
-static void ThrowOnError(const MaterializedQueryResult &result) {
-	if (result.HasError()) {
-		throw InvalidInputException("Graph import failed: %s", result.GetError());
-	}
-}
-
-static unique_ptr<MaterializedQueryResult> Query(Connection &connection, const string &sql) {
-	auto result = connection.Query(sql);
-	ThrowOnError(*result);
-	return result;
-}
-
 static idx_t ScalarCount(Connection &connection, const string &sql) {
-	auto result = Query(connection, sql);
+	auto result = GqlQuery(connection, sql);
 	return result->GetValue(0, 0).GetValue<idx_t>();
 }
 
@@ -162,7 +135,7 @@ static GraphHeaderField ParseField(const string &column_name, const LogicalType 
 }
 
 static GraphHeaderSchema ReadSchema(Connection &connection, const string &table_name, bool relationships) {
-	auto result = Query(connection, "SELECT * FROM " + QuoteIdentifier(table_name) + " LIMIT 0");
+	auto result = GqlQuery(connection, "SELECT * FROM " + GqlQuoteIdentifier(table_name) + " LIMIT 0");
 	GraphHeaderSchema schema;
 	for (idx_t index = 0; index < result->names.size(); index++) {
 		if (result->names[index] == IMPORT_ROW_ID) {
@@ -230,19 +203,19 @@ static GraphHeaderSchema ReadSchema(Connection &connection, const string &table_
 
 static string ScanExpression(const string &path, const string &format) {
 	if (format == "csv") {
-		return "read_csv(" + QuoteLiteral(path) + ", header = true, auto_detect = true, all_varchar = true)";
+		return "read_csv(" + GqlQuoteLiteral(path) + ", header = true, auto_detect = true, all_varchar = true)";
 	}
-	return "read_parquet(" + QuoteLiteral(path) + ")";
+	return "read_parquet(" + GqlQuoteLiteral(path) + ")";
 }
 
 static void CreateRawTable(Connection &connection, const string &table_name, const string &path, const string &format) {
-	Query(connection, "CREATE TEMP TABLE " + QuoteIdentifier(table_name) +
-	                      " AS SELECT row_number() OVER ()::UBIGINT AS " + QuoteIdentifier(IMPORT_ROW_ID) +
-	                      ", * FROM " + ScanExpression(path, format));
+	GqlQuery(connection, "CREATE TEMP TABLE " + GqlQuoteIdentifier(table_name) +
+	                         " AS SELECT row_number() OVER ()::UBIGINT AS " + GqlQuoteIdentifier(IMPORT_ROW_ID) +
+	                         ", * FROM " + ScanExpression(path, format));
 }
 
 static string Column(const string &alias, const GraphHeaderField &field) {
-	return alias + "." + QuoteIdentifier(field.column_name);
+	return alias + "." + GqlQuoteIdentifier(field.column_name);
 }
 
 static string ExternalId(const string &alias, const GraphHeaderField &field) {
@@ -317,8 +290,7 @@ static string NativeValueExpression(const GraphHeaderField &field, const string 
 		} else if (element_type == "string" || element_type == "char") {
 			target_type = "VARCHAR";
 		} else {
-			throw InvalidInputException("COPY GRAPH list property type '%s' is not supported yet",
-			                            field.declared_type);
+			throw InvalidInputException("COPY GRAPH list property type '%s' is not supported yet", field.declared_type);
 		}
 		if (field.source_type.id() == LogicalTypeId::LIST) {
 			return "CAST(" + source + " AS " + target_type + "[])";
@@ -344,11 +316,11 @@ static string NativeValueExpression(const GraphHeaderField &field, const string 
 	}
 	if (type == "variant") {
 		auto payload = "substring(" + source + ", 3)";
-		return "CASE WHEN " + source + " IS NULL THEN NULL WHEN left(" + source +
-		       ", 2) = 'i:' THEN CAST(CAST(" + payload + " AS BIGINT) AS VARIANT) WHEN left(" + source +
-		       ", 2) = 'd:' THEN CAST(CAST(" + payload + " AS DOUBLE) AS VARIANT) WHEN left(" + source +
-		       ", 2) = 'b:' THEN CAST(CAST(" + payload + " AS BOOLEAN) AS VARIANT) WHEN left(" + source +
-		       ", 2) = 's:' THEN CAST(" + payload + " AS VARIANT) ELSE error('Invalid COPY GRAPH VARIANT encoding') END";
+		return "CASE WHEN " + source + " IS NULL THEN NULL WHEN left(" + source + ", 2) = 'i:' THEN CAST(CAST(" +
+		       payload + " AS BIGINT) AS VARIANT) WHEN left(" + source + ", 2) = 'd:' THEN CAST(CAST(" + payload +
+		       " AS DOUBLE) AS VARIANT) WHEN left(" + source + ", 2) = 'b:' THEN CAST(CAST(" + payload +
+		       " AS BOOLEAN) AS VARIANT) WHEN left(" + source + ", 2) = 's:' THEN CAST(" + payload +
+		       " AS VARIANT) ELSE error('Invalid COPY GRAPH VARIANT encoding') END";
 	}
 	if (type == "date") {
 		return "CAST(" + source + " AS DATE)";
@@ -382,7 +354,7 @@ static void ValidateNativeProperties(const vector<GraphHeaderField> &properties,
 static string NativePropertyProjection(const vector<GraphHeaderField> &properties, const string &alias) {
 	string result;
 	for (const auto &property : properties) {
-		result += ", " + NativeValueExpression(property, alias) + " AS " + QuoteIdentifier(property.property_name);
+		result += ", " + NativeValueExpression(property, alias) + " AS " + GqlQuoteIdentifier(property.property_name);
 	}
 	return result;
 }
@@ -392,18 +364,18 @@ static string NativeLabelExpression(const GraphHeaderSchema &schema, const strin
 		return "CAST('' AS VARCHAR)";
 	}
 	auto label = "CAST(" + Column(alias, schema.labels[0]) + " AS VARCHAR)";
-	return "array_to_string(list_transform(string_split(" + label +
-	       ", ';'), item -> lower(trim(item))), ';')";
+	return "array_to_string(list_transform(string_split(" + label + ", ';'), item -> lower(trim(item))), ';')";
 }
 
-static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema &nodes, const GraphHeaderSchema &edges) {
+static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema &nodes,
+                                const GraphHeaderSchema &edges) {
 	if (nodes.labels.size() > 1) {
 		throw InvalidInputException("COPY GRAPH currently supports at most one node :LABEL column");
 	}
 	auto node_id = ExternalId("n", nodes.id);
-	auto node_validation = Query(connection, "SELECT count(*), count(*) FILTER (WHERE " + node_id +
-	                                             " IS NULL OR trim(" + node_id + ") = ''), count(DISTINCT " + node_id +
-	                                             ") FROM gql_copy_nodes n");
+	auto node_validation =
+	    GqlQuery(connection, "SELECT count(*), count(*) FILTER (WHERE " + node_id + " IS NULL OR trim(" + node_id +
+	                             ") = ''), count(DISTINCT " + node_id + ") FROM gql_copy_nodes n");
 	auto node_count = node_validation->GetValue(0, 0).GetValue<int64_t>();
 	if (node_validation->GetValue(1, 0).GetValue<int64_t>() != 0) {
 		throw InvalidInputException("Graph-header node :ID values must be non-null and non-empty");
@@ -414,10 +386,10 @@ static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema 
 	auto relationship_type = ExternalId("r", edges.types[0]);
 	auto start_id = ExternalId("r", edges.start_id);
 	auto end_id = ExternalId("r", edges.end_id);
-	auto edge_validation = Query(
+	auto edge_validation = GqlQuery(
 	    connection, "SELECT count(*) FILTER (WHERE " + relationship_type + " IS NULL OR trim(" + relationship_type +
 	                    ") = ''), count(*) FILTER (WHERE " + start_id + " IS NULL OR " + end_id + " IS NULL OR n." +
-	                    QuoteIdentifier(IMPORT_ROW_ID) + " IS NULL OR n2." + QuoteIdentifier(IMPORT_ROW_ID) +
+	                    GqlQuoteIdentifier(IMPORT_ROW_ID) + " IS NULL OR n2." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
 	                    " IS NULL) FROM gql_copy_edges r LEFT JOIN gql_copy_nodes n ON " + start_id + " = " + node_id +
 	                    " LEFT JOIN gql_copy_nodes n2 ON " + end_id + " = " + ExternalId("n2", nodes.id));
 	if (edge_validation->GetValue(0, 0).GetValue<int64_t>() != 0) {
@@ -445,16 +417,16 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 	string qualified_edge;
 	connection.BeginTransaction();
 	try {
-		auto graph = Query(connection, "SELECT g.graph_id, gs.storage_mode, "
-		                               "(SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = "
-		                               "g.graph_id) FROM gql_internal.graphs g JOIN gql_internal.graph_storage gs "
-		                               "USING (graph_id) WHERE g.graph_name = " +
-		                                   QuoteLiteral(data.graph_name));
+		auto graph =
+		    GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode, "
+		                         "(SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = "
+		                         "g.graph_id) FROM gql_internal.graphs g JOIN gql_internal.graph_storage gs "
+		                         "USING (graph_id) WHERE g.graph_name = " +
+		                             GqlQuoteLiteral(data.graph_name));
 		if (graph->RowCount() == 0) {
 			throw InvalidInputException("Graph '%s' does not exist; create it before COPY GRAPH", data.graph_name);
 		}
-		if (graph->GetValue(1, 0).GetValue<string>() != "EMPTY" ||
-		    graph->GetValue(2, 0).GetValue<int64_t>() != 0) {
+		if (graph->GetValue(1, 0).GetValue<string>() != "EMPTY" || graph->GetValue(2, 0).GetValue<int64_t>() != 0) {
 			throw InvalidInputException("Graph '%s' must be empty before COPY GRAPH", data.graph_name);
 		}
 		auto graph_id = graph->GetValue(0, 0).GetValue<uint64_t>();
@@ -474,37 +446,38 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 			ValidateNativeInput(connection, nodes, edges);
 		}
 
-		Query(connection, "CREATE SCHEMA IF NOT EXISTS gql_data");
+		GqlQuery(connection, "CREATE SCHEMA IF NOT EXISTS gql_data");
 		auto vertex_table = "graph_" + to_string(graph_id) + "_vertices";
 		auto edge_table = "graph_" + to_string(graph_id) + "_edges";
-		auto current_catalog = Query(connection, "SELECT current_database()")->GetValue(0, 0).GetValue<string>();
-		qualified_vertex = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(vertex_table);
-		qualified_edge = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(edge_table);
+		auto current_catalog = GqlQuery(connection, "SELECT current_database()")->GetValue(0, 0).GetValue<string>();
+		qualified_vertex = GqlQuoteIdentifier(current_catalog) + ".gql_data." + GqlQuoteIdentifier(vertex_table);
+		qualified_edge = GqlQuoteIdentifier(current_catalog) + ".gql_data." + GqlQuoteIdentifier(edge_table);
 
-		Query(connection, "CREATE TABLE " + qualified_vertex + " AS SELECT n." +
-		                      QuoteIdentifier(IMPORT_ROW_ID) + " AS " + QuoteIdentifier("__gql_id") + ", " +
-		                      NativeLabelExpression(nodes, "n") + " AS " + QuoteIdentifier("__gql_label") +
-		                      NativePropertyProjection(nodes.properties, "n") + " FROM gql_copy_nodes n");
+		GqlQuery(connection, "CREATE TABLE " + qualified_vertex + " AS SELECT n." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
+		                         " AS " + GqlQuoteIdentifier("__gql_id") + ", " + NativeLabelExpression(nodes, "n") +
+		                         " AS " + GqlQuoteIdentifier("__gql_label") +
+		                         NativePropertyProjection(nodes.properties, "n") + " FROM gql_copy_nodes n");
 		vertex_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_vertex);
-		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
-		                                                                     "_vertex_id_seq") +
-		                      " START " + to_string(vertex_count + 1));
+		GqlQuery(connection, "CREATE SEQUENCE gql_internal." +
+		                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_vertex_id_seq") + " START " +
+		                         to_string(vertex_count + 1));
 
 		auto start_id = ExternalId("r", edges.start_id);
 		auto end_id = ExternalId("r", edges.end_id);
 		auto relationship_type = ExternalId("r", edges.types[0]);
-		Query(connection, "CREATE TABLE " + qualified_edge + " AS SELECT row_number() OVER ()::UBIGINT AS " +
-		                      QuoteIdentifier("__gql_edge_id") + ", s." + QuoteIdentifier(IMPORT_ROW_ID) + " AS " +
-		                      QuoteIdentifier("__gql_source_id") + ", t." + QuoteIdentifier(IMPORT_ROW_ID) + " AS " +
-		                      QuoteIdentifier("__gql_target_id") + ", lower(trim(" + relationship_type + ")) AS " +
-		                      QuoteIdentifier("__gql_type") + NativePropertyProjection(edges.properties, "r") +
-		                      " FROM gql_copy_edges r LEFT JOIN gql_copy_nodes s ON " + start_id + " = " +
-		                      ExternalId("s", nodes.id) + " LEFT JOIN gql_copy_nodes t ON " + end_id + " = " +
-		                      ExternalId("t", nodes.id));
+		GqlQuery(connection, "CREATE TABLE " + qualified_edge + " AS SELECT row_number() OVER ()::UBIGINT AS " +
+		                         GqlQuoteIdentifier("__gql_edge_id") + ", s." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
+		                         " AS " + GqlQuoteIdentifier("__gql_source_id") + ", t." +
+		                         GqlQuoteIdentifier(IMPORT_ROW_ID) + " AS " + GqlQuoteIdentifier("__gql_target_id") +
+		                         ", lower(trim(" + relationship_type + ")) AS " + GqlQuoteIdentifier("__gql_type") +
+		                         NativePropertyProjection(edges.properties, "r") +
+		                         " FROM gql_copy_edges r LEFT JOIN gql_copy_nodes s ON " + start_id + " = " +
+		                         ExternalId("s", nodes.id) + " LEFT JOIN gql_copy_nodes t ON " + end_id + " = " +
+		                         ExternalId("t", nodes.id));
 		edge_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_edge);
-		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
-		                                                                     "_edge_id_seq") +
-		                      " START " + to_string(edge_count + 1));
+		GqlQuery(connection, "CREATE SEQUENCE gql_internal." +
+		                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_edge_id_seq") + " START " +
+		                         to_string(edge_count + 1));
 
 		GqlAttachManagedGraphTables(connection, data.graph_name, qualified_vertex, "__gql_id", "__gql_label",
 		                            qualified_edge, "__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type",

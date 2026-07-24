@@ -9,29 +9,28 @@ namespace duckdb {
 enum class GqlProcedureArgumentMode : uint8_t { CONFIGURATION, INPUT };
 
 struct GqlProcedureArgumentDefinition {
-  string name;
-  GqlType type;
-  GqlProcedureArgumentMode mode;
-  bool optional = false;
+	string name;
+	GqlType type;
+	GqlProcedureArgumentMode mode;
+	bool optional = false;
 };
 
 struct GqlProcedureOutputDefinition {
-  string name;
-  GqlType type;
+	string name;
+	GqlType type;
 };
 
 struct GqlProcedureDefinition {
-  string procedure_namespace;
-  string name;
-  GqlProcedureInputMode input_mode;
-  vector<GqlProcedureArgumentDefinition> arguments;
-  vector<GqlProcedureOutputDefinition> outputs;
-  bool read_only = true;
-  bool blocking = true;
+	string procedure_namespace;
+	string name;
+	GqlProcedureInputMode input_mode;
+	vector<GqlProcedureArgumentDefinition> arguments;
+	vector<GqlProcedureOutputDefinition> outputs;
+	bool read_only = true;
+	bool blocking = true;
 };
 
-const GqlProcedureDefinition *
-GqlFindProcedure(const string &procedure_namespace, const string &name);
+const GqlProcedureDefinition *GqlFindProcedure(const string &procedure_namespace, const string &name);
 TableFunction GqlAlgorithmCallFunction();
 TableFunction GqlAlgorithmResultFunction();
 
