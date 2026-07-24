@@ -87,3 +87,59 @@ SELECT len(regexp_extract_all(content, 'Join Type: LEFT'))
 FROM read_text('__TEST_DIR__/gql_optional_plan.txt')
 ----
 1
+
+# Managed recursive paths keep their different-edge trail as native UBIGINT
+# identities. This plan gate prevents a regression to per-edge VARCHAR casts.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_recursive_plan.txt'
+
+statement ok
+MATCH (source:Person)-[:KNOWS]->*(destination:Person)
+RETURN destination.name
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT
+    contains(content, '(edge_ids, __gql_edge_id))'),
+    contains(content, 'CAST(__gql_edge_id AS VARCHAR)')
+FROM read_text('__TEST_DIR__/gql_recursive_plan.txt')
+----
+true	false
+
+# DuckGQL queries use DuckDB's native EXPLAIN renderer after GQL lowering and
+# bind replacement. The customer sees the physical managed-table plan rather
+# than the gql_match_relational implementation boundary.
+query II
+EXPLAIN MATCH (person:Person)
+WHERE person.age >= 35
+RETURN person.name
+----
+physical_plan	<REGEX>:.*graph_1_vertices.*
+
+query II
+EXPLAIN ANALYZE MATCH (person:Person)
+WHERE person.age >= 35
+RETURN person.name
+----
+analyzed_plan	<REGEX>:.*graph_1_vertices.*
+
+query II
+EXPLAIN (FORMAT JSON) MATCH (person:Person)
+RETURN person.name
+----
+physical_plan	<REGEX>:.*graph_1_vertices.*
+
+statement ok
+CALL gql_build_csr('optimizer_plan')
+
+query II
+EXPLAIN CALL algo.degree('optimizer_plan')
+YIELD vertex_id, total_degree
+RETURN vertex_id, total_degree
+----
+physical_plan	<REGEX>:.*Function: DEGREE.*

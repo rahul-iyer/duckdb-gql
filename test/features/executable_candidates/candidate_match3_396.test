@@ -60,5 +60,5 @@ MATCH (a {name: 'a'}), (b {name: 'b'}), (c {name: 'c'})
 MATCH (a)-[]->(x), (b)-[]->(x), (c)-[]->(x)
 RETURN x
 ----
-{'__gql_id': 4, '__gql_labels': , 'name': d}
-{'__gql_id': 5, '__gql_labels': , 'name': e}
+{'vertex_id': 4, '__gql_labels': , 'name': d}
+{'vertex_id': 5, '__gql_labels': , 'name': e}

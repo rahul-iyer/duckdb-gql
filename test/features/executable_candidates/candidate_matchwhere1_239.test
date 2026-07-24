@@ -37,4 +37,4 @@ MATCH p = (n)-[]->(x)
 WHERE length(p) = 1
 RETURN x
 ----
-{'__gql_id': 2, '__gql_labels': b, 'name': B}
+{'vertex_id': 2, '__gql_labels': b, 'name': B}

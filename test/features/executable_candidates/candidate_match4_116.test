@@ -38,4 +38,4 @@ query TT rowsort
 MATCH (a:Artist)-[:WORKED_WITH* {year: 1988}]->(b:Artist)
 RETURN *
 ----
-{'__gql_id': 2, '__gql_labels': artist;b}	{'__gql_id': 3, '__gql_labels': artist;c}
+{'vertex_id': 2, '__gql_labels': artist;b}	{'vertex_id': 3, '__gql_labels': artist;c}

@@ -33,4 +33,4 @@ query T rowsort
 MATCH (a)
 RETURN a AS ColumnName
 ----
-{'__gql_id': 1, '__gql_labels': singleton}
+{'vertex_id': 1, '__gql_labels': singleton}

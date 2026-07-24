@@ -38,5 +38,5 @@ query T rowsort
 MATCH ()-[rel:KNOWS]->(x)
 RETURN x
 ----
-{'__gql_id': 2, '__gql_labels': b, 'num': 2}
-{'__gql_id': 3, '__gql_labels': c, 'num': 3}
+{'vertex_id': 2, '__gql_labels': b, 'num': 2}
+{'vertex_id': 3, '__gql_labels': c, 'num': 3}

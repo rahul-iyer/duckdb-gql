@@ -33,4 +33,4 @@ query TI rowsort
 MATCH (a)
 RETURN a, count(a) + 3
 ----
-{'__gql_id': 1, '__gql_labels': , 'id': 42}	4
+{'vertex_id': 1, '__gql_labels': , 'id': 42}	4

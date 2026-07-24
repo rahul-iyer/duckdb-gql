@@ -36,4 +36,4 @@ OPTIONAL MATCH (a)-[:FOO]->(b:B)
 OPTIONAL MATCH (b)<-[:BAR*]-(c:B)
 RETURN a, b, c
 ----
-{'__gql_id': 1, '__gql_labels': a}	NULL	NULL
+{'vertex_id': 1, '__gql_labels': a}	NULL	NULL

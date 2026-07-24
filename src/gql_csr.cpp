@@ -67,7 +67,7 @@ static GraphVersion ReadGraphVersion(Connection &connection,
           result->GetValue(1, 0).GetValue<uint64_t>()};
 }
 
-static void FinalizeOffsets(vector<idx_t> &offsets) {
+static void FinalizeOffsets(vector<uint64_t> &offsets) {
   for (idx_t index = 1; index < offsets.size(); index++) {
     offsets[index] += offsets[index - 1];
   }
@@ -102,6 +102,25 @@ static uint32_t CsrLabelId(GqlCsrSnapshot &snapshot, const string &label) {
   auto identifier = NumericCast<uint32_t>(snapshot.label_ids.size() + 1);
   snapshot.label_ids.emplace(std::move(normalized), identifier);
   return identifier;
+}
+
+template <class HASH_CONTAINER>
+static idx_t HashContainerStorageBytes(const HASH_CONTAINER &container) {
+  // std::unordered_* does not expose node allocation sizes. Count its bucket
+  // array plus one value and two link-sized words per node as a stable,
+  // allocator-independent estimate.
+  return container.bucket_count() * sizeof(void *) +
+         container.size() *
+             (sizeof(typename HASH_CONTAINER::value_type) + 2 * sizeof(void *));
+}
+
+static idx_t LabelDictionaryStorageBytes(
+    const unordered_map<string, uint32_t> &labels) {
+  idx_t bytes = HashContainerStorageBytes(labels);
+  for (const auto &entry : labels) {
+    bytes += entry.first.capacity() + 1;
+  }
+  return bytes;
 }
 
 static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
@@ -176,11 +195,15 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
       break;
     }
   }
+  idx_t transient_vertex_id_bytes = 0;
   if (!snapshot->dense_vertex_ids) {
     snapshot->ordinal_by_id.reserve(snapshot->vertex_ids.size());
     for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
       snapshot->ordinal_by_id.emplace(snapshot->vertex_ids[ordinal], ordinal);
     }
+  } else {
+    transient_vertex_id_bytes = snapshot->vertex_ids.AllocatedBytes();
+    snapshot->vertex_ids.MakeImplicitDense();
   }
 
   auto label_projection = binding.edge.label_column.empty()
@@ -263,17 +286,24 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
 
   FinalizeOffsets(snapshot->outgoing_offsets);
   FinalizeOffsets(snapshot->incoming_offsets);
-  snapshot->outgoing_neighbors.resize(expected_edges);
+  const bool compact_neighbors =
+      snapshot->vertex_ids.empty() ||
+      snapshot->vertex_ids.size() - 1 <=
+          std::numeric_limits<uint32_t>::max();
+  snapshot->outgoing_neighbors.Resize(expected_edges, compact_neighbors);
   snapshot->outgoing_edge_ids.resize(expected_edges);
-  snapshot->outgoing_label_ids.resize(expected_edges);
-  snapshot->incoming_neighbors.resize(expected_edges);
+  snapshot->outgoing_label_ids.Reset(expected_edges, true, 0);
+  snapshot->incoming_neighbors.Resize(expected_edges, compact_neighbors);
   snapshot->incoming_edge_ids.resize(expected_edges);
-  snapshot->incoming_label_ids.resize(expected_edges);
+  snapshot->incoming_label_ids.Reset(expected_edges, true, 0);
   auto outgoing_cursor = snapshot->outgoing_offsets;
   auto incoming_cursor = snapshot->incoming_offsets;
   auto edge_rows = connection.SendQuery(edge_projection);
   ThrowOnError(*edge_rows);
   idx_t scattered_edges = 0;
+  bool edge_labels_uniform = true;
+  bool saw_edge_label = false;
+  uint32_t uniform_edge_label_id = 0;
   while (auto chunk = edge_rows->Fetch()) {
     UnifiedVectorFormat edge_id_data;
     UnifiedVectorFormat source_data;
@@ -311,14 +341,28 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
                        ? label_values[label_index].GetString()
                        : string();
       auto label_id = CsrLabelId(*snapshot, label);
+      if (!saw_edge_label) {
+        uniform_edge_label_id = label_id;
+        saw_edge_label = true;
+        snapshot->outgoing_label_ids.Reset(expected_edges, true, label_id);
+        snapshot->incoming_label_ids.Reset(expected_edges, true, label_id);
+      } else if (edge_labels_uniform && label_id != uniform_edge_label_id) {
+        edge_labels_uniform = false;
+        snapshot->outgoing_label_ids.MaterializeUniform();
+        snapshot->incoming_label_ids.MaterializeUniform();
+      }
       auto outgoing = outgoing_cursor[source]++;
-      snapshot->outgoing_neighbors[outgoing] = target;
+      snapshot->outgoing_neighbors.Set(outgoing, target);
       snapshot->outgoing_edge_ids[outgoing] = edge_id;
-      snapshot->outgoing_label_ids[outgoing] = label_id;
+      if (!edge_labels_uniform) {
+        snapshot->outgoing_label_ids.Set(outgoing, label_id);
+      }
       auto incoming = incoming_cursor[target]++;
-      snapshot->incoming_neighbors[incoming] = source;
+      snapshot->incoming_neighbors.Set(incoming, source);
       snapshot->incoming_edge_ids[incoming] = edge_id;
-      snapshot->incoming_label_ids[incoming] = label_id;
+      if (!edge_labels_uniform) {
+        snapshot->incoming_label_ids.Set(incoming, label_id);
+      }
       scattered_edges++;
     }
   }
@@ -326,18 +370,32 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context,
     throw InternalException(
         "GQL CSR edge scan changed within a read transaction");
   }
+  snapshot->topology_bytes =
+      snapshot->outgoing_offsets.capacity() * sizeof(uint64_t) +
+      snapshot->outgoing_neighbors.AllocatedBytes() +
+      snapshot->incoming_offsets.capacity() * sizeof(uint64_t) +
+      snapshot->incoming_neighbors.AllocatedBytes();
+  snapshot->identity_bytes =
+      snapshot->vertex_ids.AllocatedBytes() +
+      snapshot->outgoing_edge_ids.capacity() * sizeof(uint64_t) +
+      snapshot->incoming_edge_ids.capacity() * sizeof(uint64_t);
+  snapshot->label_bytes =
+      snapshot->vertex_label_offsets.capacity() * sizeof(idx_t) +
+      snapshot->vertex_label_ids.capacity() * sizeof(uint32_t) +
+      snapshot->outgoing_label_ids.AllocatedBytes() +
+      snapshot->incoming_label_ids.AllocatedBytes() +
+      LabelDictionaryStorageBytes(snapshot->label_ids);
+  snapshot->auxiliary_bytes =
+      sizeof(GqlCsrSnapshot) +
+      HashContainerStorageBytes(snapshot->ordinal_by_id);
+  snapshot->build_auxiliary_bytes =
+      transient_vertex_id_bytes +
+      outgoing_cursor.capacity() * sizeof(uint64_t) +
+      incoming_cursor.capacity() * sizeof(uint64_t) +
+      HashContainerStorageBytes(edge_ids);
   snapshot->memory_bytes =
-      snapshot->vertex_ids.size() * sizeof(uint64_t) +
-      snapshot->vertex_label_offsets.size() * sizeof(idx_t) +
-      snapshot->vertex_label_ids.size() * sizeof(uint32_t) +
-      snapshot->outgoing_offsets.size() * sizeof(idx_t) +
-      snapshot->outgoing_neighbors.size() * sizeof(idx_t) +
-      snapshot->outgoing_edge_ids.size() * sizeof(uint64_t) +
-      snapshot->outgoing_label_ids.size() * sizeof(uint32_t) +
-      snapshot->incoming_offsets.size() * sizeof(idx_t) +
-      snapshot->incoming_neighbors.size() * sizeof(idx_t) +
-      snapshot->incoming_edge_ids.size() * sizeof(uint64_t) +
-      snapshot->incoming_label_ids.size() * sizeof(uint32_t);
+      snapshot->topology_bytes + snapshot->identity_bytes +
+      snapshot->label_bytes + snapshot->auxiliary_bytes;
   connection.Commit();
   return snapshot;
 }
@@ -457,11 +515,18 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &,
   auto result = make_uniq<CsrBindData>();
   result->graph_name = input.inputs[0].GetValue<string>();
   names = {"graph_name",   "graph_version", "vertex_count", "edge_count",
-           "memory_bytes", "build_count",   "cached"};
+           "memory_bytes", "build_count",   "cached",
+           "neighbor_width_bytes", "vertex_ids_explicit",
+           "edge_labels_uniform", "topology_bytes", "identity_bytes",
+           "label_bytes", "auxiliary_bytes", "build_auxiliary_bytes"};
   return_types = {LogicalType::VARCHAR, LogicalType::UBIGINT,
                   LogicalType::UBIGINT, LogicalType::UBIGINT,
                   LogicalType::UBIGINT, LogicalType::UBIGINT,
-                  LogicalType::BOOLEAN};
+                  LogicalType::BOOLEAN, LogicalType::UBIGINT,
+                  LogicalType::BOOLEAN, LogicalType::BOOLEAN,
+                  LogicalType::UBIGINT, LogicalType::UBIGINT,
+                  LogicalType::UBIGINT, LogicalType::UBIGINT,
+                  LogicalType::UBIGINT};
   return std::move(result);
 }
 
@@ -526,6 +591,19 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input,
   output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
   output.SetValue(5, 0, Value::UBIGINT(cache->build_count));
   output.SetValue(6, 0, Value(true));
+  output.SetValue(
+      7, 0,
+      Value::UBIGINT(snapshot->outgoing_neighbors.WidthBytes()));
+  output.SetValue(8, 0,
+                  Value(!snapshot->vertex_ids.IsImplicitDense()));
+  output.SetValue(9, 0,
+                  Value(snapshot->outgoing_label_ids.IsUniform()));
+  output.SetValue(10, 0, Value::UBIGINT(snapshot->topology_bytes));
+  output.SetValue(11, 0, Value::UBIGINT(snapshot->identity_bytes));
+  output.SetValue(12, 0, Value::UBIGINT(snapshot->label_bytes));
+  output.SetValue(13, 0, Value::UBIGINT(snapshot->auxiliary_bytes));
+  output.SetValue(14, 0,
+                  Value::UBIGINT(snapshot->build_auxiliary_bytes));
   state.done = true;
 }
 

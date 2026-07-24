@@ -42,7 +42,7 @@ MATCH (a:Single)
 OPTIONAL MATCH (a)-[]->+(b)
 RETURN b
 ----
-{'__gql_id': 2, '__gql_labels': a, 'num': 42}
-{'__gql_id': 3, '__gql_labels': b, 'num': 46}
-{'__gql_id': 3, '__gql_labels': b, 'num': 46}
-{'__gql_id': 4, '__gql_labels': c, 'num': NULL}
+{'vertex_id': 2, '__gql_labels': a, 'num': 42}
+{'vertex_id': 3, '__gql_labels': b, 'num': 46}
+{'vertex_id': 3, '__gql_labels': b, 'num': 46}
+{'vertex_id': 4, '__gql_labels': c, 'num': NULL}

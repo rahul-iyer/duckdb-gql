@@ -64,6 +64,30 @@ SESSION SET GRAPH managed_native
 ----
 true	managed_native
 
+query IT rowsort
+MATCH (vertex:Person)
+RETURN element_id(vertex) AS vertex_id, vertex.external_id
+ORDER BY vertex_id
+----
+1	p1
+2	p2
+
+# The named :ID field is the only retained source identity column. The only
+# implementation-private vertex columns are canonical identity and label.
+query I
+SELECT count(*)
+FROM information_schema.columns c
+JOIN gql_internal.graph_element_tables et
+  ON c.table_catalog = et.catalog_name
+ AND c.table_schema = et.schema_name
+ AND c.table_name = et.table_name
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'managed_native'
+  AND et.element_kind = 'VERTEX'
+  AND starts_with(c.column_name, '__gql_')
+----
+2
+
 query TTII
 MATCH (a:Person)-[e:KNOWS]->(b:Person)
 RETURN a.name, b.name, a.age, e.since

@@ -35,4 +35,4 @@ query T rowsort
 MATCH (n {name: 'bar'})
 RETURN n
 ----
-{'__gql_id': 1, '__gql_labels': , 'firstname': NULL, 'name': bar}
+{'vertex_id': 1, '__gql_labels': , 'firstname': NULL, 'name': bar}

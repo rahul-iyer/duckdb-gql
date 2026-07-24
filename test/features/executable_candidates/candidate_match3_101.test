@@ -36,5 +36,5 @@ query TT rowsort
 MATCH (a)-[r {name: 'r'}]-(b)
 RETURN a, b
 ----
-{'__gql_id': 1, '__gql_labels': a, 'num': 1}	{'__gql_id': 2, '__gql_labels': b, 'num': 2}
-{'__gql_id': 2, '__gql_labels': b, 'num': 2}	{'__gql_id': 1, '__gql_labels': a, 'num': 1}
+{'vertex_id': 1, '__gql_labels': a, 'num': 1}	{'vertex_id': 2, '__gql_labels': b, 'num': 2}
+{'vertex_id': 2, '__gql_labels': b, 'num': 2}	{'vertex_id': 1, '__gql_labels': a, 'num': 1}

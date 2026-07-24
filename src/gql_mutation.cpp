@@ -905,12 +905,9 @@ LowerInsertVertex(const string &snapshot_name, idx_t vertex_index,
 
   auto action = make_uniq<MergeIntoAction>();
   action->action_type = MergeActionType::MERGE_INSERT;
-  action->insert_columns = {"__gql_id", "__gql_external_id",
-                            "__gql_label"};
+  action->insert_columns = {"__gql_id", "__gql_label"};
   auto id_column = "vertex_id_" + to_string(vertex_index);
   action->expressions.push_back(Column("gql_insert_source", id_column));
-  action->expressions.push_back(make_uniq<CastExpression>(
-      LogicalType::VARCHAR, Column("gql_insert_source", id_column)));
   action->expressions.push_back(InsertLabels(vertex));
   AddInsertProperties(*action, vertex);
   statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
@@ -1054,14 +1051,10 @@ LowerMatchInsertVertex(const string &ids_snapshot,
 
   auto action = make_uniq<MergeIntoAction>();
   action->action_type = MergeActionType::MERGE_INSERT;
-  action->insert_columns = {"__gql_id", "__gql_external_id",
-                            "__gql_label"};
+  action->insert_columns = {"__gql_id", "__gql_label"};
   auto id_column = MatchInsertVertexIdColumn(vertex);
   action->expressions.push_back(
       Column("gql_match_insert_source", id_column));
-  action->expressions.push_back(make_uniq<CastExpression>(
-      LogicalType::VARCHAR,
-      Column("gql_match_insert_source", id_column)));
   action->expressions.push_back(MatchInsertLabels(vertex.labels));
   AddMatchInsertProperties(*action, vertex.properties);
   statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET]
@@ -1169,11 +1162,8 @@ LowerMergeStatement(const GqlMergeStatement &merge) {
 
   auto insert = make_uniq<MergeIntoAction>();
   insert->action_type = MergeActionType::MERGE_INSERT;
-  insert->insert_columns = {"__gql_id", "__gql_external_id", "__gql_label"};
+  insert->insert_columns = {"__gql_id", "__gql_label"};
   insert->expressions.push_back(Column("gql_merge_source", "__gql_new_id"));
-  insert->expressions.push_back(make_uniq<CastExpression>(
-      LogicalType::VARCHAR,
-      Column("gql_merge_source", "__gql_new_id")));
   vector<string> labels;
   for (const auto &label : merge.vertex.labels) {
     labels.push_back(label.value);

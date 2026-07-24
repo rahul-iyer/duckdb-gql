@@ -36,4 +36,4 @@ query TTT rowsort
 MATCH p = (a:Start)-[]->(b)
 RETURN *
 ----
-{'__gql_id': 1, '__gql_labels': start}	{'__gql_id': 2, '__gql_labels': }	{'nodes': [{'__gql_id': 1, '__gql_labels': start}, {'__gql_id': 2, '__gql_labels': }], 'edges': [{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}]}
+{'vertex_id': 1, '__gql_labels': start}	{'vertex_id': 2, '__gql_labels': }	{'nodes': [{'vertex_id': 1, '__gql_labels': start}, {'vertex_id': 2, '__gql_labels': }], 'edges': [{'edge_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}]}

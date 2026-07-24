@@ -208,8 +208,7 @@ void GqlAttachManagedGraphTables(Connection &connection, const string &graph_nam
 	auto edge_id = InsertElementTable(connection, graph_id, "EDGE", *edge, resolved_edge_key.Name(), "MANAGED");
 	InsertLabelMapping(connection, vertex_id, resolved_vertex_label.Name());
 	InsertLabelMapping(connection, edge_id, resolved_edge_label.Name());
-	InsertProperties(connection, vertex_id, *vertex,
-	                 {resolved_vertex_key.Name(), "__gql_external_id", resolved_vertex_label.Name()});
+	InsertProperties(connection, vertex_id, *vertex, {resolved_vertex_key.Name(), resolved_vertex_label.Name()});
 	InsertProperties(connection, edge_id, *edge,
 	                 {resolved_edge_key.Name(), resolved_edge_source.Name(), resolved_edge_target.Name(),
 	                  resolved_edge_label.Name()});
@@ -275,7 +274,7 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 
 	auto tables = Query(connection, "SELECT element_table_id, element_kind, catalog_name, schema_name, "
 	                                "table_name, "
-	                                "key_columns FROM gql_internal.graph_element_tables WHERE graph_id = " +
+	                                "key_columns, ownership FROM gql_internal.graph_element_tables WHERE graph_id = " +
 	                                    to_string(result.graph_id) + " ORDER BY element_kind");
 	if (tables->RowCount() != 2) {
 		throw InvalidInputException("Table-backed graph '%s' must contain one vertex and one edge table", graph_name);
@@ -291,6 +290,7 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 		target->schema_name = tables->GetValue(3, row).GetValue<string>();
 		target->table_name = tables->GetValue(4, row).GetValue<string>();
 		target->key_column = ReadSingleColumn(tables->GetValue(5, row), "element key");
+		target->ownership = tables->GetValue(6, row).GetValue<string>();
 		LoadLabel(connection, *target);
 		LoadProperties(connection, *target);
 	}

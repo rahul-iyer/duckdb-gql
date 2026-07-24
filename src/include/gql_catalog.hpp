@@ -13,6 +13,7 @@ struct GqlElementTableBinding {
 	string schema_name;
 	string table_name;
 	string key_column;
+	string ownership;
 	string label_column;
 	unordered_map<string, string> property_columns;
 };

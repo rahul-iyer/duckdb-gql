@@ -45,5 +45,5 @@ WHERE a.id = 1
 AND c.id = 2
 RETURN d
 ----
-{'__gql_id': 1, '__gql_labels': a, 'id': NULL}
-{'__gql_id': 4, '__gql_labels': d, 'id': NULL}
+{'vertex_id': 1, '__gql_labels': a, 'id': NULL}
+{'vertex_id': 4, '__gql_labels': d, 'id': NULL}

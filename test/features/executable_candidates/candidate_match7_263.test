@@ -42,4 +42,4 @@ MATCH (a:Single), (x:C)
 OPTIONAL MATCH (a)-[]->+(x)
 RETURN x
 ----
-{'__gql_id': 4, '__gql_labels': c, 'num': NULL}
+{'vertex_id': 4, '__gql_labels': c, 'num': NULL}

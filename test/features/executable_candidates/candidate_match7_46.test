@@ -34,4 +34,4 @@ MATCH (n)
 OPTIONAL MATCH (n)-[:NOT_EXIST]->(x)
 RETURN n, x
 ----
-{'__gql_id': 1, '__gql_labels': }	NULL
+{'vertex_id': 1, '__gql_labels': }	NULL

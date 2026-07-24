@@ -44,6 +44,6 @@ OPTIONAL MATCH (x)-[:E1]->(y:Y)-[:E2]->(z:Z)
 WHERE x.val < z.val
 RETURN x, y, z
 ----
-{'__gql_id': 1, '__gql_labels': x, 'val': 1}	{'__gql_id': 2, '__gql_labels': y, 'val': 2}	{'__gql_id': 3, '__gql_labels': z, 'val': 3}
-{'__gql_id': 4, '__gql_labels': x, 'val': 4}	NULL	NULL
-{'__gql_id': 6, '__gql_labels': x, 'val': 6}	NULL	NULL
+{'vertex_id': 1, '__gql_labels': x, 'val': 1}	{'vertex_id': 2, '__gql_labels': y, 'val': 2}	{'vertex_id': 3, '__gql_labels': z, 'val': 3}
+{'vertex_id': 4, '__gql_labels': x, 'val': 4}	NULL	NULL
+{'vertex_id': 6, '__gql_labels': x, 'val': 6}	NULL	NULL

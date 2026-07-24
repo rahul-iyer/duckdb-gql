@@ -1,6 +1,6 @@
 # LiveJournal native-query benchmark
 
-Measured on 2026-07-19 with the Release build on arm64 macOS, 15 DuckDB
+Measured on 2026-07-23 with the Release build on arm64 macOS, 15 DuckDB
 threads, and a warm filesystem cache. The managed graph was loaded once with
 `COPY GRAPH ... OPTIONS (VALIDATE FALSE)` before profiling. Load time and
 checkpoint time are excluded from every query measurement.
@@ -18,14 +18,14 @@ types, source predicate, and directed trail semantics.
 
 | Workload | Result paths | Median latency | Paths/s | Relative to SQL | Peak RSS |
 |---|---:|---:|---:|---:|---:|
-| Native SQL, 1-hop count | 20,293 | 7.830 ms | 2.59M | 1.000x | 124.9 MiB |
-| Table-backed GQL, 1-hop count | 20,293 | 8.710 ms | 2.33M | 1.112x | 136.1 MiB |
-| Native SQL, exact 2-hop trail count | 855,573 | 63.511 ms | 13.47M | 1.000x | 461.3 MiB |
-| Table-backed GQL, exact 2-hop trail count | 855,573 | 64.841 ms | 13.19M | 1.021x | 491.8 MiB |
+| Native SQL, 1-hop count | 20,293 | 7.483 ms | 2.71M | 1.000x | 119.2 MiB |
+| Table-backed GQL, 1-hop count | 20,293 | 8.720 ms | 2.33M | 1.165x | 132.2 MiB |
+| Native SQL, exact 2-hop trail count | 855,573 | 68.119 ms | 12.56M | 1.000x | 462.8 MiB |
+| Table-backed GQL, exact 2-hop trail count | 855,573 | 77.027 ms | 11.11M | 1.131x | 480.7 MiB |
 
-The exact two-hop GQL plan is within 2.1% of matched handwritten SQL while
-counting 855,573 paths. The smaller one-hop query exposes a roughly 0.88 ms
-fixed planning/execution overhead, but still finishes below 9 ms.
+The exact two-hop GQL plan is within 13.1% of matched handwritten SQL while
+counting 855,573 paths. The smaller one-hop query exposes a roughly 1.24 ms
+fixed planning/execution overhead and finishes below 9 ms.
 
 The measured GQL statements are:
 
@@ -49,11 +49,11 @@ user `10009` rather than all 4.8 million vertices.
 
 | Workload | Returned paths | Median latency | Paths/s | Relative latency | Peak RSS |
 |---|---:|---:|---:|---:|---:|
-| Handwritten DuckDB recursive SQL, `VARCHAR[]` trail | 100 | 22.436 ms | 4.46K | 1.000x | 507.0 MiB |
-| Native table-backed GQL VLP | 100 | 23.576 ms | 4.24K | 1.051x | 522.9 MiB |
+| Handwritten DuckDB recursive SQL, `UBIGINT[]` trail | 100 | 22.795 ms | 4.39K | 1.000x | 494.4 MiB |
+| Native table-backed GQL VLP | 100 | 23.764 ms | 4.21K | 1.043x | 516.3 MiB |
 
 The GQL compiler generates a native DuckDB recursive CTE over the managed
-vertex and edge tables. Its 1.14 ms median overhead includes GQL expression and
+vertex and edge tables. Its 0.97 ms median overhead includes GQL expression and
 result-shaping layers; no CSR snapshot is involved.
 
 The measured GQL statement is:
@@ -70,21 +70,21 @@ LIMIT 100;
 The longer workload uses source user `1000018`, whose single outgoing edge
 forces deeper recursive iterations before producing the first 1,000,000 trail
 rows. This avoids timing a shallow, high-fan-out first frontier. The handwritten
-SQL uses the same `VARCHAR[]` trail state and casts each `UBIGINT` edge key to
-`VARCHAR` for `list_contains` and `list_append`, matching the GQL edge-identity
-representation. The table is the median of 5 measured profiles after 1 warmup,
-still using 15 threads and the same warm database. Every measured execution on
-both sides exceeded one second.
+SQL and generated GQL both preserve managed edge identity as `UBIGINT[]` trail
+state. The table was re-measured on 2026-07-23 with the Release build and is the
+median of 5 measured profiles after 1 warmup, using 15 threads and a warm
+database. Both plans returned exactly 1,000,000 rows in every measured run.
 
 | Workload | Returned paths | Median latency | Measured range | Paths/s | Relative latency | Peak RSS |
 |---|---:|---:|---:|---:|---:|---:|
-| Handwritten DuckDB recursive SQL, `VARCHAR[]` trail | 1,000,000 | 1.235 s | 1.228-1.404 s | 809.72K | 1.000x | 8,620.7 MiB |
-| Native table-backed GQL VLP | 1,000,000 | 1.266 s | 1.214-1.375 s | 789.92K | 1.025x | 9,078.2 MiB |
+| Handwritten DuckDB recursive SQL, `UBIGINT[]` trail | 1,000,000 | 0.932 s | 0.870-1.012 s | 1.07M | 1.000x | 6,217.5 MiB |
+| Native table-backed GQL VLP | 1,000,000 | 0.995 s | 0.827-1.096 s | 1.01M | 1.067x | 6,048.9 MiB |
 
-The earlier type-isolation run raised handwritten SQL from 857 ms with
-`UBIGINT[]` to 1.160 s with `VARCHAR[]`, so preserving the native key type is
-still worthwhile. Once recursive duplicate elimination is removed, however,
-GQL is within 2.5% of the matched handwritten SQL on the long workload.
+Against the previous matched `VARCHAR[]` GQL baseline, native managed edge
+identity reduced median latency by 21.4% and process peak RSS by 33.4%. GQL is
+within 6.7% of matched handwritten SQL on latency and used 2.7% less peak RSS.
+Registered non-managed tables retain the generic `VARCHAR[]` fallback because
+their key type is not constrained to the managed `UBIGINT` representation.
 
 ### Operator-profile diagnosis
 
@@ -93,10 +93,10 @@ profile counters confirm that both plans now execute the same recursive work:
 
 | Counter | Handwritten SQL | GQL |
 |---|---:|---:|
-| Total query CPU time | 18.57 s | 19.06 s |
-| Recursive CTE subtree CPU time | 18.35 s | 18.84 s |
+| Total query CPU time | 13.54 s | 14.89 s |
+| Recursive CTE subtree CPU time | 13.31 s | 14.65 s |
 | Recursive CTE output rows | 1,000,166 | 1,000,166 |
-| Recursive subtree rows scanned | 394,176,704 | 394,178,752 |
+| Recursive subtree rows scanned | 394,252,480 | 394,182,848 |
 
 The root cause of the prior 7x result was recursive `UNION` duplicate
 elimination. Each path state already contains its complete ordered sequence of
@@ -113,14 +113,18 @@ correct plan and removed the gap. The runner now detects
 `STATICALLY_LINKED` mode, refuses a CLI older than the GQL sources, skips the
 misleading load command in that mode, and records the install mode in JSON.
 
-## Remaining CSR construction gap
+## CSR construction status
 
-Prepared CSR was not built in this run. The current table-backed CSR builder
-materializes all 69 million edge rows, keeps an edge-ID hash set, and creates
-multiple full edge-vector copies while sorting outgoing and incoming order.
-That construction is not safely bounded on the 24 GiB benchmark machine.
-Because CSR construction is offline, it must be made streaming and
-memory-bounded before measuring traversal-only CSR latency at this scale.
+Prepared CSR was not built in this LiveJournal run, so this report makes no
+claim about traversal-only CSR latency on that dataset.
+
+The builder was subsequently changed to two streamed edge passes: one counts
+degrees and allocates final arrays, and one scatters edges into outgoing and
+incoming CSR. Managed graph IDs also avoid the generic edge-ID validation hash
+set. A later Graphalytics datagen run successfully built 82,050,510 stored arcs
+in 5.685 seconds with 7.28 GiB peak process RSS. That result validates the
+current scale direction, but it is a different workload and does not replace a
+future LiveJournal CSR measurement.
 
 ## Reproduce
 
@@ -145,12 +149,12 @@ cmake --build build/release --target shell duckgql_loadable_extension
 python3 scripts/benchmark_livejournal_queries.py \
   --duckdb build/release/duckdb \
   --extension build/release/extension/duckgql/duckgql.duckdb_extension \
-  --database build/benchmarks/livejournal-query.duckdb \
+  --database build/benchmarks/livejournal-query-ubigint.duckdb \
   --seed 10009 \
   --runs 10 \
   --warmups 2 \
   --threads 15 \
-  --output build/benchmarks/livejournal-query-current.json
+  --output build/benchmarks/livejournal-query-ubigint-current.json
 ```
 
 The ignored JSON output preserves every measured latency, CPU time, result-path
@@ -171,5 +175,5 @@ python3 scripts/benchmark_livejournal_queries.py \
   --warmups 1 \
   --threads 15 \
   --include-operator-profiles \
-  --output build/benchmarks/livejournal-vlp-long-current.json
+  --output build/benchmarks/livejournal-vlp-long-ubigint-current.json
 ```

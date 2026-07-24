@@ -38,4 +38,4 @@ query T rowsort
 MATCH (node)-[r:KNOWS {name: 'monkey'}]->(a)
 RETURN a
 ----
-{'__gql_id': 1, '__gql_labels': a}
+{'vertex_id': 1, '__gql_labels': a}

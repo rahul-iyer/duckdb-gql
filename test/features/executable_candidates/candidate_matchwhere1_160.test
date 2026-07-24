@@ -39,4 +39,4 @@ MATCH (node)-[r:KNOWS]->(a)
 WHERE r.name = 'monkey'
 RETURN a
 ----
-{'__gql_id': 1, '__gql_labels': a}
+{'vertex_id': 1, '__gql_labels': a}

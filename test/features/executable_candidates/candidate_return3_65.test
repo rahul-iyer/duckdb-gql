@@ -36,4 +36,4 @@ query TT rowsort
 MATCH (a)-[r]->()
 RETURN a AS foo, r AS bar
 ----
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}
+{'vertex_id': 1, '__gql_labels': a}	{'edge_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}

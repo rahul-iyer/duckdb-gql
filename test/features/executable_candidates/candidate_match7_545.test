@@ -43,4 +43,4 @@ OPTIONAL MATCH (a)-[]->(x)
 OPTIONAL MATCH (x)-[r]->(b)
 RETURN x, r
 ----
-{'__gql_id': 4, '__gql_labels': c, 'num': NULL}	NULL
+{'vertex_id': 4, '__gql_labels': c, 'num': NULL}	NULL

@@ -36,6 +36,6 @@ MATCH (a)
 RETURN DISTINCT a
 ORDER BY a.name
 ----
-{'__gql_id': 1, '__gql_labels': , 'name': A}
-{'__gql_id': 2, '__gql_labels': , 'name': B}
-{'__gql_id': 3, '__gql_labels': , 'name': C}
+{'vertex_id': 1, '__gql_labels': , 'name': A}
+{'vertex_id': 2, '__gql_labels': , 'name': B}
+{'vertex_id': 3, '__gql_labels': , 'name': C}

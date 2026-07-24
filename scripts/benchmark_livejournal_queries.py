@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import platform
 import re
@@ -68,7 +69,7 @@ def gql_install_mode(cli: Path) -> str:
             "-no-init",
             "-c",
             "SELECT install_mode FROM duckdb_extensions() "
-            "WHERE extension_name = 'gql';",
+            "WHERE extension_name = 'duckgql';",
         ],
         text=True,
         capture_output=True,
@@ -135,19 +136,19 @@ RETURN count(*);
 def native_recursive(seed: str, result_paths: int) -> str:
     return f"""
 WITH RECURSIVE paths(start_id, end_id, used_edges, depth) AS (
-    SELECT source.__gql_id, source.__gql_id, []::VARCHAR[], 0::UBIGINT
+    SELECT source.__gql_id, source.__gql_id, []::UBIGINT[], 0::UBIGINT
     FROM gql_data.graph_1_vertices source
     WHERE source.external_id = {sql_literal(seed)}
       AND source.__gql_label = 'user'
     UNION ALL
     SELECT paths.start_id, edge.__gql_target_id,
-           list_append(paths.used_edges, CAST(edge.__gql_edge_id AS VARCHAR)),
+           list_append(paths.used_edges, edge.__gql_edge_id),
            paths.depth + 1
     FROM paths
     JOIN gql_data.graph_1_edges edge
       ON edge.__gql_source_id = paths.end_id
     WHERE edge.__gql_type = 'follows'
-      AND NOT list_contains(paths.used_edges, CAST(edge.__gql_edge_id AS VARCHAR))
+      AND NOT list_contains(paths.used_edges, edge.__gql_edge_id)
 )
 SELECT target.external_id
 FROM paths
@@ -181,6 +182,7 @@ def profile_workload(
     runs: int,
     include_operator_profiles: bool,
     load_extension: bool,
+    memory_limit: str | None,
 ) -> dict[str, Any]:
     time_flag = "-l" if platform.system() == "Darwin" else "-v"
     command = [
@@ -194,6 +196,8 @@ def profile_workload(
     if load_extension:
         command += ["-cmd", f"LOAD {sql_literal(extension)};"]
     command += ["-cmd", f"PRAGMA threads={threads};"]
+    if memory_limit:
+        command += ["-cmd", f"PRAGMA memory_limit={sql_literal(memory_limit)};"]
     if graph:
         command += ["-cmd", "SESSION SET GRAPH livejournal;"]
     payload = ".output /dev/null\nPRAGMA enable_profiling='json';\n"
@@ -213,6 +217,12 @@ def profile_workload(
     measured = profiles[warmups:]
     latencies = [entry["latency"] for entry in measured]
     cpu_times = [entry["cpu_time"] for entry in measured]
+    output_cardinalities = {entry["rows_returned"] for entry in measured}
+    if len(output_cardinalities) != 1:
+        raise RuntimeError(
+            f"{name}: output cardinality changed across measured runs: "
+            f"{sorted(output_cardinalities)}"
+        )
     median = statistics.median(latencies)
     result = {
         "runs": runs,
@@ -222,10 +232,75 @@ def profile_workload(
         "cpu_seconds": summarize(cpu_times),
         "paths_per_second": result_paths / median,
         "process_peak_rss_bytes": peak_rss_bytes(completed.stderr),
+        "output_cardinality": output_cardinalities.pop(),
     }
     if include_operator_profiles:
         result["operator_profiles"] = measured
     return result
+
+
+def source_metadata() -> dict[str, Any]:
+    source_root = Path(__file__).resolve().parents[1]
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+    dirty = bool(
+        subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=source_root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    )
+    return {"commit": commit, "dirty": dirty}
+
+
+def duckdb_metadata(cli: Path) -> dict[str, Any]:
+    completed = subprocess.run(
+        [
+            str(cli),
+            "-csv",
+            "-noheader",
+            "-no-init",
+            "-c",
+            "SELECT library_version, source_id FROM pragma_version();",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    row = next(csv.reader([completed.stdout.strip()]))
+    cache = cli.parent / "CMakeCache.txt"
+    build_type = "unknown"
+    compiler = "unknown"
+    if cache.exists():
+        for line in cache.read_text().splitlines():
+            if line.startswith("CMAKE_BUILD_TYPE:STRING="):
+                build_type = line.split("=", 1)[1]
+            elif line.startswith("CMAKE_CXX_COMPILER:FILEPATH="):
+                compiler = line.split("=", 1)[1]
+    compiler_version = "unknown"
+    if compiler != "unknown":
+        version = subprocess.run(
+            [compiler, "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if version.stdout:
+            compiler_version = version.stdout.splitlines()[0]
+    return {
+        "library_version": row[0],
+        "source_id": row[1],
+        "build_type": build_type,
+        "compiler": compiler,
+        "compiler_version": compiler_version,
+    }
 
 
 def main() -> None:
@@ -250,6 +325,10 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=10)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--threads", type=int, default=15)
+    parser.add_argument(
+        "--memory-limit",
+        help="set and record an explicit DuckDB memory limit, for example 16GB",
+    )
     parser.add_argument(
         "--include-operator-profiles",
         action="store_true",
@@ -319,13 +398,17 @@ def main() -> None:
             args.runs,
             args.include_operator_profiles,
             not statically_linked,
+            args.memory_limit,
         )
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        "source": source_metadata(),
+        "duckdb": duckdb_metadata(cli),
         "platform": platform.platform(),
         "machine": platform.machine(),
         "threads": args.threads,
+        "memory_limit": args.memory_limit or "default",
         "runs": args.runs,
         "warmups": args.warmups,
         "gql_install_mode": install_mode,
@@ -339,7 +422,7 @@ def main() -> None:
         },
         "query_summary": results,
         "unsupported": {
-            "prepared_csr": "Not measured until the current materializing CSR builder is memory-safe at 69M edges",
+            "prepared_csr": "Not measured by this relational query suite",
         },
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

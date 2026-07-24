@@ -33,4 +33,4 @@ query T rowsort
 MATCH p = ()-[]->*()
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': }], 'edges': []}
+{'nodes': [{'vertex_id': 1, '__gql_labels': }], 'edges': []}

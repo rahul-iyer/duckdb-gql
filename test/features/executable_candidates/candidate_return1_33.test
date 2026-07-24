@@ -33,4 +33,4 @@ query T rowsort
 MATCH (n)
 RETURN n
 ----
-{'__gql_id': 1, '__gql_labels': , 'numbers': [1, 2, 3]}
+{'vertex_id': 1, '__gql_labels': , 'numbers': [1, 2, 3]}

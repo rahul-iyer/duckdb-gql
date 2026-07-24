@@ -38,4 +38,4 @@ query T rowsort
 MATCH (a)-[]->(b:Foo)
 RETURN b
 ----
-{'__gql_id': 2, '__gql_labels': foo}
+{'vertex_id': 2, '__gql_labels': foo}

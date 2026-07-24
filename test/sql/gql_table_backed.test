@@ -106,7 +106,7 @@ AUS	Atlanta
 
 # Writes through ordinary SQL are visible to later GQL without graph re-import.
 statement ok
-INSERT INTO gql_data.graph_1_vertices VALUES (5, '5', 'airport', '5', 'SFO', 'San Francisco')
+INSERT INTO gql_data.graph_1_vertices VALUES (5, 'airport', '5', 'SFO', 'San Francisco')
 
 statement ok
 INSERT INTO gql_data.graph_1_edges VALUES (3, 1, 5, 'route', 2139)
@@ -232,6 +232,32 @@ NULL
 NULL
 NULL
 NULL
+
+# Parallel edges remain distinct trail identities in both directions, while a
+# two-edge cycle can reuse vertices but not the same edge.
+statement ok
+INSERT INTO gql_data.graph_1_edges VALUES (5, 1, 2, 'route', 809)
+
+query I
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL' AND b.code = 'AUS'
+RETURN count(*)
+----
+9
+
+query I
+MATCH (a:airport)<-[:route]-+(b:airport)
+WHERE a.code = 'AUS' AND b.code = 'ATL'
+RETURN count(*)
+----
+9
+
+query I
+MATCH (a:airport)-[:route]->+(b:airport)
+WHERE a.code = 'ATL' AND b.code = 'ATL'
+RETURN count(*)
+----
+3
 
 # Managed graph tables are graph-owned and removed with the graph.
 query IT

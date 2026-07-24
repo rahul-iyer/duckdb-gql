@@ -99,8 +99,7 @@ FROM read_csv({sql_literal(edges)}, header=true, auto_detect=true, all_varchar=t
         (
             "vertex_load",
             """CREATE TABLE vertices AS
-SELECT row_number() OVER ()::UBIGINT AS __gql_id,
-       CAST("external_id:ID(RoadNet)" AS VARCHAR) AS __gql_external_id,
+SELECT row_id AS __gql_id,
        lower(trim(":LABEL")) AS __gql_label,
        CAST("external_id:ID(RoadNet)" AS VARCHAR) AS external_id
 FROM raw_nodes""",
@@ -109,14 +108,16 @@ FROM raw_nodes""",
             "edge_load",
             """CREATE TABLE edges AS
 SELECT row_number() OVER ()::UBIGINT AS __gql_edge_id,
-       source.__gql_id AS __gql_source_id,
-       target.__gql_id AS __gql_target_id,
+       source.row_id AS __gql_source_id,
+       target.row_id AS __gql_target_id,
        lower(trim(raw.":TYPE")) AS __gql_type
 FROM raw_edges raw
-LEFT JOIN vertices source
-  ON CAST(raw.":START_ID(RoadNet)" AS VARCHAR) = source.__gql_external_id
-LEFT JOIN vertices target
-  ON CAST(raw.":END_ID(RoadNet)" AS VARCHAR) = target.__gql_external_id""",
+LEFT JOIN raw_nodes source
+  ON CAST(raw.":START_ID(RoadNet)" AS VARCHAR) =
+     CAST(source."external_id:ID(RoadNet)" AS VARCHAR)
+LEFT JOIN raw_nodes target
+  ON CAST(raw.":END_ID(RoadNet)" AS VARCHAR) =
+     CAST(target."external_id:ID(RoadNet)" AS VARCHAR)""",
         ),
     ]
 
