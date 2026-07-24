@@ -31,6 +31,9 @@ from benchmark_graphalytics import (
 
 
 RSS_RE = re.compile(r"^\s*(\d+)\s+maximum resident set size\s*$", re.MULTILINE)
+CSR_STATS_MARKER = "__DUCKGQL_CSR_STATS__"
+UINT64_BYTES = 8
+UINT32_BYTES = 4
 
 
 @dataclass(frozen=True)
@@ -183,7 +186,7 @@ def run_workloads(
     threads: int,
     warmups: int,
     runs: int,
-) -> tuple[dict[str, float], dict[str, Path], int | None]:
+) -> tuple[dict[str, float], dict[str, Path], int | None, dict[str, Any]]:
     statements = [
         f"LOAD {sql_literal(extension)};",
         f"PRAGMA threads={threads};",
@@ -201,6 +204,13 @@ def run_workloads(
         f".print {MARKER_PREFIX}csr_build",
         "CALL gql_build_csr('bench_graph');",
         ".timer off",
+        f".print {CSR_STATS_MARKER}",
+        (
+            "SELECT memory_bytes, topology_bytes, identity_bytes, label_bytes, "
+            "auxiliary_bytes, build_auxiliary_bytes, neighbor_width_bytes, "
+            "vertex_ids_explicit, edge_labels_uniform "
+            "FROM gql_csr_stats('bench_graph');"
+        ),
     ]
     validation_outputs: dict[str, Path] = {}
     for algorithm, query in queries.items():
@@ -239,7 +249,52 @@ def run_workloads(
     timers = parse_timers(completed.stdout + "\n" + completed.stderr)
     rss_match = RSS_RE.search(completed.stderr)
     peak_rss = int(rss_match.group(1)) if rss_match else None
-    return timers, validation_outputs, peak_rss
+    lines = completed.stdout.splitlines()
+    try:
+        marker_index = lines.index(CSR_STATS_MARKER)
+        fields = lines[marker_index + 1].split(",")
+    except (ValueError, IndexError) as error:
+        raise RuntimeError("CSR memory statistics were not emitted") from error
+    if len(fields) != 9:
+        raise RuntimeError(f"unexpected CSR memory statistics: {fields}")
+    csr_stats = {
+        "memory_bytes": int(fields[0]),
+        "topology_bytes": int(fields[1]),
+        "identity_bytes": int(fields[2]),
+        "label_bytes": int(fields[3]),
+        "auxiliary_bytes": int(fields[4]),
+        "build_auxiliary_bytes": int(fields[5]),
+        "neighbor_width_bytes": int(fields[6]),
+        "vertex_ids_explicit": fields[7].lower() == "true",
+        "edge_labels_uniform": fields[8].lower() == "true",
+    }
+    return timers, validation_outputs, peak_rss, csr_stats
+
+
+def process_peak_rss(
+    cli: Path, extension: Path, database: Path, statement: str
+) -> int | None:
+    command = [str(cli), "-unsigned", "-no-init", str(database)]
+    if Path("/usr/bin/time").exists():
+        command = ["/usr/bin/time", "-l", *command]
+    completed = subprocess.run(
+        command,
+        input=(
+            f"LOAD {sql_literal(extension)};\n"
+            ".output /dev/null\n"
+            f"{statement}\n"
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise RuntimeError(
+            f"RSS measurement failed\nstdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
+    match = RSS_RE.search(completed.stderr)
+    return int(match.group(1)) if match else None
 
 
 def validation_query(algorithm: str, actual: Path, reference: Path) -> str:
@@ -374,11 +429,35 @@ def markdown(result: dict[str, Any]) -> str:
         f"- Threads: {result['configuration']['threads']}",
         f"- COPY GRAPH: {result['timing_seconds']['copy_graph']:.3f}s",
         f"- CSR build: {result['timing_seconds']['csr_build']:.3f}s",
+        f"- Accounted CSR memory: {result['csr']['memory_bytes'] / (1024**3):.2f} GiB",
+        (
+            f"- Reduction from legacy principal-array layout: "
+            f"{result['csr']['reduction_from_legacy_percent']:.1f}%"
+        ),
+        f"- Neighbor ordinal width: {result['csr']['neighbor_width_bytes']} bytes",
         (
             f"- Peak process RSS: "
             f"{result['environment']['peak_rss_bytes'] / (1024**3):.2f} GiB"
             if result["environment"]["peak_rss_bytes"]
             else "- Peak process RSS: unavailable"
+        ),
+        (
+            f"- CSR-build-only peak RSS: "
+            f"{result['csr']['build_process_peak_rss_bytes'] / (1024**3):.2f} GiB"
+            if result["csr"]["build_process_peak_rss_bytes"]
+            else "- CSR-build-only peak RSS: unavailable"
+        ),
+        (
+            f"- CSR-build incremental peak above an idle database: "
+            f"{result['csr']['build_process_incremental_peak_rss_bytes'] / (1024**3):.2f} GiB"
+            if result["csr"]["build_process_incremental_peak_rss_bytes"]
+            else "- CSR-build incremental peak above an idle database: unavailable"
+        ),
+        (
+            f"- CSR-build accounting coverage: "
+            f"{result['csr']['build_peak_accounting_coverage_percent']:.1f}%"
+            if result["csr"]["build_peak_accounting_coverage_percent"]
+            else "- CSR-build accounting coverage: unavailable"
         ),
         "",
         "| Kernel | Validation | Warm median | Min | Max |",
@@ -454,7 +533,7 @@ def main() -> int:
             f"[{config.name}] loading graph, building CSR, and running kernels",
             flush=True,
         )
-        timers, outputs, peak_rss = run_workloads(
+        timers, outputs, peak_rss, csr_stats = run_workloads(
             cli,
             extension,
             database,
@@ -465,6 +544,12 @@ def main() -> int:
             args.threads,
             args.warmups,
             args.runs,
+        )
+        baseline_peak_rss = process_peak_rss(
+            cli, extension, database, "SELECT 1;"
+        )
+        csr_build_peak_rss = process_peak_rss(
+            cli, extension, database, "CALL gql_build_csr('bench_graph');"
         )
         print(
             f"[{config.name}] validating against official reference outputs",
@@ -477,6 +562,40 @@ def main() -> int:
         )
         for algorithm in queries
     }
+    stored_csr_arcs = config.edges if config.directed else config.edges * 2
+    legacy_principal_bytes = (
+        config.vertices * UINT64_BYTES
+        + (config.vertices + 1) * UINT64_BYTES
+        + config.vertices * UINT32_BYTES
+        + 2
+        * (
+            (config.vertices + 1) * UINT64_BYTES
+            + stored_csr_arcs * UINT64_BYTES
+            + stored_csr_arcs * UINT64_BYTES
+            + stored_csr_arcs * UINT32_BYTES
+        )
+    )
+    csr_stats["legacy_principal_bytes"] = legacy_principal_bytes
+    csr_stats["reduction_from_legacy_percent"] = (
+        100.0 * (legacy_principal_bytes - csr_stats["memory_bytes"])
+        / legacy_principal_bytes
+    )
+    csr_stats["build_process_baseline_peak_rss_bytes"] = baseline_peak_rss
+    csr_stats["build_process_peak_rss_bytes"] = csr_build_peak_rss
+    csr_stats["build_process_incremental_peak_rss_bytes"] = (
+        csr_build_peak_rss - baseline_peak_rss
+        if csr_build_peak_rss is not None and baseline_peak_rss is not None
+        else None
+    )
+    csr_stats["accounted_build_peak_bytes"] = (
+        csr_stats["memory_bytes"] + csr_stats["build_auxiliary_bytes"]
+    )
+    incremental_peak = csr_stats["build_process_incremental_peak_rss_bytes"]
+    csr_stats["build_peak_accounting_coverage_percent"] = (
+        100.0 * csr_stats["accounted_build_peak_bytes"] / incremental_peak
+        if incremental_peak
+        else None
+    )
     reproduce = (
         "python3 scripts/benchmark_graphalytics_scale.py "
         f"--dataset {config.name} --threads {args.threads} "
@@ -493,7 +612,7 @@ def main() -> int:
             "edges": config.edges,
             "directed": config.directed,
             "weighted": config.weighted,
-            "stored_csr_arcs": config.edges if config.directed else config.edges * 2,
+            "stored_csr_arcs": stored_csr_arcs,
             "archive_url": f"{BASE_URL}/{archive.name}",
             "archive_sha256": archive_sha,
         },
@@ -509,6 +628,7 @@ def main() -> int:
             "csr_build": timers["csr_build"],
             "algorithms": algorithms,
         },
+        "csr": csr_stats,
         "validation": validation,
         "unsupported": ["CDLP", "weighted SSSP"],
         "reproduce": reproduce,

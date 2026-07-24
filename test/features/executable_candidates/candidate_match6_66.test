@@ -38,4 +38,4 @@ query T rowsort
 MATCH p = (a {name: 'A'})-[rel1]->(b)-[rel2]->(c)
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': a, 'name': A}, {'__gql_id': 2, '__gql_labels': b, 'name': B}, {'__gql_id': 3, '__gql_labels': c, 'name': C}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}, {'__gql_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3}]}
+{'nodes': [{'vertex_id': 1, '__gql_labels': a, 'name': A}, {'vertex_id': 2, '__gql_labels': b, 'name': B}, {'vertex_id': 3, '__gql_labels': c, 'name': C}], 'edges': [{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}, {'edge_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3}]}

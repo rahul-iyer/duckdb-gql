@@ -37,4 +37,4 @@ MATCH (a:A), (b:B)
 WHERE a.id = b.id
 RETURN a, b
 ----
-{'__gql_id': 2, '__gql_labels': a, 'id': 2}	{'__gql_id': 3, '__gql_labels': b, 'id': 2}
+{'vertex_id': 2, '__gql_labels': a, 'id': 2}	{'vertex_id': 3, '__gql_labels': b, 'id': 2}

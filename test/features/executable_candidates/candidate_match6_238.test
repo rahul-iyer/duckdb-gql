@@ -37,5 +37,5 @@ query T rowsort
 MATCH p = (n)<-[]->(k)<-[]-(n)
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': a}, {'__gql_id': 2, '__gql_labels': b}, {'__gql_id': 1, '__gql_labels': a}], 'edges': [{'__gql_id': 2, '__gql_type': t2, '__gql_source': 2, '__gql_target': 1}, {'__gql_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}]}
-{'nodes': [{'__gql_id': 2, '__gql_labels': b}, {'__gql_id': 1, '__gql_labels': a}, {'__gql_id': 2, '__gql_labels': b}], 'edges': [{'__gql_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}, {'__gql_id': 2, '__gql_type': t2, '__gql_source': 2, '__gql_target': 1}]}
+{'nodes': [{'vertex_id': 1, '__gql_labels': a}, {'vertex_id': 2, '__gql_labels': b}, {'vertex_id': 1, '__gql_labels': a}], 'edges': [{'edge_id': 2, '__gql_type': t2, '__gql_source': 2, '__gql_target': 1}, {'edge_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}]}
+{'nodes': [{'vertex_id': 2, '__gql_labels': b}, {'vertex_id': 1, '__gql_labels': a}, {'vertex_id': 2, '__gql_labels': b}], 'edges': [{'edge_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}, {'edge_id': 2, '__gql_type': t2, '__gql_source': 2, '__gql_target': 1}]}

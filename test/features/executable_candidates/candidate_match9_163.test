@@ -37,4 +37,4 @@ WHERE r IS NULL
 AND a <> b
 RETURN b
 ----
-{'__gql_id': 2, '__gql_labels': b}
+{'vertex_id': 2, '__gql_labels': b}

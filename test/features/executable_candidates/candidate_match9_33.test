@@ -40,5 +40,5 @@ RETURN last(r) AS l
 NULL
 NULL
 NULL
-{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}
-{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}
+{'edge_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}
+{'edge_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2}

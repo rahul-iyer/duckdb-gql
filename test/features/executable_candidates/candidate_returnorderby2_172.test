@@ -35,5 +35,5 @@ MATCH (n)
 RETURN *
 ORDER BY n.id
 ----
-{'__gql_id': 1, '__gql_labels': , 'id': 1}
-{'__gql_id': 2, '__gql_labels': , 'id': 10}
+{'vertex_id': 1, '__gql_labels': , 'id': 1}
+{'vertex_id': 2, '__gql_labels': , 'id': 10}

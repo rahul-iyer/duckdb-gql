@@ -37,4 +37,4 @@ MATCH (a)-[]->(b)
 RETURN DISTINCT b
 ORDER BY b.name
 ----
-{'__gql_id': 2, '__gql_labels': b}
+{'vertex_id': 2, '__gql_labels': b}

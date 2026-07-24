@@ -36,4 +36,4 @@ MATCH (n)
 WHERE n.name = 'Bar'
 RETURN n
 ----
-{'__gql_id': 2, '__gql_labels': , 'name': Bar}
+{'vertex_id': 2, '__gql_labels': , 'name': Bar}

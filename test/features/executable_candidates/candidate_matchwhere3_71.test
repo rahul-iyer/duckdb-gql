@@ -42,5 +42,5 @@ MATCH (n)-[rel]->(x)
 WHERE n.animal = x.animal
 RETURN n, x
 ----
-{'__gql_id': 1, '__gql_labels': a, 'animal': monkey}	{'__gql_id': 3, '__gql_labels': c, 'animal': monkey}
-{'__gql_id': 4, '__gql_labels': d, 'animal': cow}	{'__gql_id': 2, '__gql_labels': b, 'animal': cow}
+{'vertex_id': 1, '__gql_labels': a, 'animal': monkey}	{'vertex_id': 3, '__gql_labels': c, 'animal': monkey}
+{'vertex_id': 4, '__gql_labels': d, 'animal': cow}	{'vertex_id': 2, '__gql_labels': b, 'animal': cow}

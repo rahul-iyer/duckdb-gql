@@ -925,7 +925,9 @@ GraphElementValueAt(const GqlExpressionProgram &program, idx_t node,
       expected == GqlPatternElementType::VERTEX ? graph.vertex : graph.edge;
   const auto &alias = identities[binding_index].table_alias;
   vector<unique_ptr<ParsedExpression>> fields;
-  AppendStructField(fields, Column(alias, table.key_column), "__gql_id");
+  AppendStructField(fields, Column(alias, table.key_column),
+                    expected == GqlPatternElementType::VERTEX ? "vertex_id"
+                                                              : "edge_id");
   if (expected == GqlPatternElementType::VERTEX) {
     AppendStructField(fields,
                       table.label_column.empty()
@@ -1321,14 +1323,18 @@ TableBackedNativeRecursiveMatch(const GqlTableGraphBinding &graph,
       Aliased(Column(anchor_alias, graph.vertex.key_column), "start_id"));
   anchor->select_list.push_back(
       Aliased(Column(anchor_alias, graph.vertex.key_column), "end_id"));
+  const bool managed_edge_identity =
+      StringUtil::CIEquals(graph.edge.ownership, "MANAGED");
+  const auto trail_type =
+      managed_edge_identity ? LogicalType::UBIGINT : LogicalType::VARCHAR;
   vector<Value> empty_edges;
   anchor->select_list.push_back(Aliased(
-      Constant(Value::LIST(LogicalType::VARCHAR, std::move(empty_edges))),
-      "edge_ids"));
+      Constant(Value::LIST(trail_type, std::move(empty_edges))), "edge_ids"));
   anchor->select_list.push_back(Aliased(Constant(Value::UBIGINT(0)), "depth"));
 
-  // Extend the current endpoint by one unused mapped edge. Casting the edge
-  // key to VARCHAR keeps trail identity generic across scalar key types.
+  // Managed graph edges have canonical UBIGINT identities. Preserve that
+  // compact native type in recursive trail state, while retaining VARCHAR as
+  // the generic fallback for attached non-managed element tables.
   unique_ptr<TableRef> step_from =
       NamedTable("gql_recursive_path", "gql_path_previous");
   const string edge_alias = "gql_path_edge";
@@ -1340,8 +1346,13 @@ TableBackedNativeRecursiveMatch(const GqlTableGraphBinding &graph,
   AppendJoin(step_from, ElementTable(graph.edge, edge_alias), JoinType::INNER,
              std::move(edge_conditions));
 
-  auto edge_identity = make_uniq<CastExpression>(
-      LogicalType::VARCHAR, Column(edge_alias, graph.edge.key_column));
+  unique_ptr<ParsedExpression> edge_identity;
+  if (managed_edge_identity) {
+    edge_identity = Column(edge_alias, graph.edge.key_column);
+  } else {
+    edge_identity = make_uniq<CastExpression>(
+        LogicalType::VARCHAR, Column(edge_alias, graph.edge.key_column));
+  }
   vector<unique_ptr<ParsedExpression>> contains_arguments;
   contains_arguments.push_back(Column("gql_path_previous", "edge_ids"));
   contains_arguments.push_back(edge_identity->Copy());

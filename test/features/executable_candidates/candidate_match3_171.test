@@ -38,4 +38,4 @@ query T rowsort
 MATCH (n)-[]->(a)-[]->(b)
 RETURN b
 ----
-{'__gql_id': 3, '__gql_labels': c, 'num': 3}
+{'vertex_id': 3, '__gql_labels': c, 'num': 3}

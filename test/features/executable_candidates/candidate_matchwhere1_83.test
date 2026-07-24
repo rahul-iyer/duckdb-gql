@@ -40,4 +40,4 @@ MATCH (n:Person)-[]->()
 WHERE n.name = 'Bob'
 RETURN n
 ----
-{'__gql_id': 2, '__gql_labels': person, 'name': Bob}
+{'vertex_id': 2, '__gql_labels': person, 'name': Bob}

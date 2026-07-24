@@ -36,6 +36,6 @@ MATCH (a)
 RETURN a, count(*)
 ORDER BY count(*)
 ----
-{'__gql_id': 1, '__gql_labels': l1}	1
-{'__gql_id': 2, '__gql_labels': l2}	1
-{'__gql_id': 3, '__gql_labels': l3}	1
+{'vertex_id': 1, '__gql_labels': l1}	1
+{'vertex_id': 2, '__gql_labels': l2}	1
+{'vertex_id': 3, '__gql_labels': l3}	1

@@ -36,4 +36,4 @@ query T rowsort
 MATCH (a)-[:T|:T]->(b)
 RETURN b
 ----
-{'__gql_id': 2, '__gql_labels': b}
+{'vertex_id': 2, '__gql_labels': b}

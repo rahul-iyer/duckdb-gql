@@ -39,5 +39,5 @@ WHERE x.name IN ['B', 'C']
 OPTIONAL MATCH p = (a)-[]->(x)
 RETURN x, p
 ----
-{'__gql_id': 2, '__gql_labels': , 'name': B}	{'nodes': [{'__gql_id': 1, '__gql_labels': , 'name': A}, {'__gql_id': 2, '__gql_labels': , 'name': B}], 'edges': [{'__gql_id': 1, '__gql_type': x, '__gql_source': 1, '__gql_target': 2}]}
-{'__gql_id': 3, '__gql_labels': , 'name': C}	NULL
+{'vertex_id': 2, '__gql_labels': , 'name': B}	{'nodes': [{'vertex_id': 1, '__gql_labels': , 'name': A}, {'vertex_id': 2, '__gql_labels': , 'name': B}], 'edges': [{'edge_id': 1, '__gql_type': x, '__gql_source': 1, '__gql_target': 2}]}
+{'vertex_id': 3, '__gql_labels': , 'name': C}	NULL

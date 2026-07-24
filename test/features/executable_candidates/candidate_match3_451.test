@@ -39,7 +39,7 @@ MATCH (a)-[]->(b)
 MATCH (c)-[]->(d)
 RETURN a, b, c, d
 ----
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 2, '__gql_labels': b}	{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 2, '__gql_labels': b}
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 2, '__gql_labels': b}	{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 3, '__gql_labels': c}
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 3, '__gql_labels': c}	{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 2, '__gql_labels': b}
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 3, '__gql_labels': c}	{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 3, '__gql_labels': c}
+{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 2, '__gql_labels': b}	{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 2, '__gql_labels': b}
+{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 2, '__gql_labels': b}	{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 3, '__gql_labels': c}
+{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 3, '__gql_labels': c}	{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 2, '__gql_labels': b}
+{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 3, '__gql_labels': c}	{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 3, '__gql_labels': c}

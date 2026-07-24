@@ -36,4 +36,4 @@ query T rowsort
 MATCH p = (a:Label1)<-[]-(:Label2)
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': label1}, {'__gql_id': 2, '__gql_labels': label2}], 'edges': [{'__gql_id': 1, '__gql_type': type, '__gql_source': 2, '__gql_target': 1}]}
+{'nodes': [{'vertex_id': 1, '__gql_labels': label1}, {'vertex_id': 2, '__gql_labels': label2}], 'edges': [{'edge_id': 1, '__gql_type': type, '__gql_source': 2, '__gql_target': 1}]}

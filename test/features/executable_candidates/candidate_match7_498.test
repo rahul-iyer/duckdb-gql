@@ -42,4 +42,4 @@ MATCH (a:B)
 OPTIONAL MATCH (a)-[r]-(a)
 RETURN r
 ----
-{'__gql_id': 4, '__gql_type': loop, '__gql_source': 3, '__gql_target': 3}
+{'edge_id': 4, '__gql_type': loop, '__gql_source': 3, '__gql_target': 3}

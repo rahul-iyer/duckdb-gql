@@ -33,6 +33,7 @@ struct GqlProcedureDefinition {
 const GqlProcedureDefinition *
 GqlFindProcedure(const string &procedure_namespace, const string &name);
 TableFunction GqlAlgorithmCallFunction();
+TableFunction GqlAlgorithmResultFunction();
 
 TableFunction GqlBfsFunction();
 TableFunction GqlDfsFunction();

@@ -40,5 +40,5 @@ ORDER BY n.name ASC
 OFFSET $s
 LIMIT $l
 ----
-{'__gql_id': 3, '__gql_labels': , 'name': C}
-{'__gql_id': 4, '__gql_labels': , 'name': D}
+{'vertex_id': 3, '__gql_labels': , 'name': C}
+{'vertex_id': 4, '__gql_labels': , 'name': D}

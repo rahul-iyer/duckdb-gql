@@ -41,4 +41,4 @@ AND (a)-[:T]->(b:TheLabel)
 OR (a)-[:T]->+(b:MissingLabel)
 RETURN DISTINCT b
 ----
-{'__gql_id': 2, '__gql_labels': thelabel, 'id': 1}
+{'vertex_id': 2, '__gql_labels': thelabel, 'id': 1}

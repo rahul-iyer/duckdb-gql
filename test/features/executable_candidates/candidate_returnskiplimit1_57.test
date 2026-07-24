@@ -39,6 +39,6 @@ RETURN n
 ORDER BY n.name ASC
 OFFSET $skipAmount
 ----
-{'__gql_id': 3, '__gql_labels': , 'name': C}
-{'__gql_id': 4, '__gql_labels': , 'name': D}
-{'__gql_id': 5, '__gql_labels': , 'name': E}
+{'vertex_id': 3, '__gql_labels': , 'name': C}
+{'vertex_id': 4, '__gql_labels': , 'name': D}
+{'vertex_id': 5, '__gql_labels': , 'name': E}

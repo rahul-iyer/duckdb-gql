@@ -39,4 +39,4 @@ MATCH (n {name: 'A'})-[r]->(x)
 WHERE type(r) = 'KNOWS'
 RETURN x
 ----
-{'__gql_id': 2, '__gql_labels': b, 'name': B}
+{'vertex_id': 2, '__gql_labels': b, 'name': B}

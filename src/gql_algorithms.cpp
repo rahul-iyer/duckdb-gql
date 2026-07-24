@@ -1,5 +1,6 @@
 #include "gql_algorithms.hpp"
 
+#include "gql_catalog.hpp"
 #include "gql_csr.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -7,6 +8,16 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/comparison_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
+#include "duckdb/parser/tableref/joinref.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -343,11 +354,12 @@ static bool InVertexProjection(const vector<uint8_t> &mask, idx_t vertex) {
 }
 
 template <class CALLBACK>
-static bool
-VisitRange(const vector<idx_t> &offsets, const vector<idx_t> &neighbors,
-           const vector<uint64_t> &edge_ids, const vector<uint32_t> &label_ids,
-           idx_t vertex, bool filter_label, uint32_t required_label,
-           CALLBACK &&callback) {
+static bool VisitRange(const vector<uint64_t> &offsets,
+                       const GqlCsrOrdinals &neighbors,
+                       const vector<uint64_t> &edge_ids,
+                       const GqlCsrEdgeLabels &label_ids, idx_t vertex,
+                       bool filter_label, uint32_t required_label,
+                       CALLBACK &&callback) {
   for (idx_t offset = offsets[vertex]; offset < offsets[vertex + 1]; offset++) {
     if (filter_label && label_ids[offset] != required_label) {
       continue;
@@ -1772,6 +1784,245 @@ static vector<uint8_t> ReadPipelineByteList(const Value &value) {
   return result;
 }
 
+static bool TryFindAlgorithmProperty(const GqlElementTableBinding &table,
+                                     const string &property, string &column) {
+  for (const auto &entry : table.property_columns) {
+    if (StringUtil::CIEquals(entry.first, property)) {
+      column = entry.second;
+      return true;
+    }
+  }
+  return false;
+}
+
+static const GqlProcedureOutputDefinition *
+FindAlgorithmOutput(const GqlProcedureDefinition &definition,
+                    const string &name) {
+  for (const auto &output : definition.outputs) {
+    if (StringUtil::CIEquals(output.name, name)) {
+      return &output;
+    }
+  }
+  return nullptr;
+}
+
+static Value AlgorithmLiteralValue(GqlLiteralType type, const string &text) {
+  switch (type) {
+  case GqlLiteralType::NULL_VALUE:
+    return Value();
+  case GqlLiteralType::BOOLEAN:
+    return Value::BOOLEAN(StringUtil::CIEquals(text, "true"));
+  case GqlLiteralType::INTEGER:
+    return Value::BIGINT(std::stoll(text));
+  case GqlLiteralType::DECIMAL:
+    return Value(text).DefaultCastAs(LogicalType::DECIMAL(38, 18));
+  case GqlLiteralType::DOUBLE:
+    return Value::DOUBLE(std::stod(text));
+  case GqlLiteralType::STRING:
+    return Value(text);
+  }
+  throw InternalException("Unknown GQL algorithm argument type");
+}
+
+enum class AlgorithmYieldSource : uint8_t {
+  OUTPUT,
+  VERTEX_PROPERTY,
+  EDGE_PROPERTY
+};
+
+struct AlgorithmYieldColumn {
+  string name;
+  string column;
+  AlgorithmYieldSource source;
+};
+
+static unique_ptr<ParsedExpression>
+AlgorithmColumn(const string &table, const string &column,
+                const string &alias = string()) {
+  auto result = make_uniq<ColumnRefExpression>(column, table);
+  if (!alias.empty()) {
+    result->SetAlias(alias);
+  }
+  return std::move(result);
+}
+
+static unique_ptr<TableRef>
+AlgorithmElementTable(const GqlElementTableBinding &table,
+                      const string &alias) {
+  auto result = make_uniq<BaseTableRef>();
+  result->catalog_name = table.catalog_name;
+  result->schema_name = table.schema_name;
+  result->table_name = table.table_name;
+  result->alias = alias;
+  return std::move(result);
+}
+
+static void AppendAlgorithmJoin(unique_ptr<TableRef> &root,
+                                unique_ptr<TableRef> right, JoinType type,
+                                const string &left_table,
+                                const string &left_column,
+                                const string &right_table,
+                                const string &right_column) {
+  auto join = make_uniq<JoinRef>(JoinRefType::REGULAR);
+  join->left = std::move(root);
+  join->right = std::move(right);
+  join->type = type;
+  join->condition = make_uniq<ComparisonExpression>(
+      ExpressionType::COMPARE_EQUAL, AlgorithmColumn(left_table, left_column),
+      AlgorithmColumn(right_table, right_column));
+  root = std::move(join);
+}
+
+static unique_ptr<TableRef>
+AlgorithmResultBindReplace(ClientContext &context,
+                           TableFunctionBindInput &input) {
+  if (input.inputs.size() != 5 || input.inputs[0].IsNull() ||
+      input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
+      input.inputs[3].IsNull() || input.inputs[4].IsNull()) {
+    throw BinderException("Invalid GQL algorithm result");
+  }
+  auto procedure_name = input.inputs[0].GetValue<string>();
+  auto definition = GqlFindProcedure("algo", procedure_name);
+  if (!definition) {
+    throw BinderException("Unknown GQL procedure 'algo.%s'", procedure_name);
+  }
+  auto argument_values = ReadPipelineStringList(input.inputs[1]);
+  auto argument_types = ReadPipelineByteList(input.inputs[2]);
+  auto argument_names = ReadPipelineStringList(input.inputs[3]);
+  auto yield_names = ReadPipelineStringList(input.inputs[4]);
+  if (argument_values.empty() ||
+      argument_values.size() != argument_types.size() ||
+      argument_values.size() != argument_names.size() || yield_names.empty()) {
+    throw BinderException("Invalid arguments for GQL procedure 'algo.%s'",
+                          procedure_name);
+  }
+
+  bool needs_properties = false;
+  for (const auto &yield_name : yield_names) {
+    needs_properties |= !FindAlgorithmOutput(*definition, yield_name);
+  }
+
+  GqlTableGraphBinding graph;
+  if (needs_properties) {
+    if (static_cast<GqlLiteralType>(argument_types[0]) !=
+        GqlLiteralType::STRING) {
+      throw BinderException(
+          "GQL procedure 'algo.%s' requires a graph name before properties "
+          "can be yielded",
+          procedure_name);
+    }
+    if (!GqlTryLoadTableGraph(context, argument_values[0], graph)) {
+      throw BinderException(
+          "Graph '%s' has no registered node or edge property tables",
+          argument_values[0]);
+    }
+  }
+
+  const bool has_vertex_identity =
+      FindAlgorithmOutput(*definition, "vertex_id") != nullptr;
+  const bool has_edge_identity =
+      FindAlgorithmOutput(*definition, "edge_id") != nullptr;
+  vector<AlgorithmYieldColumn> columns;
+  case_insensitive_set_t seen_yields;
+  bool needs_vertex_join = false;
+  bool needs_edge_join = false;
+  for (const auto &yield_name : yield_names) {
+    if (!seen_yields.insert(yield_name).second) {
+      continue;
+    }
+    if (auto output = FindAlgorithmOutput(*definition, yield_name)) {
+      columns.push_back(
+          {yield_name, output->name, AlgorithmYieldSource::OUTPUT});
+      continue;
+    }
+    string vertex_column;
+    string edge_column;
+    auto is_vertex_property =
+        TryFindAlgorithmProperty(graph.vertex, yield_name, vertex_column);
+    auto is_edge_property =
+        TryFindAlgorithmProperty(graph.edge, yield_name, edge_column);
+    auto can_use_vertex = is_vertex_property && has_vertex_identity;
+    auto can_use_edge = is_edge_property && has_edge_identity;
+    if (can_use_vertex && can_use_edge) {
+      throw BinderException(
+          "GQL YIELD property '%s' is ambiguous because it is registered on "
+          "both nodes and edges",
+          yield_name);
+    }
+    if (can_use_vertex) {
+      columns.push_back(
+          {yield_name, vertex_column, AlgorithmYieldSource::VERTEX_PROPERTY});
+      needs_vertex_join = true;
+      continue;
+    }
+    if (can_use_edge) {
+      columns.push_back(
+          {yield_name, edge_column, AlgorithmYieldSource::EDGE_PROPERTY});
+      needs_edge_join = true;
+      continue;
+    }
+    if (is_edge_property && !has_edge_identity) {
+      throw BinderException(
+          "GQL procedure 'algo.%s' cannot yield edge property '%s' because "
+          "it does not return an edge identity",
+          procedure_name, yield_name);
+    }
+    throw BinderException(
+        "GQL procedure 'algo.%s' has no output or registered node/edge "
+        "property '%s'",
+        procedure_name, yield_name);
+  }
+
+  vector<unique_ptr<ParsedExpression>> arguments;
+  for (idx_t index = 0; index < argument_values.size(); index++) {
+    auto type = static_cast<GqlLiteralType>(argument_types[index]);
+    auto argument = make_uniq<ConstantExpression>(
+        AlgorithmLiteralValue(type, argument_values[index]));
+    if (!argument_names[index].empty()) {
+      argument->SetAlias(argument_names[index]);
+    }
+    arguments.push_back(std::move(argument));
+  }
+  auto algorithm = make_uniq<TableFunctionRef>();
+  algorithm->function = make_uniq<FunctionExpression>(
+      "system", "algo", definition->name, std::move(arguments));
+  algorithm->alias = "__gql_algo";
+  unique_ptr<TableRef> from = std::move(algorithm);
+  if (needs_vertex_join) {
+    AppendAlgorithmJoin(from,
+                        AlgorithmElementTable(graph.vertex, "__gql_vertex"),
+                        JoinType::INNER, "__gql_algo", "vertex_id",
+                        "__gql_vertex", graph.vertex.key_column);
+  }
+  if (needs_edge_join) {
+    AppendAlgorithmJoin(from, AlgorithmElementTable(graph.edge, "__gql_edge"),
+                        JoinType::LEFT, "__gql_algo", "edge_id", "__gql_edge",
+                        graph.edge.key_column);
+  }
+
+  auto select = make_uniq<SelectNode>();
+  select->from_table = std::move(from);
+  for (const auto &column : columns) {
+    switch (column.source) {
+    case AlgorithmYieldSource::OUTPUT:
+      select->select_list.push_back(
+          AlgorithmColumn("__gql_algo", column.column, column.name));
+      break;
+    case AlgorithmYieldSource::VERTEX_PROPERTY:
+      select->select_list.push_back(
+          AlgorithmColumn("__gql_vertex", column.column, column.name));
+      break;
+    case AlgorithmYieldSource::EDGE_PROPERTY:
+      select->select_list.push_back(
+          AlgorithmColumn("__gql_edge", column.column, column.name));
+      break;
+    }
+  }
+  auto statement = make_uniq<SelectStatement>();
+  statement->node = std::move(select);
+  return make_uniq<SubqueryRef>(std::move(statement));
+}
+
 static unique_ptr<FunctionData>
 AlgorithmCallBind(ClientContext &, TableFunctionBindInput &input,
                   vector<LogicalType> &return_types, vector<string> &names) {
@@ -2092,6 +2343,18 @@ TableFunction GqlAlgorithmCallFunction() {
                          AlgorithmCallLocalInit);
   function.in_out_function = AlgorithmCallInput;
   function.in_out_function_final = AlgorithmCallFinalize;
+  return function;
+}
+
+TableFunction GqlAlgorithmResultFunction() {
+  TableFunction function("gql_algorithm_result",
+                         {LogicalType::VARCHAR,
+                          LogicalType::LIST(LogicalType::VARCHAR),
+                          LogicalType::LIST(LogicalType::UTINYINT),
+                          LogicalType::LIST(LogicalType::VARCHAR),
+                          LogicalType::LIST(LogicalType::VARCHAR)},
+                         nullptr, nullptr);
+  function.bind_replace = AlgorithmResultBindReplace;
   return function;
 }
 

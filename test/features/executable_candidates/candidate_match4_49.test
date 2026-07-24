@@ -40,6 +40,6 @@ query T rowsort
 MATCH (a {name: 'A'})-[]->+(x)
 RETURN x
 ----
-{'__gql_id': 2, '__gql_labels': , 'name': B}
-{'__gql_id': 3, '__gql_labels': , 'name': C}
-{'__gql_id': 4, '__gql_labels': , 'name': D}
+{'vertex_id': 2, '__gql_labels': , 'name': B}
+{'vertex_id': 3, '__gql_labels': , 'name': C}
+{'vertex_id': 4, '__gql_labels': , 'name': D}

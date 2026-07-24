@@ -481,11 +481,10 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		qualified_vertex = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(vertex_table);
 		qualified_edge = QuoteIdentifier(current_catalog) + ".gql_data." + QuoteIdentifier(edge_table);
 
-		Query(connection, "CREATE TABLE " + qualified_vertex + " AS SELECT row_number() OVER ()::UBIGINT AS " +
-		                      QuoteIdentifier("__gql_id") + ", " + ExternalId("n", nodes.id) + " AS " +
-		                      QuoteIdentifier("__gql_external_id") + ", " + NativeLabelExpression(nodes, "n") + " AS " +
-		                      QuoteIdentifier("__gql_label") + NativePropertyProjection(nodes.properties, "n") +
-		                      " FROM gql_copy_nodes n");
+		Query(connection, "CREATE TABLE " + qualified_vertex + " AS SELECT n." +
+		                      QuoteIdentifier(IMPORT_ROW_ID) + " AS " + QuoteIdentifier("__gql_id") + ", " +
+		                      NativeLabelExpression(nodes, "n") + " AS " + QuoteIdentifier("__gql_label") +
+		                      NativePropertyProjection(nodes.properties, "n") + " FROM gql_copy_nodes n");
 		vertex_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_vertex);
 		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
 		                                                                     "_vertex_id_seq") +
@@ -495,13 +494,13 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		auto end_id = ExternalId("r", edges.end_id);
 		auto relationship_type = ExternalId("r", edges.types[0]);
 		Query(connection, "CREATE TABLE " + qualified_edge + " AS SELECT row_number() OVER ()::UBIGINT AS " +
-		                      QuoteIdentifier("__gql_edge_id") + ", s." + QuoteIdentifier("__gql_id") + " AS " +
-		                      QuoteIdentifier("__gql_source_id") + ", t." + QuoteIdentifier("__gql_id") + " AS " +
+		                      QuoteIdentifier("__gql_edge_id") + ", s." + QuoteIdentifier(IMPORT_ROW_ID) + " AS " +
+		                      QuoteIdentifier("__gql_source_id") + ", t." + QuoteIdentifier(IMPORT_ROW_ID) + " AS " +
 		                      QuoteIdentifier("__gql_target_id") + ", lower(trim(" + relationship_type + ")) AS " +
 		                      QuoteIdentifier("__gql_type") + NativePropertyProjection(edges.properties, "r") +
-		                      " FROM gql_copy_edges r LEFT JOIN " + qualified_vertex + " s ON " + start_id + " = s." +
-		                      QuoteIdentifier("__gql_external_id") + " LEFT JOIN " + qualified_vertex + " t ON " +
-		                      end_id + " = t." + QuoteIdentifier("__gql_external_id"));
+		                      " FROM gql_copy_edges r LEFT JOIN gql_copy_nodes s ON " + start_id + " = " +
+		                      ExternalId("s", nodes.id) + " LEFT JOIN gql_copy_nodes t ON " + end_id + " = " +
+		                      ExternalId("t", nodes.id));
 		edge_count = ScalarCount(connection, "SELECT count(*) FROM " + qualified_edge);
 		Query(connection, "CREATE SEQUENCE gql_internal." + QuoteIdentifier("graph_" + to_string(graph_id) +
 		                                                                     "_edge_id_seq") +

@@ -39,4 +39,4 @@ MATCH (a {name: 'A'})
 OPTIONAL MATCH (a)-[:KNOWS]->()-[:KNOWS]->(foo)
 RETURN foo
 ----
-{'__gql_id': 3, '__gql_labels': , 'name': C}
+{'vertex_id': 3, '__gql_labels': , 'name': C}

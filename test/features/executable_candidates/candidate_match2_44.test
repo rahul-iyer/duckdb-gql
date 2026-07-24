@@ -45,4 +45,4 @@ query T rowsort
 MATCH (:A)-[r]->(:B)
 RETURN r
 ----
-{'__gql_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}
+{'edge_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}

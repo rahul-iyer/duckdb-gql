@@ -35,5 +35,5 @@ MATCH (a), (b)
 WHERE a <> b
 RETURN a, b
 ----
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 2, '__gql_labels': b}
-{'__gql_id': 2, '__gql_labels': b}	{'__gql_id': 1, '__gql_labels': a}
+{'vertex_id': 1, '__gql_labels': a}	{'vertex_id': 2, '__gql_labels': b}
+{'vertex_id': 2, '__gql_labels': b}	{'vertex_id': 1, '__gql_labels': a}

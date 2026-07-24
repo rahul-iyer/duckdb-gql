@@ -45,14 +45,14 @@ query T
 MATCH (person:Person) WHERE person.age = 42
 RETURN person
 ----
-{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}
+{'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}
 
 query T rowsort
 MATCH (source:Person)-[relationship:KNOWS]->(target:Person)
 RETURN relationship
 ----
-{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}
-{'__gql_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3}
+{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}
+{'edge_id': 2, '__gql_type': knows, '__gql_source': 2, '__gql_target': 3}
 
 query T
 OPTIONAL MATCH (person:Missing)
@@ -80,7 +80,7 @@ MATCH p = (source:Person)-[relationship:KNOWS]->(target:Person)
 WHERE source.age = 42
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}, {'__gql_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
+{'nodes': [{'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}, {'vertex_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}], 'edges': [{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
 
 query T
 OPTIONAL MATCH p = (source:Missing)-[relationship]->(target)
@@ -92,14 +92,14 @@ query T
 MATCH p = (person:Person) WHERE person.age = 42
 RETURN p
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': []}
+{'nodes': [{'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': []}
 
 query T
 MATCH p = (destination:Person)<-[relationship:KNOWS]-(source:Person)
 WHERE destination.age = 35
 RETURN p
 ----
-{'nodes': [{'__gql_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}, {'__gql_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': [{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
+{'nodes': [{'vertex_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}, {'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}], 'edges': [{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}]}
 
 query TI
 MATCH (person:Person)

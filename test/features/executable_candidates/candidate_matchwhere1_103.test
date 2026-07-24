@@ -39,4 +39,4 @@ MATCH ()-[rel:X]-(a)
 WHERE a.name = 'Andres'
 RETURN a
 ----
-{'__gql_id': 3, '__gql_labels': , 'name': Andres}
+{'vertex_id': 3, '__gql_labels': , 'name': Andres}

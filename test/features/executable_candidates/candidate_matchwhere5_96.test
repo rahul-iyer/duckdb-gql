@@ -39,5 +39,5 @@ MATCH (:Root {name: 'x'})-[]->(i)
 WHERE i.var > 'te' OR i.var IS NOT NULL
 RETURN i
 ----
-{'__gql_id': 2, '__gql_labels': textnode, 'name': NULL, 'var': text}
-{'__gql_id': 3, '__gql_labels': intnode, 'name': NULL, 'var': 0}
+{'vertex_id': 2, '__gql_labels': textnode, 'name': NULL, 'var': text}
+{'vertex_id': 3, '__gql_labels': intnode, 'name': NULL, 'var': 0}

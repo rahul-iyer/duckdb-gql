@@ -39,5 +39,5 @@ query T rowsort
 MATCH (n)-[r:KNOWS|HATES]->(x)
 RETURN r
 ----
-{'__gql_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}
-{'__gql_id': 2, '__gql_type': hates, '__gql_source': 1, '__gql_target': 3}
+{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}
+{'edge_id': 2, '__gql_type': hates, '__gql_source': 1, '__gql_target': 3}

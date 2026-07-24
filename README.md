@@ -138,6 +138,33 @@ COPY GRAPH social FROM (
 
 `DROP GRAPH social` removes both the graph metadata and its managed tables.
 
+## Explain query plans
+
+DuckGQL queries use DuckDB's native plan renderer after GQL has been lowered.
+
+```sql
+EXPLAIN MATCH (person:Person)
+WHERE person.age >= 35
+RETURN person.name;
+
+EXPLAIN ANALYZE MATCH (person:Person)
+RETURN person.name;
+
+EXPLAIN (FORMAT JSON) MATCH (person:Person)
+RETURN person.name;
+```
+
+`EXPLAIN ANALYZE` executes the query and includes runtime measurements.
+Algorithm calls can be inspected after building their CSR snapshot:
+
+```sql
+CALL gql_build_csr('social');
+
+EXPLAIN CALL algo.pagerank('social')
+YIELD vertex_id, rank
+RETURN vertex_id, rank;
+```
+
 ## Graph algorithms
 
 Graph algorithms use an explicit, derived CSR snapshot. Ordinary `MATCH`
@@ -189,11 +216,14 @@ mutation.
 DuckLake tables can be used as an input source by exporting graph-header
 relations to Parquet and loading those files with `COPY GRAPH`. Direct
 zero-copy DuckLake-backed graphs are not supported yet because DuckGQL
-currently owns its native graph tables and internal catalog.
+currently owns its native graph tables and internal catalog. A
+[zero-copy DuckLake integration](docs/ducklake-zero-copy-design.md) is designed
+as a future read-only referenced-table mode.
 
-See the [native table architecture](docs/table-backed-graph-architecture.md)
-for the physical layout, catalog invariants, transaction boundaries, and CSR
-design.
+See the
+[storage and execution design](docs/table-backed-graph-architecture.md) for the
+physical table layouts, internal catalog, invariants, transaction boundaries,
+query lowering, mutations, and CSR design.
 
 ## Current limitations
 
@@ -247,7 +277,9 @@ Useful project references:
 
 - [Implementation plan](docs/gql-implementation-plan.md)
 - [Compiler architecture](docs/gql-compiler-architecture-v2.svg)
-- [Native graph storage](docs/table-backed-graph-architecture.md)
+- [Storage and execution design](docs/table-backed-graph-architecture.md)
+- [Performance design roadmap](docs/performance-design-roadmap.md)
+- [Zero-copy DuckLake integration](docs/ducklake-zero-copy-design.md)
 - [ISO GQL conformance program](docs/iso-gql-conformance.md)
 - [Benchmark reports](docs/benchmarks)
 

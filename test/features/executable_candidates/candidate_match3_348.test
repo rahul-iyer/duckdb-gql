@@ -42,5 +42,5 @@ MATCH (a {name: 'A'}), (b {name: 'B'})
 MATCH (a)-[]->(x)<-[]->(b)
 RETURN x
 ----
-{'__gql_id': 3, '__gql_labels': , 'name': x1}
-{'__gql_id': 4, '__gql_labels': , 'name': x2}
+{'vertex_id': 3, '__gql_labels': , 'name': x1}
+{'vertex_id': 4, '__gql_labels': , 'name': x2}

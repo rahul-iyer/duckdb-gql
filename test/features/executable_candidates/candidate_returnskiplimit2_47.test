@@ -39,5 +39,5 @@ RETURN n
 ORDER BY n.name ASC
 LIMIT 2
 ----
-{'__gql_id': 1, '__gql_labels': , 'name': A}
-{'__gql_id': 2, '__gql_labels': , 'name': B}
+{'vertex_id': 1, '__gql_labels': , 'name': A}
+{'vertex_id': 2, '__gql_labels': , 'name': B}

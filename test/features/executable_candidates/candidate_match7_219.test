@@ -40,5 +40,5 @@ OPTIONAL MATCH (b)-[r2]-(c)
 WHERE r <> r2
 RETURN a, b, c
 ----
-{'__gql_id': 1, '__gql_labels': a, 'num': 1}	{'__gql_id': 2, '__gql_labels': b, 'num': 2}	{'__gql_id': 3, '__gql_labels': c, 'num': 3}
-{'__gql_id': 2, '__gql_labels': b, 'num': 2}	{'__gql_id': 1, '__gql_labels': a, 'num': 1}	NULL
+{'vertex_id': 1, '__gql_labels': a, 'num': 1}	{'vertex_id': 2, '__gql_labels': b, 'num': 2}	{'vertex_id': 3, '__gql_labels': c, 'num': 3}
+{'vertex_id': 2, '__gql_labels': b, 'num': 2}	{'vertex_id': 1, '__gql_labels': a, 'num': 1}	NULL

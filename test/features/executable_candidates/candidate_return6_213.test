@@ -38,4 +38,4 @@ query TI rowsort
 MATCH (a:L)-[rel]->(b)
 RETURN a, count(*)
 ----
-{'__gql_id': 1, '__gql_labels': l}	2
+{'vertex_id': 1, '__gql_labels': l}	2

@@ -36,5 +36,5 @@ MATCH (n)
 WHERE n.p1 = 12 OR n.p2 = 13
 RETURN n
 ----
-{'__gql_id': 1, '__gql_labels': a, 'p1': 12, 'p2': NULL}
-{'__gql_id': 2, '__gql_labels': b, 'p1': NULL, 'p2': 13}
+{'vertex_id': 1, '__gql_labels': a, 'p1': 12, 'p2': NULL}
+{'vertex_id': 2, '__gql_labels': b, 'p1': NULL, 'p2': 13}

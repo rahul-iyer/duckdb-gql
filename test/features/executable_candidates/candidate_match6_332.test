@@ -37,4 +37,4 @@ MATCH p = (n:Movie)--(m)
 RETURN p
 LIMIT 1
 ----
-{'nodes': [{'__gql_id': 1, '__gql_labels': movie}, {'__gql_id': 2, '__gql_labels': }], 'edges': [{'__gql_id': 1, '__gql_type': t, '__gql_source': 2, '__gql_target': 1}]}
+{'nodes': [{'vertex_id': 1, '__gql_labels': movie}, {'vertex_id': 2, '__gql_labels': }], 'edges': [{'edge_id': 1, '__gql_type': t, '__gql_source': 2, '__gql_target': 1}]}

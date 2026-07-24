@@ -36,4 +36,4 @@ query TT rowsort
 MATCH (n1)-[rel:KNOWS]->(n2)
 RETURN n1, n2
 ----
-{'__gql_id': 1, '__gql_labels': a, 'num': 1}	{'__gql_id': 2, '__gql_labels': b, 'num': 2}
+{'vertex_id': 1, '__gql_labels': a, 'num': 1}	{'vertex_id': 2, '__gql_labels': b, 'num': 2}

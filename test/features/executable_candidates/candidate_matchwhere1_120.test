@@ -37,4 +37,4 @@ MATCH (a)-[r]->(b)
 WHERE b.name = $param
 RETURN r
 ----
-{'__gql_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2, 'name': bar}
+{'edge_id': 1, '__gql_type': t, '__gql_source': 1, '__gql_target': 2, 'name': bar}

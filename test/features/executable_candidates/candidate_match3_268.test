@@ -39,5 +39,5 @@ query TTTTT rowsort
 MATCH (x:A)-[r1]->(y)-[r2]-(z)
 RETURN x, r1, y, r2, z
 ----
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}	{'__gql_id': 2, '__gql_labels': looper}	{'__gql_id': 2, '__gql_type': loop, '__gql_source': 2, '__gql_target': 2}	{'__gql_id': 2, '__gql_labels': looper}
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}	{'__gql_id': 2, '__gql_labels': looper}	{'__gql_id': 3, '__gql_type': t2, '__gql_source': 2, '__gql_target': 3}	{'__gql_id': 3, '__gql_labels': b}
+{'vertex_id': 1, '__gql_labels': a}	{'edge_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}	{'vertex_id': 2, '__gql_labels': looper}	{'edge_id': 2, '__gql_type': loop, '__gql_source': 2, '__gql_target': 2}	{'vertex_id': 2, '__gql_labels': looper}
+{'vertex_id': 1, '__gql_labels': a}	{'edge_id': 1, '__gql_type': t1, '__gql_source': 1, '__gql_target': 2}	{'vertex_id': 2, '__gql_labels': looper}	{'edge_id': 3, '__gql_type': t2, '__gql_source': 2, '__gql_target': 3}	{'vertex_id': 3, '__gql_labels': b}

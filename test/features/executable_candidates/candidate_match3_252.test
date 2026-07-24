@@ -35,4 +35,4 @@ query TT rowsort
 MATCH (n)-[r]->(n)
 RETURN n, r
 ----
-{'__gql_id': 1, '__gql_labels': a}	{'__gql_id': 1, '__gql_type': loop, '__gql_source': 1, '__gql_target': 1}
+{'vertex_id': 1, '__gql_labels': a}	{'edge_id': 1, '__gql_type': loop, '__gql_source': 1, '__gql_target': 1}

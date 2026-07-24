@@ -41,5 +41,5 @@ OPTIONAL MATCH (a)-[]->(b:Y)
 RETURN b
 ----
 NULL
-{'__gql_id': 3, '__gql_labels': y}
-{'__gql_id': 4, '__gql_labels': y;z}
+{'vertex_id': 3, '__gql_labels': y}
+{'vertex_id': 4, '__gql_labels': y;z}

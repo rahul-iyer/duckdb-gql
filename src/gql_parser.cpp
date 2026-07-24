@@ -11,6 +11,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
 #include "gql_binder.hpp"
 #include "gql_import.hpp"
 #include "gql_lowerer.hpp"
@@ -1398,20 +1399,15 @@ static string QuoteSqlString(const string &value) {
   return result;
 }
 
-static string LowerCallLiteral(const GqlLiteral &literal) {
-  switch (literal.type) {
-  case GqlLiteralType::BOOLEAN:
-    return StringUtil::Upper(literal.value);
-  case GqlLiteralType::INTEGER:
-  case GqlLiteralType::DECIMAL:
-  case GqlLiteralType::DOUBLE:
-    return literal.value;
-  case GqlLiteralType::STRING:
-    return QuoteSqlString(literal.value);
-  case GqlLiteralType::NULL_VALUE:
-    return "NULL";
+static void AppendSqlStringList(string &result, const vector<string> &values) {
+  result += "[";
+  for (idx_t index = 0; index < values.size(); index++) {
+    if (index > 0) {
+      result += ", ";
+    }
+    result += QuoteSqlString(values[index]);
   }
-  throw InternalException("Unknown GQL CALL literal type");
+  result += "]";
 }
 
 static string LowerAlgorithmCall(const GqlCallStatement &call) {
@@ -1440,19 +1436,35 @@ static string LowerAlgorithmCall(const GqlCallStatement &call) {
       result += " AS " + QuoteSqlIdentifier(yield_item.alias.value);
     }
   }
-  result += " FROM system.algo." +
-            QuoteSqlIdentifier(call.procedure_name.value) + "(";
+  result += " FROM gql_algorithm_result(" +
+            QuoteSqlString(call.procedure_name.value) + ", ";
+  vector<string> argument_values;
+  vector<string> argument_names;
+  for (idx_t index = 0; index < call.arguments.size(); index++) {
+    argument_values.push_back(call.arguments[index].value);
+    argument_names.push_back(index < call.argument_names.size() &&
+                                     !call.argument_names[index].IsEmpty()
+                                 ? call.argument_names[index].value
+                                 : string());
+  }
+  AppendSqlStringList(result, argument_values);
+  result += ", [";
   for (idx_t index = 0; index < call.arguments.size(); index++) {
     if (index > 0) {
       result += ", ";
     }
-    if (index < call.argument_names.size() &&
-        !call.argument_names[index].IsEmpty()) {
-      result += QuoteSqlIdentifier(call.argument_names[index].value) + " := ";
-    }
-    result += LowerCallLiteral(call.arguments[index]);
+    result += to_string(static_cast<uint8_t>(call.arguments[index].type));
   }
-  result += ")) AS __gql_yield";
+  result += "]::UTINYINT[], ";
+  AppendSqlStringList(result, argument_names);
+  result += ", [";
+  for (idx_t index = 0; index < call.yield_items.size(); index++) {
+    if (index > 0) {
+      result += ", ";
+    }
+    result += QuoteSqlString(call.yield_items[index].field.value);
+  }
+  result += "])) AS __gql_yield";
   if (!call.order_by.empty()) {
     result += " ORDER BY ";
     for (idx_t index = 0; index < call.order_by.size(); index++) {
@@ -1474,6 +1486,117 @@ static string LowerAlgorithmCall(const GqlCallStatement &call) {
     result += " OFFSET " + to_string(call.offset);
   }
   return result;
+}
+
+struct GqlExplainInput {
+  string query;
+  ExplainType type = ExplainType::EXPLAIN_STANDARD;
+  ExplainFormat format = ExplainFormat::DEFAULT;
+};
+
+static idx_t SkipWhitespace(const string &query, idx_t offset) {
+  while (offset < query.size() &&
+         std::isspace(static_cast<unsigned char>(query[offset]))) {
+    offset++;
+  }
+  return offset;
+}
+
+static bool ConsumeKeyword(const string &query, idx_t &offset,
+                           const string &keyword) {
+  if (offset + keyword.size() > query.size() ||
+      !StringUtil::CIEquals(query.substr(offset, keyword.size()), keyword)) {
+    return false;
+  }
+  auto end = offset + keyword.size();
+  if (end < query.size() &&
+      (std::isalnum(static_cast<unsigned char>(query[end])) ||
+       query[end] == '_')) {
+    return false;
+  }
+  offset = end;
+  return true;
+}
+
+static idx_t ExplainOptionsEnd(const string &query, idx_t offset) {
+  if (offset >= query.size() || query[offset] != '(') {
+    return offset;
+  }
+  idx_t depth = 0;
+  char quote = '\0';
+  for (; offset < query.size(); offset++) {
+    auto character = query[offset];
+    if (quote) {
+      if (character != quote) {
+        continue;
+      }
+      if (offset + 1 < query.size() && query[offset + 1] == quote) {
+        offset++;
+        continue;
+      }
+      quote = '\0';
+      continue;
+    }
+    if (character == '\'' || character == '"') {
+      quote = character;
+    } else if (character == '(') {
+      depth++;
+    } else if (character == ')' && --depth == 0) {
+      return offset + 1;
+    }
+  }
+  throw ParserException("Unterminated EXPLAIN options");
+}
+
+static bool TryParseGqlExplain(const string &query, ParserOptions &options,
+                               GqlExplainInput &result) {
+  auto explain_start = SkipWhitespace(query, 0);
+  auto inner_offset = explain_start;
+  if (!ConsumeKeyword(query, inner_offset, "EXPLAIN")) {
+    return false;
+  }
+  inner_offset = SkipWhitespace(query, inner_offset);
+  if (inner_offset < query.size() && query[inner_offset] == '(') {
+    inner_offset = ExplainOptionsEnd(query, inner_offset);
+  } else {
+    if (ConsumeKeyword(query, inner_offset, "ANALYZE")) {
+      inner_offset = SkipWhitespace(query, inner_offset);
+    }
+    if (ConsumeKeyword(query, inner_offset, "VERBOSE")) {
+      inner_offset = SkipWhitespace(query, inner_offset);
+    }
+  }
+  inner_offset = SkipWhitespace(query, inner_offset);
+  if (inner_offset >= query.size()) {
+    throw ParserException("EXPLAIN requires a query");
+  }
+
+  auto inner_query = query.substr(inner_offset);
+  auto normalized = inner_query;
+  StringUtil::Trim(normalized);
+  auto upper = StringUtil::Upper(normalized);
+  auto is_match = StringUtil::StartsWith(upper, "MATCH") ||
+                  StringUtil::StartsWith(upper, "OPTIONAL MATCH");
+  if (!is_match && !StartsWithAlgorithmCall(inner_query)) {
+    if (StartsWithGqlCommand(inner_query)) {
+      throw NotImplementedException(
+          "DuckGQL EXPLAIN currently supports MATCH and CALL algo.* queries");
+    }
+    return false;
+  }
+
+  Parser parser(options);
+  parser.ParseQuery(query.substr(explain_start, inner_offset - explain_start) +
+                    "SELECT 1");
+  if (parser.statements.size() != 1 ||
+      parser.statements[0]->type != StatementType::EXPLAIN_STATEMENT) {
+    throw InternalException("DuckGQL failed to parse EXPLAIN options");
+  }
+  auto &explain = parser.statements[0]->Cast<ExplainStatement>();
+  result.query = std::move(inner_query);
+  result.type = explain.explain_type;
+  result.format = explain.explain_format;
+  return true;
 }
 
 ParserExtensionPlanResult
@@ -1554,6 +1677,31 @@ GqlPlan(ParserExtensionInfo *, ClientContext &,
 ParserOverrideResult GqlParserOverride(ParserExtensionInfo *,
                                        const string &query,
                                        ParserOptions &options) {
+  try {
+    GqlExplainInput explain;
+    if (TryParseGqlExplain(query, options, explain)) {
+      auto lowered = GqlParserOverride(nullptr, explain.query, options);
+      if (lowered.type != ParserExtensionResultType::PARSE_SUCCESSFUL) {
+        return lowered;
+      }
+      if (lowered.statements.size() != 1 ||
+          lowered.statements[0]->type != StatementType::SELECT_STATEMENT) {
+        throw NotImplementedException(
+            "DuckGQL EXPLAIN requires one read-only query");
+      }
+      vector<unique_ptr<SQLStatement>> statements;
+      auto statement = make_uniq<ExplainStatement>(
+          std::move(lowered.statements[0]), explain.type, explain.format);
+      statement->query = query;
+      statement->stmt_location = 0;
+      statement->stmt_length = query.size();
+      statements.push_back(std::move(statement));
+      return ParserOverrideResult(std::move(statements));
+    }
+  } catch (std::exception &error) {
+    return ParserOverrideResult(error);
+  }
+
   string rewritten;
   if (RewriteAlgorithmCall(query, rewritten)) {
     Parser parser(options);

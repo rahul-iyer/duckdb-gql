@@ -56,6 +56,7 @@ static void LoadInternal(ExtensionLoader &loader) {
   loader.RegisterFunction(GqlRelationalMatchFunction());
   loader.RegisterFunction(GqlRecursiveMatchFunction());
   loader.RegisterFunction(GqlAlgorithmCallFunction());
+  loader.RegisterFunction(GqlAlgorithmResultFunction());
   loader.RegisterFunction(GqlMutationTargetFunction());
   loader.RegisterFunction(GqlClearPropertiesSourceFunction());
   loader.RegisterFunction(GqlMutationGraphFunction());
