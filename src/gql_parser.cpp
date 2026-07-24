@@ -1504,9 +1504,23 @@ static idx_t SkipWhitespace(const string &query, idx_t offset) {
 
 static bool ConsumeKeyword(const string &query, idx_t &offset,
                            const string &keyword) {
-  if (offset + keyword.size() > query.size() ||
-      !StringUtil::CIEquals(query.substr(offset, keyword.size()), keyword)) {
+  if (offset + keyword.size() > query.size()) {
     return false;
+  }
+  for (idx_t index = 0; index < keyword.size(); index++) {
+    auto query_character = query[offset + index];
+    auto keyword_character = keyword[index];
+    if (query_character >= 'a' && query_character <= 'z') {
+      query_character =
+          static_cast<char>(query_character - ('a' - 'A'));
+    }
+    if (keyword_character >= 'a' && keyword_character <= 'z') {
+      keyword_character =
+          static_cast<char>(keyword_character - ('a' - 'A'));
+    }
+    if (query_character != keyword_character) {
+      return false;
+    }
   }
   auto end = offset + keyword.size();
   if (end < query.size() &&
