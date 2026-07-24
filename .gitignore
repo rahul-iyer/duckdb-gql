@@ -11,3 +11,4 @@ __pycache__/
 /vcpkg/
 /test/features/clauses/
 /dist/
+/docs/
