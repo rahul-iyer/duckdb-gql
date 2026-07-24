@@ -240,7 +240,7 @@ def profile_workload(
 
 
 def source_metadata() -> dict[str, Any]:
-    source_root = Path(__file__).resolve().parents[1]
+    source_root = Path(__file__).resolve().parents[2]
     commit = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=source_root,
@@ -347,7 +347,7 @@ def main() -> None:
     if not statically_linked and not extension.exists():
         raise SystemExit(f"missing required path: {extension}")
     if statically_linked:
-        source_root = Path(__file__).resolve().parents[1] / "src"
+        source_root = Path(__file__).resolve().parents[2] / "src"
         gql_sources = list(source_root.glob("**/*.cpp")) + list(source_root.glob("**/*.hpp"))
         newest_source = max(path.stat().st_mtime for path in gql_sources)
         if cli.stat().st_mtime < newest_source:

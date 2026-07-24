@@ -584,7 +584,7 @@ def main() -> int:
         cases.append(result)
     passed = sum(case["validation"]["passed"] for case in cases)
     command = (
-        "python3 scripts/benchmark_graphalytics.py "
+        "python3 scripts/benchmark/benchmark_graphalytics.py "
         f"--threads {args.threads} --warmups {args.warmups} --runs {args.runs}"
     )
     result: dict[str, Any] = {

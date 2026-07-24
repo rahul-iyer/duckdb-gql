@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "test" / "features" / "clauses"
 SQLLOGIC_ROOT = ROOT / "test" / "features" / "sqllogic"
 EXPECTED_FILES = 93

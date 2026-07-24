@@ -246,7 +246,7 @@ strict release gate intentionally fails until every applicable family is
 complete:
 
 ```sh
-python3 scripts/check_gql_conformance.py --release
+python3 scripts/gql_conformance/check_gql_conformance.py --release
 ```
 
 For definitions and engineering gates, see
@@ -264,7 +264,7 @@ VCPKG_TOOLCHAIN_PATH="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" make debug
 Validate the conformance manifest, grammar inventory, and fixture adapters:
 
 ```sh
-python3 scripts/check_gql_conformance.py
+python3 scripts/gql_conformance/check_gql_conformance.py
 ```
 
 Run the repository's code-quality checks:

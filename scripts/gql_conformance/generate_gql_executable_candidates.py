@@ -33,7 +33,7 @@ from gql_fixture_adapter import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "test" / "features" / "clauses"
 FEATURE_ROOT = ROOT / "test" / "features"
 

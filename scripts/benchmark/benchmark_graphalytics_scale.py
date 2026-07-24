@@ -597,7 +597,7 @@ def main() -> int:
         else None
     )
     reproduce = (
-        "python3 scripts/benchmark_graphalytics_scale.py "
+        "python3 scripts/benchmark/benchmark_graphalytics_scale.py "
         f"--dataset {config.name} --threads {args.threads} "
         f"--warmups {args.warmups} --runs {args.runs}"
     )

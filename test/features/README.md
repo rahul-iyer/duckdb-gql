@@ -80,7 +80,8 @@ native DuckDB `STRUCT` representation, including internal identities,
 endpoints, normalized labels/types, and all mapped properties. Ambiguous graph
 literals are skipped rather than guessed.
 
-`promote_gql_executable_candidates.py` executes every candidate independently,
+`scripts/gql_conformance/promote_gql_executable_candidates.py` executes every
+candidate independently,
 rebuilds the active compatibility test from passing candidates, updates
 `execution.tsv`, and synchronizes per-feature counts and source-port status
 markers. Promotion therefore remains test-backed even though Gherkin is not
@@ -89,18 +90,15 @@ executed directly.
 ## Reproduce and validate
 
 ```bash
-git clone https://github.com/opencypher/openCypher.git /tmp/openCypher
-git -C /tmp/openCypher checkout 677cbafabb8c3c5eed458fd3b1ec0daec8d67d23
-python3 scripts/sync_gql_clause_features.py --source /tmp/openCypher
-python3 scripts/gql_fixture_adapter.py --self-test
-python3 scripts/generate_gql_executable_candidates.py --self-test
-python3 scripts/generate_gql_clause_sqllogic.py
-python3 scripts/generate_gql_executable_candidates.py \
+python3 scripts/gql_conformance/gql_fixture_adapter.py --self-test
+python3 scripts/gql_conformance/generate_gql_executable_candidates.py --self-test
+python3 scripts/gql_conformance/generate_gql_clause_sqllogic.py
+python3 scripts/gql_conformance/generate_gql_executable_candidates.py \
   --output test/features/executable_candidates
-python3 scripts/promote_gql_executable_candidates.py \
+python3 scripts/gql_conformance/promote_gql_executable_candidates.py \
   --candidates test/features/executable_candidates \
   --runner build/debug/test/unittest
-python3 scripts/check_gql_feature_corpus.py
+python3 scripts/gql_conformance/check_gql_feature_corpus.py
 ```
 
 The executable DuckDB SQLLogicTests remain under `test/sql`; no Gherkin or TCK

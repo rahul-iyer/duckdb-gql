@@ -9,7 +9,7 @@ from collections import Counter
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "test" / "conformance" / "iso-gql-2024.tsv"
 GRAMMAR = ROOT / "third_party" / "opengql" / "GQL.g4"
 FEATURE_CORPUS = ROOT / "test" / "features" / "clauses"
@@ -68,14 +68,23 @@ def main() -> int:
         )
 
     subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "gql_fixture_adapter.py"), "--self-test"],
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "gql_conformance" / "gql_fixture_adapter.py"),
+            "--self-test",
+        ],
         cwd=ROOT,
         check=True,
     )
     subprocess.run(
         [
             sys.executable,
-            str(ROOT / "scripts" / "generate_gql_executable_candidates.py"),
+            str(
+                ROOT
+                / "scripts"
+                / "gql_conformance"
+                / "generate_gql_executable_candidates.py"
+            ),
             "--self-test",
         ],
         cwd=ROOT,
@@ -83,7 +92,15 @@ def main() -> int:
     )
     if FEATURE_CORPUS.is_dir():
         subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "check_gql_feature_corpus.py")],
+            [
+                sys.executable,
+                str(
+                    ROOT
+                    / "scripts"
+                    / "gql_conformance"
+                    / "check_gql_feature_corpus.py"
+                ),
+            ],
             cwd=ROOT,
             check=True,
         )

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python3 scripts/check_gql_conformance.py
+      - run: python3 scripts/gql_conformance/check_gql_conformance.py
 
   duckdb-stable-build:
     name: Build extension binaries
