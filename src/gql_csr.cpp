@@ -201,9 +201,11 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 
 	auto vertex_count = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + QualifiedTable(binding.vertex));
 	snapshot->vertex_ids.reserve(NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()));
-	auto vertex_label_projection = binding.vertex.label_column.empty()
-	                                   ? "CAST(NULL AS VARCHAR)"
-	                                   : "CAST(" + GqlQuoteIdentifier(binding.vertex.label_column) + " AS VARCHAR)";
+	auto vertex_label_projection =
+	    binding.vertex.label_column.empty() ? "CAST(NULL AS VARCHAR[])"
+	    : binding.vertex.label_is_list
+	        ? GqlQuoteIdentifier(binding.vertex.label_column)
+	        : "string_split(CAST(" + GqlQuoteIdentifier(binding.vertex.label_column) + " AS VARCHAR), ';')";
 	auto vertices = connection.SendQuery("SELECT CAST(" + GqlQuoteIdentifier(binding.vertex.key_column) +
 	                                     " AS UBIGINT) AS vertex_id, " + vertex_label_projection + " FROM " +
 	                                     QualifiedTable(binding.vertex) + " ORDER BY vertex_id");
@@ -212,10 +214,14 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	while (auto chunk = vertices->Fetch()) {
 		UnifiedVectorFormat vertex_data;
 		UnifiedVectorFormat label_data;
+		UnifiedVectorFormat label_child_data;
 		chunk->data[0].ToUnifiedFormat(chunk->size(), vertex_data);
 		chunk->data[1].ToUnifiedFormat(chunk->size(), label_data);
+		auto &label_child = ListVector::GetEntry(chunk->data[1]);
+		label_child.ToUnifiedFormat(ListVector::GetListSize(chunk->data[1]), label_child_data);
 		auto ids = UnifiedVectorFormat::GetData<uint64_t>(vertex_data);
-		auto labels = UnifiedVectorFormat::GetData<string_t>(label_data);
+		auto label_lists = UnifiedVectorFormat::GetData<list_entry_t>(label_data);
+		auto labels = UnifiedVectorFormat::GetData<string_t>(label_child_data);
 		for (idx_t row = 0; row < chunk->size(); row++) {
 			auto index = vertex_data.sel->get_index(row);
 			if (!vertex_data.validity.RowIsValid(index)) {
@@ -229,9 +235,14 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			snapshot->vertex_ids.push_back(vertex_id);
 			auto label_index = label_data.sel->get_index(row);
 			if (label_data.validity.RowIsValid(label_index)) {
-				for (auto &label : StringUtil::Split(labels[label_index].GetString(), ';')) {
-					if (!label.empty()) {
-						snapshot->vertex_label_ids.push_back(CsrLabelId(*snapshot, label));
+				auto label_list = label_lists[label_index];
+				for (idx_t offset = 0; offset < label_list.length; offset++) {
+					auto child_index = label_child_data.sel->get_index(label_list.offset + offset);
+					if (label_child_data.validity.RowIsValid(child_index)) {
+						auto label = labels[child_index].GetString();
+						if (!label.empty()) {
+							snapshot->vertex_label_ids.push_back(CsrLabelId(*snapshot, label));
+						}
 					}
 				}
 			}

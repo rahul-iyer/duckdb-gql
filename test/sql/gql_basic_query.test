@@ -129,6 +129,14 @@ RETURN TRIM('  Ada  ') AS trimmed, person.name || ' Lovelace' AS full_name
 Ada	Ada Lovelace
 Ada	Ada Lovelace
 
+query TT rowsort
+MATCH (person:Person)
+RETURN person.name, COALESCE(person.missing, person.name, 'unknown') AS display_name
+----
+Ada	Ada
+Ada	Ada
+Grace	Grace
+
 query T
 OPTIONAL MATCH (person:Missing)
 RETURN person.name AS name

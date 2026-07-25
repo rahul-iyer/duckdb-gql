@@ -90,6 +90,7 @@ struct RecursiveMatchInput {
 struct RelationalPropertyAccess {
 	string table_alias;
 	string column_name;
+	bool is_list = false;
 };
 
 struct RelationalIdentityAccess {
@@ -531,7 +532,7 @@ static void CollectProperties(const GqlExpressionProgram &program, RelationalPro
 		                           : program.properties[node]);
 		if (aliases.find(key) == aliases.end()) {
 			auto alias = "gql_op_" + to_string(aliases.size());
-			aliases.emplace(std::move(key), RelationalPropertyAccess {std::move(alias), "value"});
+			aliases.emplace(std::move(key), RelationalPropertyAccess {std::move(alias), "value", false});
 		}
 	}
 }
@@ -613,22 +614,23 @@ static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_p
 	return make_uniq<FunctionExpression>(name, std::move(arguments));
 }
 
-static unique_ptr<ParsedExpression> VertexHasLabel(const string &table_alias, const string &label_column,
-                                                   const string &label) {
-	vector<unique_ptr<ParsedExpression>> split_arguments;
-	split_arguments.push_back(Column(table_alias, label_column));
-	split_arguments.push_back(Constant(Value(";")));
+static unique_ptr<ParsedExpression> ElementHasLabel(const string &table_alias, const string &label_column,
+                                                    bool label_is_list, const string &label) {
 	vector<unique_ptr<ParsedExpression>> contains_arguments;
-	contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+	if (label_is_list) {
+		contains_arguments.push_back(Column(table_alias, label_column));
+	} else {
+		vector<unique_ptr<ParsedExpression>> split_arguments;
+		split_arguments.push_back(Column(table_alias, label_column));
+		split_arguments.push_back(Constant(Value(";")));
+		contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+	}
 	contains_arguments.push_back(Constant(Value(label)));
 	auto contains = Function("list_contains", std::move(contains_arguments));
-	auto result = make_uniq<CaseExpression>();
-	CaseCheck missing;
-	missing.when_expr = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_IS_NULL, contains->Copy());
-	missing.then_expr = Constant(Value(false));
-	result->case_checks.push_back(std::move(missing));
-	result->else_expr = std::move(contains);
-	return std::move(result);
+	vector<unique_ptr<ParsedExpression>> coalesce_arguments;
+	coalesce_arguments.push_back(std::move(contains));
+	coalesce_arguments.push_back(Constant(Value(false)));
+	return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(coalesce_arguments));
 }
 
 static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &program, idx_t &cursor,
@@ -681,6 +683,9 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			}
 			arguments.push_back(LowerExpression(program, cursor, property_aliases, identities, desired));
 		}
+		if (name == "coalesce") {
+			return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(arguments));
+		}
 		auto result = make_uniq<FunctionExpression>(lowered_name, std::move(arguments));
 		result->distinct = program.distinct[node];
 		return std::move(result);
@@ -711,7 +716,8 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		}
 		vector<unique_ptr<ParsedExpression>> predicates;
 		for (const auto &label : StringUtil::Split(program.properties[node], ';')) {
-			predicates.push_back(VertexHasLabel(entry->second.table_alias, entry->second.column_name, label));
+			predicates.push_back(
+			    ElementHasLabel(entry->second.table_alias, entry->second.column_name, entry->second.is_list, label));
 		}
 		auto result = And(std::move(predicates));
 		if (program.operators[node] != 0) {
@@ -822,8 +828,15 @@ static unique_ptr<ParsedExpression> GraphElementValueAt(const GqlExpressionProgr
 	AppendStructField(fields, Column(alias, table.key_column),
 	                  expected == GqlPatternElementType::VERTEX ? "vertex_id" : "edge_id");
 	if (expected == GqlPatternElementType::VERTEX) {
-		AppendStructField(fields, table.label_column.empty() ? Constant(Value()) : Column(alias, table.label_column),
-		                  "__gql_labels");
+		unique_ptr<ParsedExpression> labels =
+		    table.label_column.empty() ? Constant(Value()) : Column(alias, table.label_column);
+		if (!table.label_column.empty() && table.label_is_list) {
+			vector<unique_ptr<ParsedExpression>> arguments;
+			arguments.push_back(std::move(labels));
+			arguments.push_back(Constant(Value(";")));
+			labels = Function("array_to_string", std::move(arguments));
+		}
+		AppendStructField(fields, std::move(labels), "__gql_labels");
 	} else {
 		AppendStructField(fields, table.label_column.empty() ? Constant(Value()) : Column(alias, table.label_column),
 		                  "__gql_type");
@@ -1106,6 +1119,7 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 		entry.second.table_alias = identities[binding_index].table_alias;
 		if (property == GQL_LABEL_ACCESS) {
 			entry.second.column_name = graph.vertex.label_column;
+			entry.second.is_list = graph.vertex.label_is_list;
 		} else {
 			TryFindPropertyColumn(graph.vertex, property, entry.second.column_name);
 		}
@@ -1122,7 +1136,8 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 		if (graph.vertex.label_column.empty()) {
 			anchor_filters.push_back(Constant(Value(false)));
 		} else {
-			anchor_filters.push_back(VertexHasLabel(anchor_alias, graph.vertex.label_column, label));
+			anchor_filters.push_back(
+			    ElementHasLabel(anchor_alias, graph.vertex.label_column, graph.vertex.label_is_list, label));
 		}
 	}
 	vector<RelationalIdentityAccess> anchor_identities(match.binding_count);
@@ -1180,7 +1195,8 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 		if (graph.edge.label_column.empty()) {
 			step_filters.push_back(Constant(Value(false)));
 		} else {
-			step_filters.push_back(Equal(Column(edge_alias, graph.edge.label_column), Constant(Value(label))));
+			step_filters.push_back(
+			    ElementHasLabel(edge_alias, graph.edge.label_column, graph.edge.label_is_list, label));
 		}
 	}
 
@@ -1244,8 +1260,8 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 			if (graph.vertex.label_column.empty()) {
 				filters.push_back(Constant(Value(false)));
 			} else {
-				filters.push_back(
-				    VertexHasLabel(identities[binding_index].table_alias, graph.vertex.label_column, label));
+				filters.push_back(ElementHasLabel(identities[binding_index].table_alias, graph.vertex.label_column,
+				                                  graph.vertex.label_is_list, label));
 			}
 		}
 	};
@@ -1313,6 +1329,7 @@ static unique_ptr<TableRef> TableBackedMatch(const GqlTableGraphBinding &graph, 
 		entry.second.table_alias = identities[binding_index].table_alias;
 		if (property == GQL_LABEL_ACCESS) {
 			entry.second.column_name = table.label_column;
+			entry.second.is_list = table.label_is_list;
 		} else {
 			TryFindPropertyColumn(table, property, entry.second.column_name);
 		}
@@ -1362,8 +1379,8 @@ static unique_ptr<TableRef> TableBackedMatch(const GqlTableGraphBinding &graph, 
 					result.conditions.push_back(Constant(Value(false)));
 				} else {
 					for (const auto &label : StringUtil::Split(element.label, ';')) {
-						result.conditions.push_back(
-						    VertexHasLabel(identities[element.binding_index].table_alias, table.label_column, label));
+						result.conditions.push_back(ElementHasLabel(identities[element.binding_index].table_alias,
+						                                            table.label_column, table.label_is_list, label));
 					}
 				}
 			}

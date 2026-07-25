@@ -15,6 +15,7 @@ struct GqlElementTableBinding {
 	string key_column;
 	string ownership;
 	string label_column;
+	bool label_is_list = false;
 	unordered_map<string, string> property_columns;
 };
 

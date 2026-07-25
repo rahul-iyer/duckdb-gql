@@ -35,6 +35,28 @@ COPY GRAPH optimizer_plan FROM (
 statement ok
 SESSION SET GRAPH optimizer_plan
 
+# A label-only MATCH over newly loaded storage must probe the native list
+# directly. The physical filter must not reconstruct a list with string_split.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_native_label_list_plan.txt'
+
+statement ok
+MATCH (source:Person)
+RETURN count(*)
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT len(regexp_extract_all(lower(content), 'string_split')),
+       len(regexp_extract_all(lower(content), 'list_contains'))
+FROM read_text('__TEST_DIR__/gql_native_label_list_plan.txt')
+----
+0	1
+
 # Profiling observes the physical tree after DuckDB statistics propagation and
 # join ordering. Three mandatory MATCH stages must become one native join island:
 # three vertex scans plus two edge scans, connected by four joins, with the

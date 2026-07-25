@@ -12,6 +12,7 @@
 #include "duckdb/parser/expression/conjunction_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/lambda_expression.hpp"
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
@@ -63,38 +64,65 @@ static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_p
 	return make_uniq<FunctionExpression>(name, std::move(arguments));
 }
 
-static unique_ptr<ParsedExpression> HasLabel(unique_ptr<ParsedExpression> labels, const string &label) {
-	vector<unique_ptr<ParsedExpression>> split_arguments;
-	split_arguments.push_back(std::move(labels));
-	split_arguments.push_back(Constant(Value(";")));
+static Value LabelListValue(const vector<string> &labels) {
+	vector<Value> values;
+	values.reserve(labels.size());
+	for (const auto &label : labels) {
+		values.emplace_back(label);
+	}
+	return Value::LIST(LogicalType::VARCHAR, std::move(values));
+}
+
+static unique_ptr<ParsedExpression> HasLabel(unique_ptr<ParsedExpression> labels, const string &label, bool is_list) {
 	vector<unique_ptr<ParsedExpression>> contains_arguments;
-	contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+	if (is_list) {
+		contains_arguments.push_back(std::move(labels));
+	} else {
+		vector<unique_ptr<ParsedExpression>> split_arguments;
+		split_arguments.push_back(std::move(labels));
+		split_arguments.push_back(Constant(Value(";")));
+		contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+	}
 	contains_arguments.push_back(Constant(Value(label)));
 	return Function("list_contains", std::move(contains_arguments));
 }
 
-static unique_ptr<ParsedExpression> AppendLabel(unique_ptr<ParsedExpression> labels, const string &label) {
+static unique_ptr<ParsedExpression> AppendLabel(unique_ptr<ParsedExpression> labels, const string &label,
+                                                bool is_list) {
 	auto result = make_uniq<CaseExpression>();
 
 	CaseCheck missing;
 	missing.when_expr = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_IS_NULL, labels->Copy());
-	missing.then_expr = Constant(Value(label));
+	missing.then_expr = Constant(is_list ? LabelListValue({label}) : Value(label));
 	result->case_checks.push_back(std::move(missing));
 
 	CaseCheck present;
-	present.when_expr = HasLabel(labels->Copy(), label);
+	present.when_expr = HasLabel(labels->Copy(), label, is_list);
 	present.then_expr = labels->Copy();
 	result->case_checks.push_back(std::move(present));
 
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(std::move(labels));
-	arguments.push_back(Constant(Value(";")));
 	arguments.push_back(Constant(Value(label)));
-	result->else_expr = Function("concat", std::move(arguments));
+	if (is_list) {
+		result->else_expr = Function("list_append", std::move(arguments));
+	} else {
+		arguments.insert(arguments.begin() + 1, Constant(Value(";")));
+		result->else_expr = Function("concat", std::move(arguments));
+	}
 	return std::move(result);
 }
 
-static unique_ptr<ParsedExpression> EraseLabel(unique_ptr<ParsedExpression> labels, const string &label) {
+static unique_ptr<ParsedExpression> EraseLabel(unique_ptr<ParsedExpression> labels, const string &label, bool is_list) {
+	if (is_list) {
+		auto item = make_uniq<ColumnRefExpression>("gql_label_item");
+		auto predicate =
+		    make_uniq<ComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, std::move(item), Constant(Value(label)));
+		vector<unique_ptr<ParsedExpression>> arguments;
+		arguments.push_back(std::move(labels));
+		arguments.push_back(make_uniq<LambdaExpression>(vector<string> {"gql_label_item"}, std::move(predicate)));
+		return Function("list_filter", std::move(arguments));
+	}
 	vector<unique_ptr<ParsedExpression>> padded_arguments;
 	padded_arguments.push_back(Constant(Value(";")));
 	padded_arguments.push_back(std::move(labels));
@@ -224,13 +252,14 @@ static unique_ptr<SQLStatement> SetProperty(const string &snapshot_name, idx_t m
 
 static unique_ptr<SQLStatement> SetLabel(const string &snapshot_name, idx_t mutation_index,
                                          const GqlBoundMutation &mutation) {
+	auto is_list = mutation.binding_type.id != GqlTypeId::EDGE;
 	auto update = make_uniq<UpdateStatement>();
 	update->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
 	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
 	update->set_info = make_uniq<UpdateSetInfo>();
 	update->set_info->columns.push_back(LabelColumn(mutation));
 	update->set_info->expressions.push_back(
-	    AppendLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name));
+	    AppendLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list));
 	update->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
 	                                    Column("gql_mutation_match", TargetColumn(mutation_index)));
 	return std::move(update);
@@ -273,16 +302,17 @@ static unique_ptr<SQLStatement> RemoveProperty(const string &snapshot_name, idx_
 
 static unique_ptr<SQLStatement> RemoveLabel(const string &snapshot_name, idx_t mutation_index,
                                             const GqlBoundMutation &mutation) {
+	auto is_list = mutation.binding_type.id != GqlTypeId::EDGE;
 	auto update = make_uniq<UpdateStatement>();
 	update->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
 	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
 	update->set_info = make_uniq<UpdateSetInfo>();
 	update->set_info->columns.push_back(LabelColumn(mutation));
 	update->set_info->expressions.push_back(
-	    EraseLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name));
+	    EraseLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list));
 	auto target = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
 	                    Column("gql_mutation_match", TargetColumn(mutation_index)));
-	auto has_label = HasLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name);
+	auto has_label = HasLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list);
 	update->set_info->condition = And(std::move(target), std::move(has_label));
 	return std::move(update);
 }
@@ -444,6 +474,10 @@ static unique_ptr<TableRef> MutationTargetBindReplace(ClientContext &context, Ta
 			throw NotImplementedException("Managed GQL mutation requires the canonical %s label column",
 			                              expected_label);
 		}
+		if (kind == "VERTEX" && !table.label_is_list) {
+			throw NotImplementedException("Managed vertex label mutation requires native LIST_COLUMN storage; "
+			                              "recreate and reload the graph with COPY GRAPH");
+		}
 	} else if (purpose != "DELETE") {
 		throw BinderException("Invalid GQL mutation purpose '%s'", purpose);
 	}
@@ -549,6 +583,10 @@ static unique_ptr<TableRef> InsertTargetBindReplace(ClientContext &context, Tabl
 	if (!StringUtil::CIEquals(table.key_column, expected_key) ||
 	    !StringUtil::CIEquals(table.label_column, expected_label)) {
 		throw NotImplementedException("GQL INSERT requires canonical %s and %s columns", expected_key, expected_label);
+	}
+	if (kind == "VERTEX" && !table.label_is_list) {
+		throw NotImplementedException("GQL INSERT requires native vertex LIST_COLUMN storage; "
+		                              "recreate and reload the graph with COPY GRAPH");
 	}
 	if (kind == "EDGE" && (!StringUtil::CIEquals(graph.edge_source_column, "__gql_source_id") ||
 	                       !StringUtil::CIEquals(graph.edge_target_column, "__gql_target_id"))) {
@@ -659,6 +697,10 @@ static unique_ptr<TableRef> MergeTargetBindReplace(ClientContext &context, Table
 	    !StringUtil::CIEquals(graph.vertex.label_column, "__gql_label")) {
 		throw NotImplementedException("GQL MERGE requires canonical __gql_id and __gql_label columns");
 	}
+	if (!graph.vertex.label_is_list) {
+		throw NotImplementedException("GQL MERGE requires native vertex LIST_COLUMN storage; "
+		                              "recreate and reload the graph with COPY GRAPH");
+	}
 	for (const auto &entry : ListValue::GetChildren(input.inputs[0])) {
 		auto property = entry.GetValue<string>();
 		auto &column = MappedProperty(graph.vertex, property);
@@ -762,6 +804,17 @@ static unique_ptr<ParsedExpression> InsertLabels(const GqlInsertElement &element
 			labels.push_back(label.value);
 		}
 	}
+	return Constant(LabelListValue(labels));
+}
+
+static unique_ptr<ParsedExpression> InsertScalarLabels(const GqlInsertElement &element) {
+	vector<string> labels;
+	case_insensitive_set_t seen;
+	for (const auto &label : element.labels) {
+		if (seen.insert(label.value).second) {
+			labels.push_back(label.value);
+		}
+	}
 	return Constant(labels.empty() ? Value() : Value(StringUtil::Join(labels, ";")));
 }
 
@@ -803,7 +856,7 @@ static unique_ptr<SQLStatement> LowerInsertEdge(const string &snapshot_name, idx
 	action->expressions.push_back(Column("gql_insert_source", "edge_id_" + to_string(edge_index)));
 	action->expressions.push_back(Column("gql_insert_source", "vertex_id_" + to_string(edge.source_vertex)));
 	action->expressions.push_back(Column("gql_insert_source", "vertex_id_" + to_string(edge.target_vertex)));
-	action->expressions.push_back(InsertLabels(edge));
+	action->expressions.push_back(InsertScalarLabels(edge));
 	AddInsertProperties(*action, edge);
 	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
@@ -871,6 +924,17 @@ static unique_ptr<ParsedExpression> MatchInsertLabels(const vector<string> &inpu
 			labels.push_back(label);
 		}
 	}
+	return Constant(LabelListValue(labels));
+}
+
+static unique_ptr<ParsedExpression> MatchInsertScalarLabels(const vector<string> &input) {
+	vector<string> labels;
+	case_insensitive_set_t seen;
+	for (const auto &label : input) {
+		if (seen.insert(label).second) {
+			labels.push_back(label);
+		}
+	}
 	return Constant(labels.empty() ? Value() : Value(StringUtil::Join(labels, ";")));
 }
 
@@ -917,7 +981,7 @@ static unique_ptr<SQLStatement> LowerMatchInsertEdge(const string &ids_snapshot,
 	    Column("gql_match_insert_source", MatchInsertVertexIdColumn(insert.vertices[edge.source_vertex])));
 	action->expressions.push_back(
 	    Column("gql_match_insert_source", MatchInsertVertexIdColumn(insert.vertices[edge.target_vertex])));
-	action->expressions.push_back(MatchInsertLabels(edge.labels));
+	action->expressions.push_back(MatchInsertScalarLabels(edge.labels));
 	AddMatchInsertProperties(*action, edge.properties);
 	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
@@ -967,7 +1031,7 @@ static unique_ptr<SQLStatement> LowerMergeStatement(const GqlMergeStatement &mer
 
 	unique_ptr<ParsedExpression> condition;
 	for (const auto &label : merge.vertex.labels) {
-		auto comparison = HasLabel(Column("gql_merge_target", "__gql_label"), label.value);
+		auto comparison = HasLabel(Column("gql_merge_target", "__gql_label"), label.value, true);
 		condition = condition ? And(std::move(condition), std::move(comparison)) : std::move(comparison);
 	}
 	for (const auto &property : merge.vertex.properties) {
@@ -988,7 +1052,7 @@ static unique_ptr<SQLStatement> LowerMergeStatement(const GqlMergeStatement &mer
 	for (const auto &label : merge.vertex.labels) {
 		labels.push_back(label.value);
 	}
-	insert->expressions.push_back(Constant(labels.empty() ? Value() : Value(StringUtil::Join(labels, ";"))));
+	insert->expressions.push_back(Constant(LabelListValue(labels)));
 	for (const auto &property : merge.vertex.properties) {
 		insert->insert_columns.push_back(property.name.value);
 		insert->expressions.push_back(Constant(MergeLiteralValue(property.value)));

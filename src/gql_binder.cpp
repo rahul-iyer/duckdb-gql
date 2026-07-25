@@ -285,6 +285,23 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 		if (result->arguments.empty()) {
 			throw BinderException("GQL function '%s' requires an argument", expression.function_name);
 		}
+		if (name == "coalesce") {
+			result->result_type = result->arguments[0]->result_type;
+			result->result_type.nullable = true;
+			for (const auto &argument : result->arguments) {
+				if (result->result_type.id == GqlTypeId::PROPERTY_VALUE &&
+				    argument->result_type.id != GqlTypeId::PROPERTY_VALUE) {
+					result->result_type.id = argument->result_type.id;
+				} else if (argument->result_type.id != GqlTypeId::PROPERTY_VALUE &&
+				           result->result_type.id != argument->result_type.id) {
+					throw BinderException("GQL COALESCE arguments must have compatible types");
+				}
+				if (!argument->result_type.nullable) {
+					result->result_type.nullable = false;
+				}
+			}
+			return result;
+		}
 		if (name == "lower" || name == "upper" || name == "trim" || name == "ltrim" || name == "rtrim" ||
 		    name == "left" || name == "right" || name == "nfc_normalize") {
 			if (result->arguments[0]->result_type.id != GqlTypeId::STRING &&

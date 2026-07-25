@@ -54,11 +54,15 @@ static const ColumnDefinition &ResolveColumn(const TableDescription &table, cons
 	                      table.table);
 }
 
-static void ValidateLabelColumn(const TableDescription &table, const ColumnDefinition &column) {
-	if (column.Type().id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("Graph label/type column '%s' in %s.%s must be VARCHAR, found %s", column.Name(),
-		                      table.schema, table.table, column.Type().ToString());
+static bool ValidateLabelColumn(const TableDescription &table, const ColumnDefinition &column, bool allow_list) {
+	if (column.Type().id() == LogicalTypeId::VARCHAR) {
+		return false;
 	}
+	if (allow_list && column.Type() == LogicalType::LIST(LogicalType::VARCHAR)) {
+		return true;
+	}
+	throw BinderException("Graph label/type column '%s' in %s.%s must be %s, found %s", column.Name(), table.schema,
+	                      table.table, allow_list ? "VARCHAR or VARCHAR[]" : "VARCHAR", column.Type().ToString());
 }
 
 static void ValidateKey(Connection &connection, const TableDescription &table, const ColumnDefinition &key) {
@@ -129,13 +133,16 @@ static uint64_t InsertElementTable(Connection &connection, uint64_t graph_id, co
 	return result->GetValue(0, 0).GetValue<uint64_t>();
 }
 
-static void InsertLabelMapping(Connection &connection, uint64_t element_table_id, const string &column_name) {
+static void InsertLabelMapping(Connection &connection, uint64_t element_table_id, const string &column_name,
+                               bool is_list) {
 	if (column_name.empty()) {
 		return;
 	}
 	GqlQuery(connection, "INSERT INTO gql_internal.graph_label_mappings "
 	                     "(element_table_id, mapping_kind, column_name) VALUES (" +
-	                         to_string(element_table_id) + ", 'SCALAR_COLUMN', " + GqlQuoteLiteral(column_name) + ")");
+	                         to_string(element_table_id) + ", " +
+	                         GqlQuoteLiteral(is_list ? "LIST_COLUMN" : "SCALAR_COLUMN") + ", " +
+	                         GqlQuoteLiteral(column_name) + ")");
 }
 
 void GqlAttachManagedGraphTables(Connection &connection, const string &graph_name, const string &vertex_table,
@@ -151,8 +158,8 @@ void GqlAttachManagedGraphTables(Connection &connection, const string &graph_nam
 	auto &resolved_edge_target = ResolveColumn(*edge, edge_target);
 	auto &resolved_vertex_label = ResolveColumn(*vertex, vertex_label);
 	auto &resolved_edge_label = ResolveColumn(*edge, edge_label);
-	ValidateLabelColumn(*vertex, resolved_vertex_label);
-	ValidateLabelColumn(*edge, resolved_edge_label);
+	auto vertex_label_is_list = ValidateLabelColumn(*vertex, resolved_vertex_label, true);
+	auto edge_label_is_list = ValidateLabelColumn(*edge, resolved_edge_label, false);
 	if (resolved_edge_source.Type() != resolved_vertex_key.Type() ||
 	    resolved_edge_target.Type() != resolved_vertex_key.Type()) {
 		throw BinderException("Graph edge endpoint types must exactly match the vertex key type (%s)",
@@ -187,8 +194,8 @@ void GqlAttachManagedGraphTables(Connection &connection, const string &graph_nam
 
 	auto vertex_id = InsertElementTable(connection, graph_id, "VERTEX", *vertex, resolved_vertex_key.Name(), "MANAGED");
 	auto edge_id = InsertElementTable(connection, graph_id, "EDGE", *edge, resolved_edge_key.Name(), "MANAGED");
-	InsertLabelMapping(connection, vertex_id, resolved_vertex_label.Name());
-	InsertLabelMapping(connection, edge_id, resolved_edge_label.Name());
+	InsertLabelMapping(connection, vertex_id, resolved_vertex_label.Name(), vertex_label_is_list);
+	InsertLabelMapping(connection, edge_id, resolved_edge_label.Name(), edge_label_is_list);
 	InsertProperties(connection, vertex_id, *vertex, {resolved_vertex_key.Name(), resolved_vertex_label.Name()});
 	InsertProperties(connection, edge_id, *edge,
 	                 {resolved_edge_key.Name(), resolved_edge_source.Name(), resolved_edge_target.Name(),
@@ -236,9 +243,14 @@ static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
 	if (result->RowCount() == 0) {
 		return;
 	}
-	if (result->RowCount() != 1 || result->GetValue(0, 0).GetValue<string>() != "SCALAR_COLUMN") {
-		throw NotImplementedException("Table-backed MATCH currently requires one scalar label/type column");
+	if (result->RowCount() != 1) {
+		throw NotImplementedException("Table-backed MATCH currently requires one label/type column");
 	}
+	auto mapping_kind = result->GetValue(0, 0).GetValue<string>();
+	if (mapping_kind != "SCALAR_COLUMN" && mapping_kind != "LIST_COLUMN") {
+		throw NotImplementedException("Table-backed MATCH does not support label mapping kind '%s'", mapping_kind);
+	}
+	table.label_is_list = mapping_kind == "LIST_COLUMN";
 	table.label_column = result->GetValue(1, 0).GetValue<string>();
 }
 

@@ -106,7 +106,7 @@ AUS	Atlanta
 
 # Writes through ordinary SQL are visible to later GQL without graph re-import.
 statement ok
-INSERT INTO gql_data.graph_1_vertices VALUES (5, 'airport', '5', 'SFO', 'San Francisco')
+INSERT INTO gql_data.graph_1_vertices VALUES (5, ['airport'], '5', 'SFO', 'San Francisco')
 
 statement ok
 INSERT INTO gql_data.graph_1_edges VALUES (3, 1, 5, 'route', 2139)

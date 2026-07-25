@@ -1331,6 +1331,23 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 	if (auto aggregate = context.aggregateFunction()) {
 		return TransformAggregate(*aggregate, result);
 	}
+	if (auto case_expression = context.caseExpression()) {
+		auto abbreviation = case_expression->caseAbbreviation();
+		if (!abbreviation || !abbreviation->COALESCE()) {
+			return false;
+		}
+		expression->type = GqlExpressionType::FUNCTION;
+		expression->function_name = "coalesce";
+		for (auto argument : abbreviation->valueExpression()) {
+			shared_ptr<GqlExpression> child;
+			if (!TransformExpression(*argument, child)) {
+				return false;
+			}
+			expression->arguments.push_back(std::move(child));
+		}
+		result = std::move(expression);
+		return true;
+	}
 	if (auto specification = context.unsignedValueSpecification()) {
 		auto literal = specification->unsignedLiteral();
 		if (!literal) {

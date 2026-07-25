@@ -361,10 +361,12 @@ static string NativePropertyProjection(const vector<GraphHeaderField> &propertie
 
 static string NativeLabelExpression(const GraphHeaderSchema &schema, const string &alias) {
 	if (schema.labels.empty()) {
-		return "CAST('' AS VARCHAR)";
+		return "[]::VARCHAR[]";
 	}
 	auto label = "CAST(" + Column(alias, schema.labels[0]) + " AS VARCHAR)";
-	return "array_to_string(list_transform(string_split(" + label + ", ';'), item -> lower(trim(item))), ';')";
+	return "CASE WHEN " + label + " IS NULL OR trim(" + label +
+	       ") = '' THEN []::VARCHAR[] ELSE list_filter(list_transform(string_split(" + label +
+	       ", ';'), item -> lower(trim(item))), item -> item <> '') END";
 }
 
 static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema &nodes,

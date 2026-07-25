@@ -52,6 +52,29 @@ WHERE graph_name = 'managed_native'
 EDGE	MANAGED
 VERTEX	MANAGED
 
+# Vertex labels are persisted as a native list while the single edge type
+# remains scalar.
+query TT rowsort
+SELECT et.element_kind, lm.mapping_kind
+FROM gql_internal.graph_label_mappings lm
+JOIN gql_internal.graph_element_tables et USING (element_table_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE graph_name = 'managed_native'
+----
+EDGE	SCALAR_COLUMN
+VERTEX	LIST_COLUMN
+
+query TT
+SELECT c.data_type, CAST(v.__gql_label AS VARCHAR)
+FROM information_schema.columns c,
+     gql_data.graph_1_vertices v
+WHERE c.table_schema = 'gql_data'
+  AND c.table_name = 'graph_1_vertices'
+  AND c.column_name = '__gql_label'
+  AND v.__gql_id = 1
+----
+VARCHAR[]	[person]
+
 query II
 SELECT vertex_count, edge_count
 FROM gql_graphs()
