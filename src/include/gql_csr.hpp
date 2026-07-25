@@ -178,6 +178,7 @@ struct GqlCsrSnapshot {
 	vector<uint64_t> incoming_edge_ids;
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
+	bool edge_labels_single = true;
 	idx_t topology_bytes = 0;
 	idx_t identity_bytes = 0;
 	idx_t label_bytes = 0;
@@ -189,6 +190,10 @@ struct GqlCsrSnapshot {
 bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
 
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name);
+
+//! Returns a current connection-local snapshot when one is available and
+//! valid. Unlike GqlGetCsrSnapshot, this is a non-throwing optimizer probe.
+shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, const string &graph_name);
 
 //! Register a lightweight observer that invalidates snapshots when a prepared
 //! write executes.
@@ -202,6 +207,7 @@ void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog
 void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);
 
 TableFunction GqlNeighborsFunction();
+TableFunction GqlCsrExpandFunction();
 TableFunction GqlBuildCsrFunction();
 TableFunction GqlCsrStatsFunction();
 

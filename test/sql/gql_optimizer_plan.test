@@ -159,9 +159,82 @@ physical_plan	<REGEX>:.*graph_1_vertices.*
 statement ok
 CALL gql_build_csr('optimizer_plan')
 
+# A fixed labeled hop whose source was bound by an earlier MATCH stage uses
+# connection-local CSR expansion. Vertex/property work remains in DuckDB.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_fixed_hop_plan.txt'
+
+query TT rowsort
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[:KNOWS]->(destination:Person)
+RETURN source.name, destination.name
+----
+Ada	Grace
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'graph_1_edges')
+FROM read_text('__TEST_DIR__/gql_csr_fixed_hop_plan.txt')
+----
+true	false
+
+# Returning the complete edge value requires properties from the canonical
+# edge table and deliberately retains the ordinary table-backed path.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_edge_value_fallback_plan.txt'
+
+statement ok
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[relationship:KNOWS]->(destination:Person)
+RETURN relationship
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'graph_1_edges')
+FROM read_text('__TEST_DIR__/gql_csr_edge_value_fallback_plan.txt')
+----
+false	true
+
 query II
 EXPLAIN CALL algo.degree('optimizer_plan')
 YIELD vertex_id, total_degree
 RETURN vertex_id, total_degree
 ----
 physical_plan	<REGEX>:.*Function: DEGREE.*
+
+# Any direct table write invalidates the connection-local snapshot. Ordinary
+# MATCH then safely falls back instead of requiring CSR or reading stale data.
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_type = __gql_type WHERE false
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_stale_fallback_plan.txt'
+
+statement ok
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[:KNOWS]->(destination:Person)
+RETURN destination.name
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT contains(lower(content), 'gql_csr_expand')
+FROM read_text('__TEST_DIR__/gql_csr_stale_fallback_plan.txt')
+----
+false

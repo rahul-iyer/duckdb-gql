@@ -377,6 +377,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			}
 			auto label_index = label_data.sel->get_index(row);
 			auto label = label_data.validity.RowIsValid(label_index) ? label_values[label_index].GetString() : string();
+			snapshot->edge_labels_single = snapshot->edge_labels_single && label.find(';') == string::npos;
 			auto label_id = CsrLabelId(*snapshot, label);
 			if (!saw_edge_label) {
 				uniform_edge_label_id = label_id;
@@ -459,6 +460,18 @@ shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const
 	return GetPreparedTableSnapshot(context, graph_name, *cache);
 }
 
+shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, const string &graph_name) {
+	if (!context.transaction.IsAutoCommit()) {
+		return nullptr;
+	}
+	auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(GQL_CSR_STATE_KEY);
+	try {
+		return GetPreparedTableSnapshot(context, graph_name, *cache);
+	} catch (const InvalidInputException &) {
+		return nullptr;
+	}
+}
+
 struct CsrBindData : TableFunctionData {
 	string graph_name;
 	uint64_t vertex_id = 0;
@@ -517,6 +530,118 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
 	}
 	state.offset += count;
 	output.SetCardinality(count);
+}
+
+struct CsrExpandLocalState : LocalTableFunctionState {
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	idx_t cursor = 0;
+	idx_t end = 0;
+	bool initialized = false;
+	bool outgoing = true;
+	bool filter_label = false;
+	bool label_exists = true;
+	uint32_t label_id = 0;
+	uint64_t vertex_id = 0;
+	string edge_label;
+};
+
+static unique_ptr<FunctionData> CsrExpandBind(ClientContext &, TableFunctionBindInput &,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type"};
+	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR};
+	return make_uniq<TableFunctionData>();
+}
+
+static unique_ptr<GlobalTableFunctionState> CsrExpandGlobalInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GlobalTableFunctionState>();
+}
+
+static unique_ptr<LocalTableFunctionState> CsrExpandLocalInit(ExecutionContext &, TableFunctionInitInput &,
+                                                              GlobalTableFunctionState *) {
+	return make_uniq<CsrExpandLocalState>();
+}
+
+static void InitializeCsrExpansion(ExecutionContext &context, DataChunk &input, CsrExpandLocalState &state) {
+	if (input.size() != 1 || input.ColumnCount() != 1) {
+		throw InternalException("GQL CSR expansion requires one lateral input row");
+	}
+	auto packed = input.data[0].GetValue(0);
+	if (packed.IsNull()) {
+		state.initialized = true;
+		return;
+	}
+	auto &fields = StructValue::GetChildren(packed);
+	if (fields.size() != 4 || fields[0].IsNull() || fields[2].IsNull() || fields[3].IsNull()) {
+		throw InvalidInputException("GQL CSR expansion requires graph, direction, and edge label");
+	}
+	auto graph_name = fields[0].GetValue<string>();
+	auto direction = StringUtil::Lower(fields[2].GetValue<string>());
+	state.edge_label = StringUtil::Lower(fields[3].GetValue<string>());
+	if (direction != "out" && direction != "in") {
+		throw InvalidInputException("GQL CSR expansion direction must be 'out' or 'in'");
+	}
+	if (state.edge_label.empty()) {
+		throw InvalidInputException("GQL CSR expansion requires one edge label");
+	}
+	state.outgoing = direction == "out";
+	state.filter_label = true;
+	state.snapshot = GqlGetCsrSnapshot(context.client, graph_name);
+	auto label = state.snapshot->label_ids.find(state.edge_label);
+	if (label == state.snapshot->label_ids.end()) {
+		state.label_exists = false;
+		state.initialized = true;
+		return;
+	}
+	state.label_id = label->second;
+	if (fields[1].IsNull()) {
+		state.initialized = true;
+		return;
+	}
+	state.vertex_id = fields[1].GetValue<uint64_t>();
+	idx_t vertex;
+	if (!GqlTryGetCsrOrdinal(*state.snapshot, state.vertex_id, vertex)) {
+		state.initialized = true;
+		return;
+	}
+	const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
+	state.cursor = offsets[vertex];
+	state.end = offsets[vertex + 1];
+	state.initialized = true;
+}
+
+static OperatorResultType CsrExpandFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                            DataChunk &output) {
+	auto &state = data_p.local_state->Cast<CsrExpandLocalState>();
+	if (!state.initialized) {
+		InitializeCsrExpansion(context, input, state);
+	}
+	if (!state.snapshot || !state.label_exists) {
+		state = CsrExpandLocalState();
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+
+	const auto &neighbors = state.outgoing ? state.snapshot->outgoing_neighbors : state.snapshot->incoming_neighbors;
+	const auto &edge_ids = state.outgoing ? state.snapshot->outgoing_edge_ids : state.snapshot->incoming_edge_ids;
+	const auto &label_ids = state.outgoing ? state.snapshot->outgoing_label_ids : state.snapshot->incoming_label_ids;
+	idx_t count = 0;
+	while (state.cursor < state.end && count < STANDARD_VECTOR_SIZE) {
+		auto index = state.cursor++;
+		if (state.filter_label && label_ids[index] != state.label_id) {
+			continue;
+		}
+		auto neighbor_id = state.snapshot->vertex_ids[neighbors[index]];
+		output.SetValue(0, count, Value::UBIGINT(edge_ids[index]));
+		output.SetValue(1, count, Value::UBIGINT(state.outgoing ? state.vertex_id : neighbor_id));
+		output.SetValue(2, count, Value::UBIGINT(state.outgoing ? neighbor_id : state.vertex_id));
+		output.SetValue(3, count, Value(state.edge_label));
+		count++;
+	}
+	output.SetCardinality(count);
+	if (state.cursor < state.end) {
+		return OperatorResultType::HAVE_MORE_OUTPUT;
+	}
+	state = CsrExpandLocalState();
+	return OperatorResultType::NEED_MORE_INPUT;
 }
 
 static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindInput &input,
@@ -605,6 +730,17 @@ TableFunction GqlNeighborsFunction() {
 	                       NeighborsFunction);
 	function.bind = NeighborsBind;
 	function.init_global = NeighborsInit;
+	return function;
+}
+
+TableFunction GqlCsrExpandFunction() {
+	auto input_type = LogicalType::STRUCT({{"graph_name", LogicalType::VARCHAR},
+	                                       {"vertex_id", LogicalType::UBIGINT},
+	                                       {"direction", LogicalType::VARCHAR},
+	                                       {"edge_label", LogicalType::VARCHAR}});
+	TableFunction function("gql_csr_expand", {input_type}, nullptr, CsrExpandBind, CsrExpandGlobalInit,
+	                       CsrExpandLocalInit);
+	function.in_out_function = CsrExpandFunction;
 	return function;
 }
 

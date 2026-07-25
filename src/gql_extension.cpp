@@ -96,6 +96,7 @@ static void RegisterAlgorithmFunctions(ExtensionLoader &loader) {
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlGraphsFunction());
 	loader.RegisterFunction(GqlNeighborsFunction());
+	loader.RegisterFunction(GqlCsrExpandFunction());
 	loader.RegisterFunction(GqlBuildCsrFunction());
 	loader.RegisterFunction(GqlCsrStatsFunction());
 	RegisterAlgorithmFunctions(loader);

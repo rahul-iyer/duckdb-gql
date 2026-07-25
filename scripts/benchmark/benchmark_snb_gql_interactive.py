@@ -560,6 +560,8 @@ def query_rows(
     if graph:
         prefix = (
             ".once /dev/null\n"
+            "CALL gql_build_csr('snb_interactive');\n"
+            ".once /dev/null\n"
             "SESSION SET GRAPH snb_interactive;\n"
             "PRAGMA enable_profiling='json';\n"
         )
@@ -588,6 +590,8 @@ def benchmark_repeated(
 ) -> dict[str, Any]:
     statements = "\n".join(query.strip() for _ in range(warmups + runs))
     sql = f"""
+.once /dev/null
+CALL gql_build_csr('snb_interactive');
 .once /dev/null
 SESSION SET GRAPH snb_interactive;
 PRAGMA threads={threads};
@@ -962,6 +966,7 @@ def main() -> None:
             "warmups": args.warmups,
             "runs": args.runs,
             "query_timeout_seconds": args.query_timeout,
+            "build_csr_before_gql_query": True,
         },
         "source_database": str(source_database),
         "parquet": exported,
