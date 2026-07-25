@@ -1513,14 +1513,14 @@ struct AlgorithmCallGlobalState : GlobalTableFunctionState {
 	idx_t MaxThreads() const override {
 		return 1;
 	}
-};
 
-struct AlgorithmCallLocalState : LocalTableFunctionState {
 	bool initialized = false;
 	vector<uint64_t> frontier;
 	unique_ptr<FunctionData> nested_bind_data;
 	unique_ptr<GlobalTableFunctionState> nested_global_state;
 };
+
+struct AlgorithmCallLocalState : LocalTableFunctionState {};
 
 struct PipelineDfsState : GlobalTableFunctionState {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
@@ -1823,7 +1823,7 @@ static unique_ptr<LocalTableFunctionState> AlgorithmCallLocalInit(ExecutionConte
 static OperatorResultType AlgorithmCallInput(ExecutionContext &, TableFunctionInput &input, DataChunk &child,
                                              DataChunk &output) {
 	auto &data = input.bind_data->Cast<AlgorithmCallBindData>();
-	auto &state = input.local_state->Cast<AlgorithmCallLocalState>();
+	auto &state = input.global_state->Cast<AlgorithmCallGlobalState>();
 	output.SetCardinality(0);
 	if (data.definition->input_mode == GqlProcedureInputMode::NONE) {
 		return OperatorResultType::NEED_MORE_INPUT;
@@ -1842,7 +1842,7 @@ static OperatorResultType AlgorithmCallInput(ExecutionContext &, TableFunctionIn
 }
 
 static void InitializePipelineBfs(ClientContext &context, const AlgorithmCallBindData &data,
-                                  AlgorithmCallLocalState &state) {
+                                  AlgorithmCallGlobalState &state) {
 	auto graph_name = data.configuration[0].value;
 	auto snapshot = GqlGetCsrSnapshot(context, graph_name);
 	std::sort(state.frontier.begin(), state.frontier.end());
@@ -1868,7 +1868,7 @@ static void InitializePipelineBfs(ClientContext &context, const AlgorithmCallBin
 }
 
 static void InitializePipelineDfs(ClientContext &context, const AlgorithmCallBindData &data,
-                                  AlgorithmCallLocalState &state) {
+                                  AlgorithmCallGlobalState &state) {
 	auto graph_name = data.configuration[0].value;
 	auto dfs = make_uniq<PipelineDfsState>();
 	dfs->snapshot = GqlGetCsrSnapshot(context, graph_name);
@@ -1927,14 +1927,17 @@ static void PipelineDfsFunction(ClientContext &context, PipelineDfsState &state,
 }
 
 static void InitializeAlgorithmCall(ExecutionContext &context, const AlgorithmCallBindData &data,
-                                    AlgorithmCallLocalState &state) {
+                                    AlgorithmCallGlobalState &state) {
 	auto &name = data.definition->name;
 	auto graph_name = data.configuration[0].value;
 	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
 	if (name == "bfs" || name == "sssp") {
 		InitializePipelineBfs(context.client, data, state);
-		if (name == "sssp" && state.nested_global_state->Cast<BfsState>().queue.size() != 1) {
-			throw InvalidInputException("GQL SSSP requires exactly one distinct source vertex");
+		auto source_count = state.nested_global_state->Cast<BfsState>().queue.size();
+		if (name == "sssp" && source_count != 1) {
+			throw InvalidInputException(
+			    "GQL SSSP requires exactly one distinct source vertex; found %llu from %llu input rows",
+			    static_cast<unsigned long long>(source_count), static_cast<unsigned long long>(state.frontier.size()));
 		}
 	} else if (name == "dfs") {
 		InitializePipelineDfs(context.client, data, state);
@@ -1983,7 +1986,7 @@ static void InitializeAlgorithmCall(ExecutionContext &context, const AlgorithmCa
 static OperatorFinalizeResultType AlgorithmCallFinalize(ExecutionContext &context, TableFunctionInput &input,
                                                         DataChunk &output) {
 	auto &data = input.bind_data->Cast<AlgorithmCallBindData>();
-	auto &state = input.local_state->Cast<AlgorithmCallLocalState>();
+	auto &state = input.global_state->Cast<AlgorithmCallGlobalState>();
 	if (!state.initialized) {
 		InitializeAlgorithmCall(context, data, state);
 	}

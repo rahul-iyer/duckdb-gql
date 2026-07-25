@@ -618,19 +618,17 @@ static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_p
 
 static unique_ptr<ParsedExpression> ElementHasLabel(const string &table_alias, const string &label_column,
                                                     bool label_is_list, const string &label) {
-	vector<unique_ptr<ParsedExpression>> contains_arguments;
+	unique_ptr<ParsedExpression> predicate;
 	if (label_is_list) {
+		vector<unique_ptr<ParsedExpression>> contains_arguments;
 		contains_arguments.push_back(Column(table_alias, label_column));
+		contains_arguments.push_back(Constant(Value(label)));
+		predicate = Function("list_contains", std::move(contains_arguments));
 	} else {
-		vector<unique_ptr<ParsedExpression>> split_arguments;
-		split_arguments.push_back(Column(table_alias, label_column));
-		split_arguments.push_back(Constant(Value(";")));
-		contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+		predicate = Equal(Column(table_alias, label_column), Constant(Value(label)));
 	}
-	contains_arguments.push_back(Constant(Value(label)));
-	auto contains = Function("list_contains", std::move(contains_arguments));
 	vector<unique_ptr<ParsedExpression>> coalesce_arguments;
-	coalesce_arguments.push_back(std::move(contains));
+	coalesce_arguments.push_back(std::move(predicate));
 	coalesce_arguments.push_back(Constant(Value(false)));
 	return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(coalesce_arguments));
 }
@@ -818,6 +816,27 @@ static unique_ptr<TableRef> CsrExpansionTable(const string &graph_name, const st
 	result->function = make_uniq<FunctionExpression>("gql_csr_expand", std::move(arguments));
 	result->alias = edge_alias;
 	return std::move(result);
+}
+
+static unique_ptr<TableRef> CsrVerticesTable(const string &graph_name, const string &label, const string &alias) {
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(Constant(Value(graph_name)));
+	arguments.push_back(Constant(Value(label)));
+	auto result = make_uniq<TableFunctionRef>();
+	result->function = make_uniq<FunctionExpression>("gql_csr_vertices", std::move(arguments));
+	result->alias = alias;
+	return std::move(result);
+}
+
+static bool CsrVertexLabelIsSelective(const GqlCsrSnapshot &snapshot, const string &label) {
+	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
+	if (entry == snapshot.label_ids.end() || entry->second + 1 >= snapshot.vertex_label_posting_offsets.size()) {
+		return true;
+	}
+	auto start = snapshot.vertex_label_posting_offsets[entry->second];
+	auto end = snapshot.vertex_label_posting_offsets[entry->second + 1];
+	auto threshold = MaxValue<uint64_t>(1024, snapshot.vertex_ids.size() / 16);
+	return end - start <= threshold;
 }
 
 static unique_ptr<ParsedExpression> GraphElementValueAt(const GqlExpressionProgram &program, idx_t node,
@@ -1092,6 +1111,30 @@ static bool ReferencesBinding(const GqlExpressionProgram &program, idx_t binding
 	return false;
 }
 
+static bool HasLiteralEqualityPredicate(const GqlExpressionProgram &program, idx_t binding_index) {
+	for (idx_t node = 0; node < program.node_types.size(); node++) {
+		if (static_cast<GqlExpressionType>(program.node_types[node]) != GqlExpressionType::BINARY ||
+		    static_cast<GqlBinaryOperator>(program.operators[node]) != GqlBinaryOperator::EQUAL) {
+			continue;
+		}
+		auto left = node + 1;
+		auto right = ExpressionEnd(program, left);
+		auto is_binding_property = [&](idx_t root) {
+			return root < program.node_types.size() &&
+			       static_cast<GqlExpressionType>(program.node_types[root]) == GqlExpressionType::PROPERTY_REFERENCE &&
+			       program.binding_indices[root] == binding_index;
+		};
+		auto is_literal = [&](idx_t root) {
+			return root < program.node_types.size() &&
+			       static_cast<GqlExpressionType>(program.node_types[root]) == GqlExpressionType::LITERAL;
+		};
+		if ((is_binding_property(left) && is_literal(right)) || (is_literal(left) && is_binding_property(right))) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphBinding &graph,
                                                             const RecursiveMatchInput &match) {
 	if (match.edge_labels.size() > 1) {
@@ -1356,6 +1399,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 
 	vector<bool> csr_edge_eligible(match.binding_types.size(), false);
 	auto csr_snapshot = GqlTryGetCsrSnapshot(context, graph_name);
+	const bool canonical_csr_vertices = StringUtil::CIEquals(graph.vertex.key_column, "__gql_id") &&
+	                                    StringUtil::CIEquals(graph.vertex.label_column, "__gql_label") &&
+	                                    graph.vertex.label_is_list && csr_snapshot;
 	const bool canonical_csr_edges = StringUtil::CIEquals(graph.edge.key_column, "__gql_edge_id") &&
 	                                 StringUtil::CIEquals(graph.edge_source_column, "__gql_source_id") &&
 	                                 StringUtil::CIEquals(graph.edge_target_column, "__gql_target_id") &&
@@ -1384,6 +1430,20 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			}
 		}
 	}
+	vector<bool> csr_vertex_point_filtered(match.binding_types.size(), false);
+	if (canonical_csr_vertices) {
+		for (idx_t binding_index = 0; binding_index < match.binding_types.size(); binding_index++) {
+			if (match.binding_types[binding_index] != GqlPatternElementType::VERTEX) {
+				continue;
+			}
+			for (const auto &predicate : match.predicates) {
+				if (HasLiteralEqualityPredicate(predicate, binding_index)) {
+					csr_vertex_point_filtered[binding_index] = true;
+					break;
+				}
+			}
+		}
+	}
 
 	struct StageState {
 		unique_ptr<TableRef> source;
@@ -1401,6 +1461,24 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			for (const auto &element : pattern.elements) {
 				if (!available[element.binding_index]) {
 					result.introduced[element.binding_index] = true;
+				}
+			}
+		}
+		unordered_map<idx_t, case_insensitive_set_t> csr_vertex_labels;
+		if (canonical_csr_vertices) {
+			for (const auto &pattern : stage.patterns) {
+				for (const auto &element : pattern.elements) {
+					if (element.type != GqlPatternElementType::VERTEX || element.label.empty() ||
+					    !result.introduced[element.binding_index] ||
+					    !csr_vertex_point_filtered[element.binding_index]) {
+						continue;
+					}
+					auto &labels = csr_vertex_labels[element.binding_index];
+					for (const auto &label : StringUtil::Split(element.label, ';')) {
+						if (CsrVertexLabelIsSelective(*csr_snapshot, label)) {
+							labels.insert(label);
+						}
+					}
 				}
 			}
 		}
@@ -1470,6 +1548,17 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				AppendJoin(result.source, std::move(source), JoinType::INNER, std::move(cross_conditions));
 			}
 		}
+		idx_t posting_index = 0;
+		for (const auto &entry : csr_vertex_labels) {
+			for (const auto &label : entry.second) {
+				auto alias = "gql_vertex_label_" + to_string(stage_index) + "_" + to_string(posting_index++);
+				vector<unique_ptr<ParsedExpression>> posting_conditions;
+				posting_conditions.push_back(Equal(Column(identities[entry.first].table_alias, graph.vertex.key_column),
+				                                   Column(alias, "__gql_id")));
+				AppendJoin(result.source, CsrVerticesTable(graph_name, label, alias), JoinType::INNER,
+				           std::move(posting_conditions));
+			}
+		}
 		for (const auto &pattern : stage.patterns) {
 			for (const auto &element : pattern.elements) {
 				if (element.label.empty()) {
@@ -1480,6 +1569,11 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 					result.conditions.push_back(Constant(Value(false)));
 				} else {
 					for (const auto &label : StringUtil::Split(element.label, ';')) {
+						auto posting = csr_vertex_labels.find(element.binding_index);
+						if (element.type == GqlPatternElementType::VERTEX && posting != csr_vertex_labels.end() &&
+						    posting->second.find(label) != posting->second.end()) {
+							continue;
+						}
 						result.conditions.push_back(ElementHasLabel(identities[element.binding_index].table_alias,
 						                                            table.label_column, table.label_is_list, label));
 					}

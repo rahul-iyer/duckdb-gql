@@ -159,6 +159,31 @@ physical_plan	<REGEX>:.*graph_1_vertices.*
 statement ok
 CALL gql_build_csr('optimizer_plan')
 
+# A valid CSR snapshot also exposes its node-label posting lists. MATCH joins
+# those IDs back to the authoritative vertex table and no longer evaluates
+# list membership row by row.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_vertex_label_plan.txt'
+
+query T
+MATCH (source:Person) WHERE source.age = 42
+RETURN source.name
+----
+Ada
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'),
+       contains(lower(content), 'list_contains')
+FROM read_text('__TEST_DIR__/gql_csr_vertex_label_plan.txt')
+----
+true	false
+
 # A fixed labeled hop whose source was bound by an earlier MATCH stage uses
 # connection-local CSR expansion. Vertex/property work remains in DuckDB.
 statement ok
@@ -233,8 +258,83 @@ RETURN destination.name
 statement ok
 PRAGMA disable_profiling
 
-query I
-SELECT contains(lower(content), 'gql_csr_expand')
+query II
+SELECT contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'gql_csr_vertices')
 FROM read_text('__TEST_DIR__/gql_csr_stale_fallback_plan.txt')
 ----
-false
+false	false
+
+# Broad labels stay on the native list path. A posting scan is selected only
+# when its exact CSR cardinality is small enough to reduce the candidate set.
+statement ok
+COPY (
+    SELECT CAST(i AS VARCHAR) AS ":ID",
+           CASE WHEN i = 1 THEN 'Person;Rare' ELSE 'Person' END AS ":LABEL",
+           CAST(i AS INTEGER) AS "metric:int"
+    FROM range(1, 2049) values(i)
+) TO '__TEST_DIR__/gql_selectivity_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT '1' AS ":START_ID", '2' AS ":END_ID", 'LINK' AS ":TYPE"
+) TO '__TEST_DIR__/gql_selectivity_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH label_selectivity ANY
+
+statement ok
+COPY GRAPH label_selectivity FROM (
+    VERTICES '__TEST_DIR__/gql_selectivity_vertices.csv',
+    EDGES '__TEST_DIR__/gql_selectivity_edges.csv'
+) FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH label_selectivity
+
+statement ok
+CALL gql_build_csr('label_selectivity')
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_broad_label_plan.txt'
+
+query I
+MATCH (:Person)
+RETURN count(*)
+----
+2048
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'),
+       contains(lower(content), 'list_contains')
+FROM read_text('__TEST_DIR__/gql_csr_broad_label_plan.txt')
+----
+false	true
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_selective_label_plan.txt'
+
+query I
+MATCH (rare:Rare) WHERE rare.metric = 1
+RETURN count(*)
+----
+1
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'),
+       contains(lower(content), 'list_contains')
+FROM read_text('__TEST_DIR__/gql_csr_selective_label_plan.txt')
+----
+true	false

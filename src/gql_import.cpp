@@ -390,12 +390,13 @@ static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema 
 	auto end_id = ExternalId("r", edges.end_id);
 	auto edge_validation = GqlQuery(
 	    connection, "SELECT count(*) FILTER (WHERE " + relationship_type + " IS NULL OR trim(" + relationship_type +
-	                    ") = ''), count(*) FILTER (WHERE " + start_id + " IS NULL OR " + end_id + " IS NULL OR n." +
-	                    GqlQuoteIdentifier(IMPORT_ROW_ID) + " IS NULL OR n2." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
+	                    ") = '' OR contains(" + relationship_type + ", ';')), count(*) FILTER (WHERE " + start_id +
+	                    " IS NULL OR " + end_id + " IS NULL OR n." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
+	                    " IS NULL OR n2." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
 	                    " IS NULL) FROM gql_copy_edges r LEFT JOIN gql_copy_nodes n ON " + start_id + " = " + node_id +
 	                    " LEFT JOIN gql_copy_nodes n2 ON " + end_id + " = " + ExternalId("n2", nodes.id));
 	if (edge_validation->GetValue(0, 0).GetValue<int64_t>() != 0) {
-		throw InvalidInputException("COPY GRAPH relationship :TYPE values must be non-null and non-empty");
+		throw InvalidInputException("COPY GRAPH relationship :TYPE values must contain exactly one non-empty type");
 	}
 	if (edge_validation->GetValue(1, 0).GetValue<int64_t>() != 0) {
 		throw InvalidInputException("COPY GRAPH relationship endpoints must reference imported node :ID values");
@@ -467,11 +468,17 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		auto start_id = ExternalId("r", edges.start_id);
 		auto end_id = ExternalId("r", edges.end_id);
 		auto relationship_type = ExternalId("r", edges.types[0]);
+		auto normalized_relationship_type =
+		    "CASE WHEN " + relationship_type + " IS NULL OR trim(" + relationship_type + ") = '' OR contains(" +
+		    relationship_type +
+		    ", ';') THEN error('COPY GRAPH relationship :TYPE values must contain exactly one non-empty type') "
+		    "ELSE lower(trim(" +
+		    relationship_type + ")) END";
 		GqlQuery(connection, "CREATE TABLE " + qualified_edge + " AS SELECT row_number() OVER ()::UBIGINT AS " +
 		                         GqlQuoteIdentifier("__gql_edge_id") + ", s." + GqlQuoteIdentifier(IMPORT_ROW_ID) +
 		                         " AS " + GqlQuoteIdentifier("__gql_source_id") + ", t." +
 		                         GqlQuoteIdentifier(IMPORT_ROW_ID) + " AS " + GqlQuoteIdentifier("__gql_target_id") +
-		                         ", lower(trim(" + relationship_type + ")) AS " + GqlQuoteIdentifier("__gql_type") +
+		                         ", " + normalized_relationship_type + " AS " + GqlQuoteIdentifier("__gql_type") +
 		                         NativePropertyProjection(edges.properties, "r") +
 		                         " FROM gql_copy_edges r LEFT JOIN gql_copy_nodes s ON " + start_id + " = " +
 		                         ExternalId("s", nodes.id) + " LEFT JOIN gql_copy_nodes t ON " + end_id + " = " +

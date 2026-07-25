@@ -206,6 +206,35 @@ WHERE graph_name = 'duplicate_native'
 ----
 EMPTY	0
 
+# The scalar relationship-type invariant is enforced even when expensive
+# referential validation is disabled.
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS;LIKES')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE")
+) TO '__TEST_DIR__/gql_copy_graph_multiple_types.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH multiple_edge_types ANY
+
+statement error
+COPY GRAPH multiple_edge_types FROM (
+    VERTICES '__TEST_DIR__/gql_copy_graph_nodes.csv',
+    EDGES '__TEST_DIR__/gql_copy_graph_multiple_types.csv'
+) FORMAT GRAPH OPTIONS (VALIDATE FALSE)
+----
+<REGEX>:.*must contain exactly one non-empty type.*
+
+query TI
+SELECT storage_mode,
+       (SELECT count(*) FROM gql_internal.graph_element_tables et WHERE et.graph_id = g.graph_id)
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_storage gs USING (graph_id)
+WHERE graph_name = 'multiple_edge_types'
+----
+EMPTY	0
+
 # Managed tables are graph-owned and are removed with the graph.
 statement ok
 DROP GRAPH managed_native

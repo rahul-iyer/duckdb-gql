@@ -169,6 +169,8 @@ struct GqlCsrSnapshot {
 	unordered_map<uint64_t, idx_t> ordinal_by_id;
 	vector<idx_t> vertex_label_offsets;
 	vector<uint32_t> vertex_label_ids;
+	vector<uint64_t> vertex_label_posting_offsets;
+	GqlCsrOrdinals vertex_label_postings;
 	vector<uint64_t> outgoing_offsets;
 	GqlCsrOrdinals outgoing_neighbors;
 	vector<uint64_t> outgoing_edge_ids;
@@ -207,6 +209,7 @@ void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog
 void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);
 
 TableFunction GqlNeighborsFunction();
+TableFunction GqlCsrVerticesFunction();
 TableFunction GqlCsrExpandFunction();
 TableFunction GqlBuildCsrFunction();
 TableFunction GqlCsrStatsFunction();

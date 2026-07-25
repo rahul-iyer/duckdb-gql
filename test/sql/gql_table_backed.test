@@ -193,8 +193,9 @@ RETURN b.code
 ----
 ATL
 
-# CSR is reserved for explicitly invoked graph algorithms. MATCH always uses
-# DuckDB's native relational/recursive execution path.
+# Execution hints cannot force CSR. MATCH chooses eligible snapshot-backed
+# access paths automatically and otherwise uses DuckDB's relational/recursive
+# execution path.
 statement error
 MATCH /*+ CSR */ (a:airport)-[:route]->+(b:airport)
 WHERE a.code = 'ATL'

@@ -413,21 +413,25 @@ RETURN edge.since
 ----
 2022
 
-# Label mutation applies to edges as well as nodes. Compact edge chains reuse
-# the same set-valued native label column.
-statement ok
+# An edge has exactly one immutable type. GQL SET/REMOVE label semantics are
+# additive/subtractive, so they cannot mutate that scalar type.
+statement error
 MATCH (:Person)-[edge:KNOWS]->(:Person)
 SET edge:Trusted:Observed
+----
+<REGEX>:.*exactly one immutable type.*
 
 query I
-MATCH (:Person)-[:KNOWS&Trusted&Observed]->(:Person)
+MATCH (:Person)-[:KNOWS]->(:Person)
 RETURN count(*)
 ----
 1
 
-statement ok
-MATCH (:Person)-[edge:Trusted&Observed]->(:Person)
+statement error
+MATCH (:Person)-[edge:KNOWS]->(:Person)
 REMOVE edge:Trusted:Observed
+----
+<REGEX>:.*exactly one immutable type.*
 
 query I
 MATCH (:Person)-[:KNOWS]->(:Person)

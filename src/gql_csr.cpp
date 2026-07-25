@@ -14,6 +14,7 @@
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/storage/object_cache.hpp"
 
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -236,12 +237,18 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			auto label_index = label_data.sel->get_index(row);
 			if (label_data.validity.RowIsValid(label_index)) {
 				auto label_list = label_lists[label_index];
+				auto label_start = snapshot->vertex_label_ids.size();
 				for (idx_t offset = 0; offset < label_list.length; offset++) {
 					auto child_index = label_child_data.sel->get_index(label_list.offset + offset);
 					if (label_child_data.validity.RowIsValid(child_index)) {
 						auto label = labels[child_index].GetString();
 						if (!label.empty()) {
-							snapshot->vertex_label_ids.push_back(CsrLabelId(*snapshot, label));
+							auto label_id = CsrLabelId(*snapshot, label);
+							if (std::find(snapshot->vertex_label_ids.begin() + label_start,
+							              snapshot->vertex_label_ids.end(),
+							              label_id) == snapshot->vertex_label_ids.end()) {
+								snapshot->vertex_label_ids.push_back(label_id);
+							}
 						}
 					}
 				}
@@ -265,6 +272,27 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	} else {
 		transient_vertex_id_bytes = snapshot->vertex_ids.AllocatedBytes();
 		snapshot->vertex_ids.MakeImplicitDense();
+	}
+
+	// Invert the per-vertex labels into compact posting lists. The posting
+	// index belongs to the versioned CSR snapshot, so it inherits the same
+	// invalidation rules as topology and can never outlive its source tables.
+	const auto vertex_label_count = snapshot->label_ids.size();
+	snapshot->vertex_label_posting_offsets.assign(vertex_label_count + 2, 0);
+	for (const auto label_id : snapshot->vertex_label_ids) {
+		snapshot->vertex_label_posting_offsets[label_id + 1]++;
+	}
+	FinalizeOffsets(snapshot->vertex_label_posting_offsets);
+	const bool compact_vertex_ordinals =
+	    snapshot->vertex_ids.empty() || snapshot->vertex_ids.size() - 1 <= std::numeric_limits<uint32_t>::max();
+	snapshot->vertex_label_postings.Resize(snapshot->vertex_label_ids.size(), compact_vertex_ordinals);
+	auto vertex_label_cursor = snapshot->vertex_label_posting_offsets;
+	for (idx_t vertex = 0; vertex < snapshot->vertex_ids.size(); vertex++) {
+		for (idx_t offset = snapshot->vertex_label_offsets[vertex]; offset < snapshot->vertex_label_offsets[vertex + 1];
+		     offset++) {
+			auto label_id = snapshot->vertex_label_ids[offset];
+			snapshot->vertex_label_postings.Set(vertex_label_cursor[label_id]++, vertex);
+		}
 	}
 
 	auto label_projection = binding.edge.label_column.empty()
@@ -377,7 +405,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			}
 			auto label_index = label_data.sel->get_index(row);
 			auto label = label_data.validity.RowIsValid(label_index) ? label_values[label_index].GetString() : string();
-			snapshot->edge_labels_single = snapshot->edge_labels_single && label.find(';') == string::npos;
+			if (label.empty() || label.find(';') != string::npos) {
+				throw InvalidInputException("Table-backed CSR requires every edge to have exactly one type");
+			}
 			auto label_id = CsrLabelId(*snapshot, label);
 			if (!saw_edge_label) {
 				uniform_edge_label_id = label_id;
@@ -415,7 +445,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	                           snapshot->incoming_edge_ids.capacity() * sizeof(uint64_t);
 	snapshot->label_bytes =
 	    snapshot->vertex_label_offsets.capacity() * sizeof(idx_t) +
-	    snapshot->vertex_label_ids.capacity() * sizeof(uint32_t) + snapshot->outgoing_label_ids.AllocatedBytes() +
+	    snapshot->vertex_label_ids.capacity() * sizeof(uint32_t) +
+	    snapshot->vertex_label_posting_offsets.capacity() * sizeof(uint64_t) +
+	    snapshot->vertex_label_postings.AllocatedBytes() + snapshot->outgoing_label_ids.AllocatedBytes() +
 	    snapshot->incoming_label_ids.AllocatedBytes() + LabelDictionaryStorageBytes(snapshot->label_ids);
 	snapshot->auxiliary_bytes = sizeof(GqlCsrSnapshot) + HashContainerStorageBytes(snapshot->ordinal_by_id) +
 	                            snapshot->vertex_table_key.capacity() + snapshot->edge_table_key.capacity();
@@ -477,6 +509,72 @@ struct CsrBindData : TableFunctionData {
 	uint64_t vertex_id = 0;
 	string direction;
 };
+
+struct CsrVerticesBindData : TableFunctionData {
+	string graph_name;
+	string label;
+	idx_t estimated_count = 0;
+};
+
+static bool TryCsrVertexLabelRange(const GqlCsrSnapshot &snapshot, const string &label, idx_t &start, idx_t &end) {
+	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
+	if (entry == snapshot.label_ids.end() || entry->second + 1 >= snapshot.vertex_label_posting_offsets.size()) {
+		start = 0;
+		end = 0;
+		return false;
+	}
+	start = NumericCast<idx_t>(snapshot.vertex_label_posting_offsets[entry->second]);
+	end = NumericCast<idx_t>(snapshot.vertex_label_posting_offsets[entry->second + 1]);
+	return true;
+}
+
+static unique_ptr<FunctionData> CsrVerticesBind(ClientContext &context, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	auto result = make_uniq<CsrVerticesBindData>();
+	result->graph_name = input.inputs[0].GetValue<string>();
+	result->label = StringUtil::Lower(input.inputs[1].GetValue<string>());
+	if (result->label.empty()) {
+		throw BinderException("GQL CSR vertex lookup requires one node label");
+	}
+	auto snapshot = GqlGetCsrSnapshot(context, result->graph_name);
+	idx_t start;
+	idx_t end;
+	TryCsrVertexLabelRange(*snapshot, result->label, start, end);
+	result->estimated_count = end - start;
+	names = {"__gql_id"};
+	return_types = {LogicalType::UBIGINT};
+	return std::move(result);
+}
+
+struct CsrVerticesState : GlobalTableFunctionState {
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	idx_t cursor = 0;
+	idx_t end = 0;
+};
+
+static unique_ptr<GlobalTableFunctionState> CsrVerticesInit(ClientContext &context, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<CsrVerticesBindData>();
+	auto result = make_uniq<CsrVerticesState>();
+	result->snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	TryCsrVertexLabelRange(*result->snapshot, data.label, result->cursor, result->end);
+	return std::move(result);
+}
+
+static void CsrVerticesFunction(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<CsrVerticesState>();
+	auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.end - state.cursor);
+	for (idx_t index = 0; index < count; index++) {
+		auto vertex = state.snapshot->vertex_label_postings[state.cursor + index];
+		output.SetValue(0, index, Value::UBIGINT(state.snapshot->vertex_ids[vertex]));
+	}
+	state.cursor += count;
+	output.SetCardinality(count);
+}
+
+static unique_ptr<NodeStatistics> CsrVerticesCardinality(ClientContext &, const FunctionData *bind_data) {
+	auto &data = bind_data->Cast<CsrVerticesBindData>();
+	return make_uniq<NodeStatistics>(data.estimated_count, data.estimated_count);
+}
 
 static unique_ptr<FunctionData> NeighborsBind(ClientContext &, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<string> &names) {
@@ -730,6 +828,14 @@ TableFunction GqlNeighborsFunction() {
 	                       NeighborsFunction);
 	function.bind = NeighborsBind;
 	function.init_global = NeighborsInit;
+	return function;
+}
+
+TableFunction GqlCsrVerticesFunction() {
+	TableFunction function("gql_csr_vertices", {LogicalType::VARCHAR, LogicalType::VARCHAR}, CsrVerticesFunction);
+	function.bind = CsrVerticesBind;
+	function.init_global = CsrVerticesInit;
+	function.cardinality = CsrVerticesCardinality;
 	return function;
 }
 

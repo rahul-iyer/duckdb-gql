@@ -172,8 +172,11 @@ RETURN vertex_id, rank;
 
 ## Graph algorithms
 
-Graph algorithms use an explicit, derived CSR snapshot. Ordinary `MATCH`
-queries continue to use DuckDB's relational and recursive operators.
+Graph algorithms require an explicit, derived CSR snapshot. `MATCH` keeps
+DuckDB tables authoritative and uses relational/recursive operators, but can
+also consume a valid snapshot's node-label postings and selective fixed-hop
+adjacency. If no current snapshot exists, the same query falls back to table
+scans and joins.
 
 ```sql
 CALL gql_build_csr('social');
@@ -197,8 +200,7 @@ snapshot instead of allowing an algorithm to use stale data. Run
 `CALL gql_build_csr('social')` again before the next algorithm call. CSR
 construction and CSR algorithms must run in autocommit mode.
 
-Weighted SSSP and using CSR as an automatic `MATCH` execution backend are not
-implemented.
+Weighted SSSP is not implemented.
 
 Inspection helpers:
 
@@ -221,7 +223,36 @@ gql_internal.*                 graph catalog and column mappings
 The private catalog contains metadata only; vertices, edges, labels, and
 properties are not stored as entity-attribute-value rows. The managed tables
 remain ordinary DuckDB relations and are authoritative for querying and
-mutation.
+mutation. Nodes retain their complete native `VARCHAR[]` label set. Each edge
+has exactly one scalar, immutable type. A CSR build derives connection-local
+topology and node-label posting lists from those tables; it does not create a
+second authoritative store.
+
+## SF10 engineering benchmark
+
+On the 29,987,835-node / 178,561,949-edge LDBC SNB SF10 projection, all seven
+currently supported read queries matched their ordered SQL reference rows.
+The selective label-posting path reduced Complex 8 from 33.960 ms to
+11.900 ms and cumulative rows scanned from 30,602,235 to 802,925. This is an
+engineering run, not an official LDBC driver score.
+
+| Query | Previous CSR | Selective label postings |
+|---|---:|---:|
+| Short 1 | 11.694 ms | 10.397 ms |
+| Short 3 | 11.513 ms | 10.628 ms |
+| Short 4 | 1.380 ms | 1.351 ms |
+| Short 5 | 2.922 ms | 2.535 ms |
+| Short 7 | 49.460 ms | 47.843 ms |
+| Complex 2 | 128.032 ms | 130.036 ms |
+| Complex 8 | 33.960 ms | 11.900 ms |
+
+Reproduce against an existing SF10 graph database:
+
+```sh
+python3 scripts/benchmark/benchmark_snb_gql_interactive.py \
+  --graph-database build/benchmarks/snb10/snb10-gql.duckdb \
+  --output build/benchmarks/snb10/gql-interactive-results-label-postings-point.json
+```
 
 DuckLake tables can be used as an input source by exporting graph-header
 relations to Parquet and loading those files with `COPY GRAPH`. Direct
@@ -238,7 +269,8 @@ read-only referenced-table mode is planned.
 - CSR construction and CSR algorithms are autocommit-only and snapshots are
   local to the connection that built them.
 - Bulk import currently accepts one vertex file, one edge file, at most one
-  scalar vertex label column, and one edge type column.
+  scalar vertex label column, and one edge type column. Every relationship row
+  must contain exactly one non-empty type.
 - Multiple-path and undirected insertion, general runtime property maps, and
   open-graph schema evolution remain incomplete.
 - Path modes, searches, shortest-path groups, query composition, procedure

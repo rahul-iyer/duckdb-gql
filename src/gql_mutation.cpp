@@ -74,17 +74,13 @@ static Value LabelListValue(const vector<string> &labels) {
 }
 
 static unique_ptr<ParsedExpression> HasLabel(unique_ptr<ParsedExpression> labels, const string &label, bool is_list) {
-	vector<unique_ptr<ParsedExpression>> contains_arguments;
 	if (is_list) {
+		vector<unique_ptr<ParsedExpression>> contains_arguments;
 		contains_arguments.push_back(std::move(labels));
-	} else {
-		vector<unique_ptr<ParsedExpression>> split_arguments;
-		split_arguments.push_back(std::move(labels));
-		split_arguments.push_back(Constant(Value(";")));
-		contains_arguments.push_back(Function("string_split", std::move(split_arguments)));
+		contains_arguments.push_back(Constant(Value(label)));
+		return Function("list_contains", std::move(contains_arguments));
 	}
-	contains_arguments.push_back(Constant(Value(label)));
-	return Function("list_contains", std::move(contains_arguments));
+	return make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(labels), Constant(Value(label)));
 }
 
 static unique_ptr<ParsedExpression> AppendLabel(unique_ptr<ParsedExpression> labels, const string &label,
@@ -469,6 +465,10 @@ static unique_ptr<TableRef> MutationTargetBindReplace(ClientContext &context, Ta
 			                              property, column);
 		}
 	} else if (purpose == "LABEL") {
+		if (kind == "EDGE") {
+			throw NotImplementedException(
+			    "DuckGQL edges have exactly one immutable type; edge label SET/REMOVE is not supported");
+		}
 		auto expected_label = kind == "EDGE" ? "__gql_type" : "__gql_label";
 		if (!StringUtil::CIEquals(table.label_column, expected_label)) {
 			throw NotImplementedException("Managed GQL mutation requires the canonical %s label column",
@@ -815,7 +815,10 @@ static unique_ptr<ParsedExpression> InsertScalarLabels(const GqlInsertElement &e
 			labels.push_back(label.value);
 		}
 	}
-	return Constant(labels.empty() ? Value() : Value(StringUtil::Join(labels, ";")));
+	if (labels.size() != 1) {
+		throw BinderException("DuckGQL edge insertion requires exactly one edge type");
+	}
+	return Constant(Value(labels[0]));
 }
 
 static void AddInsertProperties(MergeIntoAction &action, const GqlInsertElement &element) {
@@ -935,7 +938,10 @@ static unique_ptr<ParsedExpression> MatchInsertScalarLabels(const vector<string>
 			labels.push_back(label);
 		}
 	}
-	return Constant(labels.empty() ? Value() : Value(StringUtil::Join(labels, ";")));
+	if (labels.size() != 1) {
+		throw BinderException("DuckGQL edge insertion requires exactly one edge type");
+	}
+	return Constant(Value(labels[0]));
 }
 
 static void AddMatchInsertProperties(MergeIntoAction &action, const vector<GqlBoundInsertProperty> &properties) {
