@@ -2,6 +2,9 @@
 
 [![Main Extension Distribution Pipeline](https://github.com/rahul-iyer/duckdb-gql/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/rahul-iyer/duckdb-gql/actions/workflows/MainDistributionPipeline.yml)
 
+[Documentation](https://duckgql.com/docs/) ·
+[Browser playground](https://duckgql.com/)
+
 DuckGQL is an experimental C++17 extension that adds a growing subset of
 [ISO/IEC 39075:2024 GQL](https://www.iso.org/standard/76120.html) to DuckDB.
 It combines graph pattern queries and mutations with DuckDB's native relational
