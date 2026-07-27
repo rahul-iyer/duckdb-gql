@@ -17,7 +17,7 @@ import platform
 import statistics
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -486,7 +486,28 @@ def ensure_graph(
     existing = inspect_graph(cli, database)
     expected = (EXPECTED_VERTICES, EXPECTED_EDGES)
     if existing == expected:
-        return {"reused": True, "counts": existing}
+        statement = f"""
+PRAGMA threads={threads};
+SET memory_limit={sql_literal(memory_limit)};
+SET preserve_insertion_order=false;
+.once /dev/null
+CALL gql_create_property_index('snb_interactive', 'id');
+.once /dev/null
+CALL gql_create_property_index('snb_interactive', 'name');
+CHECKPOINT;
+"""
+        started = time.perf_counter()
+        completed = run_cli(cli, database, statement)
+        if completed.returncode:
+            raise RuntimeError(
+                f"property index creation failed\nstdout:\n{completed.stdout}"
+                f"\nstderr:\n{completed.stderr}"
+            )
+        return {
+            "reused": True,
+            "counts": existing,
+            "property_index_seconds": time.perf_counter() - started,
+        }
     if database.exists():
         raise RuntimeError(
             f"{database} contains graph counts {existing}, expected {expected}; "
@@ -502,10 +523,11 @@ COPY GRAPH snb_interactive FROM (
     VERTICES {sql_literal(vertices)},
     EDGES {sql_literal(edges)}
 ) FORMAT GRAPH OPTIONS (VALIDATE FALSE);
-CALL gql_build_csr('snb_interactive');
+CALL gql_create_property_index('snb_interactive', 'id');
+CALL gql_create_property_index('snb_interactive', 'name');
 CHECKPOINT;
 """
-    print("[graph] COPY GRAPH and CSR build", flush=True)
+    print("[graph] COPY GRAPH and property index build", flush=True)
     started = time.perf_counter()
     completed = run_cli(cli, database, statement)
     if completed.returncode:
@@ -517,7 +539,11 @@ CHECKPOINT;
     actual = inspect_graph(cli, database)
     if actual != expected:
         raise RuntimeError(f"graph has counts {actual}, expected {expected}")
-    return {"reused": False, "counts": actual, "load_and_csr_seconds": elapsed}
+    return {
+        "reused": False,
+        "counts": actual,
+        "load_and_property_index_seconds": elapsed,
+    }
 
 
 def summarize(values: list[float]) -> dict[str, float]:
@@ -555,10 +581,16 @@ def query_rows(
     query: str,
     graph: bool,
     timeout: float,
+    threads: int,
+    memory_limit: str,
 ) -> tuple[list[list[str]], dict[str, Any] | None]:
-    prefix = ""
+    prefix = (
+        f"PRAGMA threads={threads};\n"
+        f"SET memory_limit={sql_literal(memory_limit)};\n"
+        "SET preserve_insertion_order=false;\n"
+    )
     if graph:
-        prefix = (
+        prefix += (
             ".once /dev/null\n"
             "CALL gql_build_csr('snb_interactive');\n"
             ".once /dev/null\n"
@@ -590,12 +622,13 @@ def benchmark_repeated(
 ) -> dict[str, Any]:
     statements = "\n".join(query.strip() for _ in range(warmups + runs))
     sql = f"""
+PRAGMA threads={threads};
+SET memory_limit={sql_literal(memory_limit)};
+SET preserve_insertion_order=false;
 .once /dev/null
 CALL gql_build_csr('snb_interactive');
 .once /dev/null
 SESSION SET GRAPH snb_interactive;
-PRAGMA threads={threads};
-SET memory_limit={sql_literal(memory_limit)};
 .output /dev/null
 PRAGMA enable_profiling='json';
 {statements}
@@ -630,6 +663,7 @@ def benchmark_cases(
     warmups: int,
     runs: int,
     timeout: float,
+    selected_queries: set[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     reference = json.loads(relational_results.read_text())
     params = {
@@ -638,12 +672,49 @@ def benchmark_cases(
     }
     person_id = int(params["interactive-short-1"]["personId"])
     message_id = int(params["interactive-short-4"]["messageId"])
+    short2_person = int(params["interactive-short-2"]["personId"])
+    short6_message = int(params["interactive-short-6"]["messageId"])
     complex2_person = int(params["interactive-complex-2"]["personId"])
     complex2_date = datetime.fromtimestamp(
         int(params["interactive-complex-2"]["maxDate"]) / 1000,
         tz=timezone.utc,
     ).replace(tzinfo=None)
+    complex3_person = int(params["interactive-complex-3"]["personId"])
+    complex3_start = datetime.fromtimestamp(
+        int(params["interactive-complex-3"]["startDate"]) / 1000,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    complex3_end = complex3_start + timedelta(
+        days=int(params["interactive-complex-3"]["durationDays"])
+    )
+    complex3_country_x = str(params["interactive-complex-3"]["countryXName"])
+    complex3_country_y = str(params["interactive-complex-3"]["countryYName"])
+    complex4_person = int(params["interactive-complex-4"]["personId"])
+    complex4_start = datetime.fromtimestamp(
+        int(params["interactive-complex-4"]["startDate"]) / 1000,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    complex4_end = complex4_start + timedelta(
+        days=int(params["interactive-complex-4"]["durationDays"])
+    )
+    complex5_person = int(params["interactive-complex-5"]["personId"])
+    complex5_date = datetime.fromtimestamp(
+        int(params["interactive-complex-5"]["minDate"]) / 1000,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    complex6_person = int(params["interactive-complex-6"]["personId"])
+    complex6_tag = str(params["interactive-complex-6"]["tagName"])
     complex8_person = int(params["interactive-complex-8"]["personId"])
+    complex9_person = int(params["interactive-complex-9"]["personId"])
+    complex9_date = datetime.fromtimestamp(
+        int(params["interactive-complex-9"]["maxDate"]) / 1000,
+        tz=timezone.utc,
+    ).replace(tzinfo=None)
+    complex11_person = int(params["interactive-complex-11"]["personId"])
+    complex11_country = str(params["interactive-complex-11"]["countryName"])
+    complex11_year = int(params["interactive-complex-11"]["workFromYear"])
+    complex13_person1 = int(params["interactive-complex-13"]["person1Id"])
+    complex13_person2 = int(params["interactive-complex-13"]["person2Id"])
 
     cases = {
         "interactive-short-1": {
@@ -657,6 +728,49 @@ MATCH (p:Person)-[:IS_LOCATED_IN]->(place:Place)
 WHERE p.id = {person_id}
 RETURN p.firstName, p.lastName, p.birthday, p.locationIP, p.browserUsed,
        place.id, p.gender, p.creationDate;
+""",
+        },
+        "interactive-short-2": {
+            "sql": f"""
+WITH RECURSIVE cposts AS (
+    SELECT m_messageid, m_content, m_ps_imagefile, m_creationdate,
+           m_c_replyof, m_creatorid
+    FROM message
+    WHERE m_creatorid = {short2_person}
+    ORDER BY m_creationdate DESC
+    LIMIT 10
+), parent(postid, replyof, orig_postid, creator) AS (
+    SELECT m_messageid, m_c_replyof, m_messageid, m_creatorid FROM cposts
+    UNION ALL
+    SELECT m_messageid, m_c_replyof, orig_postid, m_creatorid
+    FROM message, parent
+    WHERE m_messageid = replyof
+)
+SELECT p1.m_messageid, COALESCE(m_ps_imagefile, m_content, ''),
+       p1.m_creationdate, p2.m_messageid, p2.p_personid,
+       p2.p_firstname, p2.p_lastname
+FROM (
+    SELECT m_messageid, m_content, m_ps_imagefile, m_creationdate,
+           m_c_replyof
+    FROM cposts
+) p1
+LEFT JOIN (
+    SELECT orig_postid, postid AS m_messageid, p_personid,
+           p_firstname, p_lastname
+    FROM parent, person
+    WHERE replyof IS NULL AND creator = p_personid
+) p2 ON p2.orig_postid = p1.m_messageid
+ORDER BY m_creationdate DESC, p2.m_messageid DESC;
+""",
+            "gql": f"""
+MATCH (person:Person)<-[:HAS_CREATOR]-(message:Message)
+WHERE person.id = {short2_person}
+MATCH (message)-[:REPLY_OF]->*(root:Post)
+MATCH (root)-[:HAS_CREATOR]->(author:Person)
+RETURN message.id, COALESCE(message.imageFile, message.content, ''),
+       message.creationDate, root.id, author.id, author.firstName, author.lastName
+ORDER BY message.creationDate DESC, root.id DESC
+LIMIT 10;
 """,
         },
         "interactive-short-3": {
@@ -693,6 +807,36 @@ WHERE m_messageid = {message_id} AND m_creatorid = p_personid;
 MATCH (m:Message)-[:HAS_CREATOR]->(p:Person)
 WHERE m.id = {message_id}
 RETURN p.id, p.firstName, p.lastName;
+""",
+        },
+        "interactive-short-6": {
+            "sql": f"""
+WITH RECURSIVE chain(parent, child) AS (
+    SELECT m_c_replyof, m_messageid
+    FROM message WHERE m_messageid = {short6_message}
+    UNION ALL
+    SELECT p.m_c_replyof, p.m_messageid
+    FROM message p, chain c
+    WHERE p.m_messageid = c.parent
+)
+SELECT f_forumid, f_title, p_personid, p_firstname, p_lastname
+FROM person, forum, (
+    SELECT m_messageid, m_ps_forumid
+    FROM message
+    WHERE m_messageid = (
+        SELECT COALESCE(min(parent), {short6_message}) FROM chain
+    )
+) m
+WHERE m_ps_forumid = f_forumid
+  AND f_moderatorid = p_personid;
+""",
+            "gql": f"""
+MATCH (message:Message) WHERE message.id = {short6_message}
+MATCH (message)-[:REPLY_OF]->*(post:Post)
+MATCH (forum:Forum)-[:CONTAINER_OF]->(post)
+MATCH (forum)-[:HAS_MODERATOR]->(moderator:Person)
+RETURN forum.id, forum.title, moderator.id,
+       moderator.firstName, moderator.lastName;
 """,
         },
         "interactive-short-7": {
@@ -745,6 +889,205 @@ ORDER BY message.creationDate DESC, message.id ASC
 LIMIT 20;
 """,
         },
+        "interactive-complex-3": {
+            "sql": f"""
+SELECT p_personid, p_firstname, p_lastname, ct1, ct2, ct1 + ct2 AS totalcount
+FROM (
+    SELECT k_person2id
+    FROM knows
+    WHERE k_person1id = {complex3_person}
+    UNION
+    SELECT k2.k_person2id
+    FROM knows k1, knows k2
+    WHERE k1.k_person1id = {complex3_person}
+      AND k1.k_person2id = k2.k_person1id
+      AND k2.k_person2id <> {complex3_person}
+) f, person, place p1, place p2, (
+    SELECT chn.m_creatorid, ct1, ct2
+    FROM (
+        SELECT m_creatorid, count(*) AS ct1
+        FROM message, place
+        WHERE m_locationid = pl_placeid
+          AND pl_name = {sql_literal(complex3_country_x)}
+          AND m_creationdate >= '{complex3_start:%Y-%m-%d %H:%M:%S}'
+          AND m_creationdate < '{complex3_end:%Y-%m-%d %H:%M:%S}'
+        GROUP BY m_creatorid
+    ) chn, (
+        SELECT m_creatorid, count(*) AS ct2
+        FROM message, place
+        WHERE m_locationid = pl_placeid
+          AND pl_name = {sql_literal(complex3_country_y)}
+          AND m_creationdate >= '{complex3_start:%Y-%m-%d %H:%M:%S}'
+          AND m_creationdate < '{complex3_end:%Y-%m-%d %H:%M:%S}'
+        GROUP BY m_creatorid
+    ) ind
+    WHERE chn.m_creatorid = ind.m_creatorid
+) cpc
+WHERE f.k_person2id = p_personid
+  AND p_placeid = p1.pl_placeid
+  AND p1.pl_containerplaceid = p2.pl_placeid
+  AND p2.pl_name <> {sql_literal(complex3_country_x)}
+  AND p2.pl_name <> {sql_literal(complex3_country_y)}
+  AND f.k_person2id = cpc.m_creatorid
+ORDER BY totalcount DESC, p_personid ASC
+LIMIT 20;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->{{1,2}}(friend:Person),
+      (friend)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(home_country:Country),
+      (message_x:Message)-[:HAS_CREATOR]->(friend),
+      (message_x)-[:IS_LOCATED_IN]->(country_x:Country),
+      (message_y:Message)-[:HAS_CREATOR]->(friend),
+      (message_y)-[:IS_LOCATED_IN]->(country_y:Country)
+WHERE source.id = {complex3_person}
+  AND friend.id <> source.id
+  AND home_country.name <> {sql_literal(complex3_country_x)}
+  AND home_country.name <> {sql_literal(complex3_country_y)}
+  AND country_x.name = {sql_literal(complex3_country_x)}
+  AND country_y.name = {sql_literal(complex3_country_y)}
+  AND message_x.creationDate >= '{complex3_start:%Y-%m-%d %H:%M:%S}'
+  AND message_x.creationDate < '{complex3_end:%Y-%m-%d %H:%M:%S}'
+  AND message_y.creationDate >= '{complex3_start:%Y-%m-%d %H:%M:%S}'
+  AND message_y.creationDate < '{complex3_end:%Y-%m-%d %H:%M:%S}'
+RETURN friend.id, friend.firstName, friend.lastName,
+       COUNT(DISTINCT message_x.id) AS ct1,
+       COUNT(DISTINCT message_y.id) AS ct2,
+       COUNT(DISTINCT message_x.id) + COUNT(DISTINCT message_y.id) AS totalcount
+GROUP BY friend
+ORDER BY totalcount DESC, friend.id ASC
+LIMIT 20;
+""",
+        },
+        "interactive-complex-4": {
+            "sql": f"""
+SELECT t_name, count(*) AS postCount
+FROM tag, message, message_tag recent, knows
+WHERE m_messageid = mt_messageid
+  AND mt_tagid = t_tagid
+  AND m_creatorid = k_person2id
+  AND m_c_replyof IS NULL
+  AND k_person1id = {complex4_person}
+  AND m_creationdate >= '{complex4_start:%Y-%m-%d %H:%M:%S}'
+  AND m_creationdate < '{complex4_end:%Y-%m-%d %H:%M:%S}'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM message old_message, message_tag old_tag, knows old_knows
+      WHERE old_knows.k_person1id = {complex4_person}
+        AND old_knows.k_person2id = old_message.m_creatorid
+        AND old_message.m_c_replyof IS NULL
+        AND old_tag.mt_messageid = old_message.m_messageid
+        AND old_message.m_creationdate < '{complex4_start:%Y-%m-%d %H:%M:%S}'
+        AND old_tag.mt_tagid = recent.mt_tagid
+  )
+GROUP BY t_name
+ORDER BY postCount DESC, t_name ASC
+LIMIT 10;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->(friend:Person),
+      (recent:Post)-[:HAS_CREATOR]->(friend),
+      (recent)-[:HAS_TAG]->(tag:Tag)
+WHERE source.id = {complex4_person}
+  AND recent.creationDate >= '{complex4_start:%Y-%m-%d %H:%M:%S}'
+  AND recent.creationDate < '{complex4_end:%Y-%m-%d %H:%M:%S}'
+OPTIONAL MATCH (source)-[:KNOWS]->(old_friend:Person),
+               (old_post:Post)-[:HAS_CREATOR]->(old_friend),
+               (old_post)-[:HAS_TAG]->(tag)
+WHERE old_post.creationDate < '{complex4_start:%Y-%m-%d %H:%M:%S}'
+LET old_post_id = old_post.id
+FILTER old_post_id IS NULL
+RETURN tag.name, COUNT(DISTINCT recent.id) AS postCount
+GROUP BY tag
+ORDER BY postCount DESC, tag.name ASC
+LIMIT 10;
+""",
+        },
+        "interactive-complex-5": {
+            "sql": f"""
+SELECT f_title, count(m_messageid) AS postCount
+FROM (
+    SELECT f_title, f_forumid, f.k_person2id
+    FROM forum, forum_person, (
+        SELECT k_person2id
+        FROM knows
+        WHERE k_person1id = {complex5_person}
+        UNION
+        SELECT k2.k_person2id
+        FROM knows k1, knows k2
+        WHERE k1.k_person1id = {complex5_person}
+          AND k1.k_person2id = k2.k_person1id
+          AND k2.k_person2id <> {complex5_person}
+    ) f
+    WHERE f_forumid = fp_forumid
+      AND fp_personid = f.k_person2id
+      AND fp_joindate >= '{complex5_date:%Y-%m-%d %H:%M:%S}'
+) tmp
+LEFT JOIN message
+  ON tmp.f_forumid = m_ps_forumid
+ AND m_creatorid = tmp.k_person2id
+GROUP BY f_forumid, f_title
+ORDER BY postCount DESC, f_forumid ASC
+LIMIT 20;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->{{1,2}}(friend:Person),
+      (forum:Forum)-[membership:HAS_MEMBER]->(friend)
+WHERE source.id = {complex5_person}
+  AND friend.id <> source.id
+  AND membership.joinDate >= '{complex5_date:%Y-%m-%d %H:%M:%S}'
+OPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post:Post)-[:HAS_CREATOR]->(friend)
+RETURN forum.title, COUNT(DISTINCT post.id) AS postCount
+GROUP BY forum
+ORDER BY postCount DESC, forum.id ASC
+LIMIT 20;
+""",
+        },
+        "interactive-complex-6": {
+            "sql": f"""
+SELECT t_name, count(*) AS postCount
+FROM tag, message_tag, message, (
+    SELECT k_person2id
+    FROM knows
+    WHERE k_person1id = {complex6_person}
+    UNION
+    SELECT k2.k_person2id
+    FROM knows k1, knows k2
+    WHERE k1.k_person1id = {complex6_person}
+      AND k1.k_person2id = k2.k_person1id
+      AND k2.k_person2id <> {complex6_person}
+) f
+WHERE m_creatorid = f.k_person2id
+  AND m_c_replyof IS NULL
+  AND m_messageid = mt_messageid
+  AND mt_tagid = t_tagid
+  AND t_name <> {sql_literal(complex6_tag)}
+  AND EXISTS (
+      SELECT 1
+      FROM tag required_tag, message_tag required_message_tag
+      WHERE required_message_tag.mt_messageid = m_messageid
+        AND required_message_tag.mt_tagid = required_tag.t_tagid
+        AND required_tag.t_name = {sql_literal(complex6_tag)}
+  )
+GROUP BY t_name
+ORDER BY postCount DESC, t_name ASC
+LIMIT 10;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->{{1,2}}(friend:Person),
+      (post:Post)-[:HAS_CREATOR]->(friend),
+      (post)-[:HAS_TAG]->(tag:Tag),
+      (post)-[:HAS_TAG]->(required_tag:Tag)
+WHERE source.id = {complex6_person}
+  AND friend.id <> source.id
+  AND tag.name <> {sql_literal(complex6_tag)}
+  AND required_tag.name = {sql_literal(complex6_tag)}
+RETURN tag.name, COUNT(DISTINCT post.id) AS postCount
+GROUP BY tag
+ORDER BY postCount DESC, tag.name ASC
+LIMIT 10;
+""",
+            "single_run": True,
+        },
         "interactive-complex-8": {
             "sql": f"""
 SELECT p1.m_creatorid, p_firstname, p_lastname, p1.m_creationdate,
@@ -768,32 +1111,159 @@ LIMIT 20;
 """,
             "single_run": True,
         },
+        "interactive-complex-9": {
+            "sql": f"""
+SELECT p_personid, p_firstname, p_lastname,
+       m_messageid, COALESCE(m_ps_imagefile, m_content), m_creationdate
+FROM (
+    SELECT k_person2id
+    FROM knows
+    WHERE k_person1id = {complex9_person}
+    UNION
+    SELECT k2.k_person2id
+    FROM knows k1, knows k2
+    WHERE k1.k_person1id = {complex9_person}
+      AND k1.k_person2id = k2.k_person1id
+      AND k2.k_person2id <> {complex9_person}
+) f, person, message
+WHERE p_personid = m_creatorid
+  AND p_personid = f.k_person2id
+  AND m_creationdate < '{complex9_date:%Y-%m-%d %H:%M:%S}'
+ORDER BY m_creationdate DESC, m_messageid ASC
+LIMIT 20;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->{{1,2}}(friend:Person),
+      (message:Message)-[:HAS_CREATOR]->(friend)
+WHERE source.id = {complex9_person}
+  AND friend.id <> source.id
+  AND message.creationDate < '{complex9_date:%Y-%m-%d %H:%M:%S}'
+RETURN DISTINCT friend.id, friend.firstName, friend.lastName, message.id,
+       COALESCE(message.imageFile, message.content), message.creationDate
+ORDER BY message.creationDate DESC, message.id ASC
+LIMIT 20;
+""",
+        },
+        "interactive-complex-11": {
+            "sql": f"""
+SELECT p_personid, p_firstname, p_lastname, o_name, pc_workfrom
+FROM (
+    SELECT k_person2id
+    FROM knows
+    WHERE k_person1id = {complex11_person}
+    UNION
+    SELECT k2.k_person2id
+    FROM knows k1, knows k2
+    WHERE k1.k_person1id = {complex11_person}
+      AND k1.k_person2id = k2.k_person1id
+      AND k2.k_person2id <> {complex11_person}
+) f, person, person_company, organisation, place
+WHERE p_personid = f.k_person2id
+  AND p_personid = pc_personid
+  AND pc_organisationid = o_organisationid
+  AND o_placeid = pl_placeid
+  AND pl_name = {sql_literal(complex11_country)}
+  AND pc_workfrom < {complex11_year}
+ORDER BY pc_workfrom ASC, p_personid ASC, o_name DESC
+LIMIT 10;
+""",
+            "gql": f"""
+MATCH (source:Person)-[:KNOWS]->{{1,2}}(friend:Person),
+      (friend)-[work:WORK_AT]->(organisation:Organisation)-[:IS_LOCATED_IN]->(country:Country)
+WHERE source.id = {complex11_person}
+  AND friend.id <> source.id
+  AND work.workFrom < {complex11_year}
+  AND country.name = {sql_literal(complex11_country)}
+RETURN DISTINCT friend.id, friend.firstName, friend.lastName,
+       organisation.name, work.workFrom
+ORDER BY work.workFrom ASC, friend.id ASC, organisation.name DESC
+LIMIT 10;
+""",
+        },
+        "interactive-complex-13": {
+            "sql": f"""
+WITH RECURSIVE search_graph(link, level, path) AS (
+    SELECT {complex13_person1}::INT64, 0, [{complex13_person1}::INT64]
+    UNION ALL
+    (
+        WITH sg(link, level) AS (SELECT * FROM search_graph)
+        SELECT DISTINCT k_person2id, x.level + 1,
+               array_append(path, k_person2id)
+        FROM knows, sg x
+        WHERE x.link = k_person1id
+          AND NOT EXISTS (
+              SELECT * FROM sg y
+              WHERE y.link = {complex13_person2}::INT64
+          )
+          AND NOT EXISTS (
+              SELECT * FROM sg y
+              WHERE y.link = k_person2id
+          )
+    )
+)
+SELECT max(level) AS shortestPathLength
+FROM (
+    SELECT level FROM search_graph WHERE link = {complex13_person2}
+    UNION SELECT -1
+) result;
+""",
+            "gql": f"""
+MATCH (source:Person), (target:Person)
+WHERE source.id = {complex13_person1}
+  AND target.id = {complex13_person2}
+CALL algo.shortest_path_length(
+    'snb_interactive',
+    element_id(source),
+    element_id(target),
+    'Person',
+    'KNOWS'
+)
+YIELD distance
+RETURN distance;
+""",
+        },
     }
     unsupported = {
-        "interactive-short-2": "unbounded reply path cannot currently be combined with creator patterns",
-        "interactive-short-6": "unbounded reply path cannot currently be combined with forum and moderator patterns",
         "interactive-complex-1": "requires shortest-distance selection plus nested collection projections",
-        "interactive-complex-3": "requires interval arithmetic and multiple pre-aggregated subqueries",
-        "interactive-complex-4": "requires anti-existence over a pre-query result",
-        "interactive-complex-5": "requires a left join after a grouped bounded-path result",
-        "interactive-complex-6": "requires correlated existence over tags",
         "interactive-complex-7": "requires a grouped max subquery, temporal arithmetic, and conditional projection",
-        "interactive-complex-9": "finite 1..2 alternatives apply ORDER BY and LIMIT per branch rather than globally",
         "interactive-complex-10": "requires correlated aggregate subqueries and date extraction",
-        "interactive-complex-11": "finite 1..2 alternatives do not preserve global DISTINCT, ORDER BY, and LIMIT semantics",
         "interactive-complex-12": "requires tag-class recursion and distinct list aggregation",
-        "interactive-complex-13": "requires shortest-path length; no exact MATCH projection is available",
         "interactive-complex-14": "requires all shortest paths, edge weighting, and path-list aggregation",
     }
+    if selected_queries:
+        known = set(cases) | set(unsupported)
+        unknown = sorted(selected_queries - known)
+        if unknown:
+            raise RuntimeError(f"unknown benchmark queries: {', '.join(unknown)}")
+        cases = {
+            name: case for name, case in cases.items()
+            if name in selected_queries
+        }
+        unsupported = {
+            name: reason for name, reason in unsupported.items()
+            if name in selected_queries
+        }
 
     results: dict[str, Any] = {}
     for name, case in cases.items():
         print(f"[{name}] validating SQL and GQL rows", flush=True)
         expected, _ = query_rows(
-            cli, relational_database, case["sql"], False, timeout
+            cli,
+            relational_database,
+            case["sql"],
+            False,
+            timeout,
+            threads,
+            memory_limit,
         )
         actual, first_profile = query_rows(
-            cli, graph_database, case["gql"], True, timeout
+            cli,
+            graph_database,
+            case["gql"],
+            True,
+            timeout,
+            threads,
+            memory_limit,
         )
         validated = actual == expected
         entry: dict[str, Any] = {
@@ -897,10 +1367,16 @@ def main() -> None:
         default=Path("build/benchmarks/snb10/gql-interactive-results.json"),
     )
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--memory-limit", default="20GB")
+    parser.add_argument("--memory-limit", default="8GB")
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--query-timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--query",
+        action="append",
+        dest="queries",
+        help="run only this query name; repeat for multiple queries",
+    )
     parser.add_argument("--export-only", action="store_true")
     parser.add_argument("--no-queries", action="store_true")
     args = parser.parse_args()
@@ -950,6 +1426,7 @@ def main() -> None:
                 args.warmups,
                 args.runs,
                 args.query_timeout,
+                set(args.queries) if args.queries else None,
             )
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),

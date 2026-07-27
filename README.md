@@ -160,6 +160,13 @@ RETURN person.name;
 ```
 
 `EXPLAIN ANALYZE` executes the query and includes runtime measurements.
+DuckGQL first applies semantic rewrites such as safe predicate pushdown. Once
+the selected graph, property indexes, and current CSR snapshot are known, a
+graph access-path optimizer chooses table scans, indexed property lookups,
+selective node-label postings, and fixed-hop CSR expansions. Relational
+lowering only materializes those choices; DuckDB then costs and reorders the
+resulting native join graph.
+
 Algorithm calls can be inspected after building their CSR snapshot:
 
 ```sql
@@ -208,7 +215,14 @@ Inspection helpers:
 SELECT * FROM gql_graphs();
 CALL gql_neighbors('social', 1, 'out');
 SELECT * FROM gql_csr_stats('social');
+SELECT * FROM gql_csr_edge_stats('social');
 ```
+
+`gql_csr_edge_stats` reports per-type edge counts, active source/target
+counts, average directional degree, and maximum directional degree. The graph
+optimizer uses these connection-local statistics to compare a correlated CSR
+frontier with a bulk edge-table scan and to avoid treating a highly skewed
+one-row endpoint as uniformly selective.
 
 ## Storage model
 
@@ -228,30 +242,57 @@ has exactly one scalar, immutable type. A CSR build derives connection-local
 topology and node-label posting lists from those tables; it does not create a
 second authoritative store.
 
+### Property indexes
+
+Create an index for selective vertex-property equality lookups:
+
+```sql
+CALL gql_create_property_index('social', 'id');
+SELECT * FROM gql_property_indexes();
+
+MATCH (person:Person)
+WHERE person.id = 123
+RETURN person.name;
+
+CALL gql_drop_property_index('social', 'id');
+```
+
+The index is a native DuckDB ART index over the graph's typed property column,
+not a separate graph index. DuckDB maintains it for direct SQL and GQL writes.
+The index is graph-wide: if different labels reuse the same property value,
+DuckGQL obtains the indexed candidates first and still applies every requested
+label exactly. Property indexes work without CSR; when a current CSR snapshot
+is present, an indexed vertex lookup can seed a fixed-hop CSR expansion.
+
 ## SF10 engineering benchmark
 
-On the 29,987,835-node / 178,561,949-edge LDBC SNB SF10 projection, all seven
-currently supported read queries matched their ordered SQL reference rows.
-The selective label-posting path reduced Complex 8 from 33.960 ms to
-11.900 ms and cumulative rows scanned from 30,602,235 to 802,925. This is an
-engineering run, not an official LDBC driver score.
-
-| Query | Previous CSR | Selective label postings |
-|---|---:|---:|
-| Short 1 | 11.694 ms | 10.397 ms |
-| Short 3 | 11.513 ms | 10.628 ms |
-| Short 4 | 1.380 ms | 1.351 ms |
-| Short 5 | 2.922 ms | 2.535 ms |
-| Short 7 | 49.460 ms | 47.843 ms |
-| Complex 2 | 128.032 ms | 130.036 ms |
-| Complex 8 | 33.960 ms | 11.900 ms |
+On the 29,987,835-node / 178,561,949-edge LDBC SNB SF10 projection, all
+sixteen currently supported Interactive reads match their ordered DuckDB SQL
+reference rows. Their directional latency sum is 6,110.491 ms for DuckGQL
+versus 850.439 ms for SQL, or 7.19x. Type/direction fanout statistics now let
+the graph optimizer combine indexed endpoints, bounded CSR paths, fixed-hop
+CSR expansion, and DuckDB bulk joins without relying only on pattern order.
+Complex 13 runs in 55.947 ms through CSR versus 447.275 ms for the normalized
+recursive SQL query. Complex 8 improved from 123.553 seconds in the original
+run to 12.297 ms, while Complex 9 now completes in 996.762 ms instead of
+exceeding 180 seconds. This is an engineering run, not an official LDBC driver
+score: it executes reads against the initial SF10 state rather than the
+official mixed read/update schedule.
 
 Reproduce against an existing SF10 graph database:
 
 ```sh
 python3 scripts/benchmark/benchmark_snb_gql_interactive.py \
+  --duckdb build/release/duckdb \
+  --source-database build/benchmarks/snb10/snb10-relational.duckdb \
   --graph-database build/benchmarks/snb10/snb10-gql.duckdb \
-  --output build/benchmarks/snb10/gql-interactive-results-label-postings-point.json
+  --relational-results build/benchmarks/snb10/interactive-results-4t-8gb.json \
+  --output build/benchmarks/snb10/gql-interactive-results-latest.json \
+  --threads 4 \
+  --memory-limit 8GB \
+  --warmups 1 \
+  --runs 3 \
+  --query-timeout 180
 ```
 
 DuckLake tables can be used as an input source by exporting graph-header
