@@ -834,9 +834,9 @@ static unique_ptr<FunctionData> ElementFetchBind(ClientContext &context, TableFu
 	}
 
 	auto &catalog = Catalog::GetCatalog(context, binding.catalog_name);
-	auto table_entry = catalog.GetEntry<TableCatalogEntry>(context, binding.schema_name, binding.table_name,
-	                                                       OnEntryNotFound::THROW_EXCEPTION);
-	auto &table = *table_entry;
+	auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, binding.schema_name, binding.table_name,
+	                                    OnEntryNotFound::THROW_EXCEPTION);
+	auto &table = table_entry->Cast<TableCatalogEntry>();
 	if (!table.IsDuckTable()) {
 		throw BinderException("GQL element fetch requires native DuckDB table storage");
 	}
