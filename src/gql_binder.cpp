@@ -456,7 +456,6 @@ string GqlBinder::ProjectionName(const GqlProjection &projection, const GqlBound
 }
 
 vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &statement) {
-	vector<pair<idx_t, idx_t>> ranged_elements;
 	vector<pair<idx_t, idx_t>> any_direction_elements;
 	idx_t alternative_count = 1;
 	for (idx_t pattern_index = 0; pattern_index < statement.patterns.size(); pattern_index++) {
@@ -471,22 +470,6 @@ vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &stat
 				alternative_count *= 2;
 				any_direction_elements.emplace_back(pattern_index, element_index);
 			}
-			if (!element.quantified || element.unbounded ||
-			    element.minimum_repetitions == element.maximum_repetitions) {
-				continue;
-			}
-			if (element.minimum_repetitions == 0 || element.minimum_repetitions > element.maximum_repetitions) {
-				throw BinderException("GQL path quantifier lower bound must be between "
-				                      "1 and its upper bound");
-			}
-			auto count = element.maximum_repetitions - element.minimum_repetitions + 1;
-			if (count > GQL_MAX_FINITE_PATH_ALTERNATIVES ||
-			    alternative_count > GQL_MAX_FINITE_PATH_ALTERNATIVES / count) {
-				throw BinderException("GQL finite path quantifiers produce more than "
-				                      "64 native alternatives");
-			}
-			alternative_count *= count;
-			ranged_elements.emplace_back(pattern_index, element_index);
 		}
 	}
 
@@ -495,14 +478,6 @@ vector<GqlLogicalPlan> GqlBinder::BindAlternatives(const GqlMatchStatement &stat
 	for (idx_t alternative = 0; alternative < alternative_count; alternative++) {
 		GqlMatchStatement branch(statement);
 		auto selection = alternative;
-		for (const auto &location : ranged_elements) {
-			auto &element = branch.patterns[location.first].elements[location.second];
-			auto count = element.maximum_repetitions - element.minimum_repetitions + 1;
-			auto repetitions = element.minimum_repetitions + selection % count;
-			selection /= count;
-			element.minimum_repetitions = repetitions;
-			element.maximum_repetitions = repetitions;
-		}
 		for (const auto &location : any_direction_elements) {
 			auto &element = branch.patterns[location.first].elements[location.second];
 			element.edge_direction = selection % 2 == 0 ? GqlEdgeDirection::RIGHT : GqlEdgeDirection::LEFT;
@@ -580,18 +555,31 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 				continue;
 			}
 			if (element.type != GqlPatternElementType::EDGE || element.minimum_repetitions == 0 ||
-			    element.minimum_repetitions != element.maximum_repetitions || !element.variable.IsEmpty()) {
+			    (!element.unbounded && element.minimum_repetitions > element.maximum_repetitions) ||
+			    !element.variable.IsEmpty()) {
 				throw InternalException("Invalid fixed quantified GQL path element");
 			}
-			for (idx_t repetition = 0; repetition < element.minimum_repetitions; repetition++) {
-				bind_element(element, true);
-				if (repetition + 1 < element.minimum_repetitions) {
-					GqlPatternElement intermediate;
-					intermediate.type = GqlPatternElementType::VERTEX;
-					intermediate.source = element.quantifier_source;
-					bind_element(intermediate, true);
+			if (element.minimum_repetitions == element.maximum_repetitions) {
+				auto fixed_element = element;
+				fixed_element.quantified = false;
+				fixed_element.unbounded = false;
+				fixed_element.minimum_repetitions = 1;
+				fixed_element.maximum_repetitions = 1;
+				for (idx_t repetition = 0; repetition < element.minimum_repetitions; repetition++) {
+					bind_element(fixed_element, true);
+					if (repetition + 1 < element.minimum_repetitions) {
+						GqlPatternElement intermediate;
+						intermediate.type = GqlPatternElementType::VERTEX;
+						intermediate.source = element.quantifier_source;
+						bind_element(intermediate, true);
+					}
 				}
+				continue;
 			}
+			// Quantified edges are one logical factor. The relational access-path
+			// optimizer can lower them to a composable CSR path expansion without
+			// cloning the rest of the query once per hop count.
+			bind_element(element, true);
 		}
 		if (!pattern.variable.IsEmpty()) {
 			if (FindBindingIndex(pattern.variable.value) != DConstants::INVALID_INDEX) {
@@ -1202,6 +1190,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 			project->projections.push_back(std::move(bound_projection));
 		}
 	}
+	project->visible_projection_count = project->projections.size();
 	for (const auto &group : statement.group_by_variables) {
 		(void)Resolve(group);
 	}
@@ -1215,7 +1204,16 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 			}
 		}
 		if (bound_order.projection_index == DConstants::INVALID_INDEX) {
-			throw BinderException("GQL ORDER BY expressions must also appear in RETURN");
+			if (statement.distinct || saw_call_clause) {
+				throw BinderException(
+				    "GQL ORDER BY expressions must appear in RETURN when DISTINCT or CALL is used");
+			}
+			bound_order.projection_index = project->projections.size();
+			GqlBoundProjection hidden_order;
+			hidden_order.expression = bound_order.expression;
+			hidden_order.name = "gql_hidden_order_" + to_string(project->order_by.size());
+			hidden_order.source = order.source;
+			project->projections.push_back(std::move(hidden_order));
 		}
 		bound_order.descending = order.descending;
 		bound_order.nulls_first = order.nulls_first;

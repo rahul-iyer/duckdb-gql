@@ -1,0 +1,93 @@
+# name: test/sql/gql_finite_range_global_modifiers.test
+# description: Finite path alternatives apply result modifiers once globally
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('a', 'a', 'Root'),
+        ('b', 'b', 'Node'),
+        ('c', 'c', 'Node'),
+        ('d', 'd', 'Node')
+    ) vertices(":ID(FiniteRange)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/gql_finite_range_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('a', 'b', 'REL'),
+        ('a', 'c', 'REL'),
+        ('a', 'd', 'REL'),
+        ('b', 'c', 'REL')
+    ) edges(":START_ID(FiniteRange)", ":END_ID(FiniteRange)", ":TYPE")
+) TO '__TEST_DIR__/gql_finite_range_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH finite_range ANY
+
+statement ok
+COPY GRAPH finite_range FROM (
+    VERTICES '__TEST_DIR__/gql_finite_range_vertices.csv',
+    EDGES '__TEST_DIR__/gql_finite_range_edges.csv'
+) FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH finite_range
+
+# One-hop and two-hop alternatives both reach c.
+query T rowsort
+MATCH (source:Root)-[:REL]->{1,2}(target:Node)
+RETURN target.name
+----
+b
+c
+c
+d
+
+# DISTINCT, ordering, and limit apply after the alternatives are combined.
+query T
+MATCH (source:Root)-[:REL]->{1,2}(target:Node)
+RETURN DISTINCT target.name
+ORDER BY target.name DESC
+LIMIT 2
+----
+d
+c
+
+# OFFSET and LIMIT also observe the globally ordered bag, including duplicates.
+query T
+MATCH (source:Root)-[:REL]->{1,2}(target:Node)
+RETURN target.name
+ORDER BY target.name ASC
+OFFSET 1
+LIMIT 2
+----
+c
+c
+
+statement ok
+CALL gql_build_csr('finite_range')
+
+# With CSR available, the quantified factor composes before the shared
+# downstream pattern instead of cloning that pattern once per hop count.
+query T
+MATCH (source:Root)-[:REL]->{1,2}(target:Node),
+      (target)-[:REL]->(neighbor:Node)
+RETURN neighbor.name
+----
+c
+
+# A composed unbounded path uses the same CSR relation. Star includes its
+# zero-hop row, so the downstream expansion also starts at source itself.
+query T rowsort
+MATCH (source:Root)
+MATCH (source)-[:REL]->*(target)
+MATCH (target)-[:REL]->(neighbor:Node)
+RETURN neighbor.name
+----
+b
+c
+c
+d

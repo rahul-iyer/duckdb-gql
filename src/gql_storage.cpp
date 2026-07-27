@@ -39,6 +39,7 @@ void GqlEnsureStorage(Connection &connection) {
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.graph_id_seq START 1");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.element_table_id_seq START 1");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.label_mapping_id_seq START 1");
+	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.property_index_id_seq START 1");
 	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graphs ("
 	                     "graph_id UBIGINT PRIMARY KEY DEFAULT nextval('gql_internal.graph_id_seq'), "
 	                     "graph_name VARCHAR NOT NULL UNIQUE, "
@@ -101,6 +102,14 @@ void GqlEnsureStorage(Connection &connection) {
 	                     "nullable BOOLEAN NOT NULL, "
 	                     "writable BOOLEAN NOT NULL, "
 	                     "PRIMARY KEY(element_table_id, property_name))");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_property_indexes ("
+	                     "property_index_id UBIGINT PRIMARY KEY, "
+	                     "element_table_id UBIGINT NOT NULL, "
+	                     "property_name VARCHAR NOT NULL, "
+	                     "column_name VARCHAR NOT NULL, "
+	                     "index_name VARCHAR NOT NULL UNIQUE, "
+	                     "created_at TIMESTAMP NOT NULL DEFAULT current_timestamp, "
+	                     "UNIQUE(element_table_id, property_name))");
 	GqlQuery(connection, "INSERT INTO gql_internal.graph_storage (graph_id, storage_mode, schema_version, csr_policy) "
 	                     "SELECT graph_id, 'EMPTY', 0, 'DISABLED' FROM gql_internal.graphs ON CONFLICT DO NOTHING");
 }
@@ -127,6 +136,24 @@ struct CommandBindData : TableFunctionData {
 
 	string graph_name;
 	bool conditional;
+};
+
+struct PropertyIndexBindData : TableFunctionData {
+	PropertyIndexBindData(string graph_name_p, string property_name_p)
+	    : graph_name(std::move(graph_name_p)), property_name(std::move(property_name_p)) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<PropertyIndexBindData>(graph_name, property_name);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto other = dynamic_cast<const PropertyIndexBindData *>(&other_p);
+		return other && graph_name == other->graph_name && property_name == other->property_name;
+	}
+
+	string graph_name;
+	string property_name;
 };
 
 struct SingleRowState : GlobalTableFunctionState {
@@ -174,6 +201,21 @@ static unique_ptr<FunctionData> SetGraphBind(ClientContext &, TableFunctionBindI
 	names = {"success", "graph_name"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
 	return make_uniq<CommandBindData>(input.inputs[0].GetValue<string>(), false);
+}
+
+static unique_ptr<FunctionData> PropertyIndexBind(ClientContext &, TableFunctionBindInput &input,
+                                                  vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
+		throw BinderException("A graph name and vertex property name are required");
+	}
+	auto graph_name = input.inputs[0].GetValue<string>();
+	auto property_name = input.inputs[1].GetValue<string>();
+	if (graph_name.empty() || property_name.empty()) {
+		throw BinderException("Graph and vertex property names must be non-empty");
+	}
+	names = {"success", "graph_name", "property_name", "index_name"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return make_uniq<PropertyIndexBindData>(std::move(graph_name), std::move(property_name));
 }
 
 static unique_ptr<FunctionData> MutationControlBind(ClientContext &, TableFunctionBindInput &input,
@@ -294,6 +336,9 @@ static void DropGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_property_mappings WHERE element_table_id IN "
 		                     "(SELECT element_table_id FROM gql_internal.graph_element_tables WHERE graph_id = " +
 		                         to_string(graph_id) + ")");
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_property_indexes WHERE element_table_id IN "
+		                     "(SELECT element_table_id FROM gql_internal.graph_element_tables WHERE graph_id = " +
+		                         to_string(graph_id) + ")");
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_label_mappings WHERE element_table_id IN "
 		                     "(SELECT element_table_id FROM gql_internal.graph_element_tables WHERE graph_id = " +
 		                         to_string(graph_id) + ")");
@@ -336,6 +381,156 @@ static void SetGraph(ClientContext &context, TableFunctionInput &input, DataChun
 	EmitCommandResult(output, state, data.graph_name);
 }
 
+struct PropertyIndexTarget {
+	uint64_t graph_id;
+	uint64_t element_table_id;
+	string property_name;
+	string column_name;
+	string catalog_name;
+	string schema_name;
+	string table_name;
+};
+
+static PropertyIndexTarget ResolvePropertyIndexTarget(Connection &connection, const string &graph_name,
+                                                      const string &property_name) {
+	auto target = GqlQuery(connection, "SELECT g.graph_id, et.element_table_id, pm.property_name, pm.column_name, "
+	                                   "et.catalog_name, et.schema_name, et.table_name "
+	                                   "FROM gql_internal.graphs g "
+	                                   "JOIN gql_internal.graph_storage gs USING (graph_id) "
+	                                   "JOIN gql_internal.graph_element_tables et USING (graph_id) "
+	                                   "JOIN gql_internal.graph_property_mappings pm USING (element_table_id) "
+	                                   "WHERE g.graph_name = " +
+	                                       GqlQuoteLiteral(graph_name) +
+	                                       " AND gs.storage_mode = 'TABLE_BACKED' AND et.element_kind = 'VERTEX' AND "
+	                                       "lower(pm.property_name) = lower(" +
+	                                       GqlQuoteLiteral(property_name) + ")");
+	if (target->RowCount() == 0) {
+		auto graph = GqlQuery(connection, "SELECT count(*) FROM gql_internal.graphs WHERE graph_name = " +
+		                                      GqlQuoteLiteral(graph_name));
+		if (graph->GetValue(0, 0).GetValue<int64_t>() == 0) {
+			throw InvalidInputException("Graph '%s' does not exist", graph_name);
+		}
+		throw InvalidInputException("Graph '%s' has no vertex property '%s'", graph_name, property_name);
+	}
+	if (target->RowCount() != 1) {
+		throw InternalException("Graph vertex property mapping is ambiguous");
+	}
+	return {target->GetValue(0, 0).GetValue<uint64_t>(), target->GetValue(1, 0).GetValue<uint64_t>(),
+	        target->GetValue(2, 0).GetValue<string>(),   target->GetValue(3, 0).GetValue<string>(),
+	        target->GetValue(4, 0).GetValue<string>(),   target->GetValue(5, 0).GetValue<string>(),
+	        target->GetValue(6, 0).GetValue<string>()};
+}
+
+static bool PhysicalIndexExists(Connection &connection, const PropertyIndexTarget &target, const string &index_name) {
+	auto count =
+	    GqlQuery(connection,
+	             "SELECT count(*) FROM duckdb_indexes() WHERE database_name = " + GqlQuoteLiteral(target.catalog_name) +
+	                 " AND schema_name = " + GqlQuoteLiteral(target.schema_name) + " AND table_name = " +
+	                 GqlQuoteLiteral(target.table_name) + " AND index_name = " + GqlQuoteLiteral(index_name));
+	return count->GetValue(0, 0).GetValue<int64_t>() != 0;
+}
+
+static void EmitPropertyIndexResult(DataChunk &output, SingleRowState &state, const PropertyIndexBindData &data,
+                                    const string &property_name, const string &index_name) {
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value(true));
+	output.SetValue(1, 0, Value(data.graph_name));
+	output.SetValue(2, 0, Value(property_name));
+	output.SetValue(3, 0, Value(index_name));
+	state.done = true;
+}
+
+static void CreatePropertyIndex(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<SingleRowState>();
+	if (state.done) {
+		return;
+	}
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("CREATE PROPERTY INDEX is not eligible inside an explicit transaction");
+	}
+	auto &data = input.bind_data->Cast<PropertyIndexBindData>();
+	Connection connection(*context.db);
+	GqlEnsureStorage(connection);
+	auto target = ResolvePropertyIndexTarget(connection, data.graph_name, data.property_name);
+	auto existing = GqlQuery(connection, "SELECT index_name FROM gql_internal.graph_property_indexes WHERE "
+	                                     "element_table_id = " +
+	                                         to_string(target.element_table_id) +
+	                                         " AND property_name = " + GqlQuoteLiteral(target.property_name));
+	if (existing->RowCount() == 1) {
+		auto index_name = existing->GetValue(0, 0).GetValue<string>();
+		if (PhysicalIndexExists(connection, target, index_name)) {
+			EmitPropertyIndexResult(output, state, data, target.property_name, index_name);
+			return;
+		}
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_property_indexes WHERE element_table_id = " +
+		                         to_string(target.element_table_id) +
+		                         " AND property_name = " + GqlQuoteLiteral(target.property_name));
+	}
+
+	connection.BeginTransaction();
+	try {
+		auto property_index_id = GqlQuery(connection, "SELECT nextval('gql_internal.property_index_id_seq')::UBIGINT")
+		                             ->GetValue(0, 0)
+		                             .GetValue<uint64_t>();
+		auto index_name = "gql_property_index_" + to_string(property_index_id);
+		auto qualified_table = GqlQuoteIdentifier(target.catalog_name) + "." + GqlQuoteIdentifier(target.schema_name) +
+		                       "." + GqlQuoteIdentifier(target.table_name);
+		GqlQuery(connection, "CREATE INDEX " + GqlQuoteIdentifier(index_name) + " ON " + qualified_table + " (" +
+		                         GqlQuoteIdentifier(target.column_name) + ")");
+		GqlQuery(connection, "INSERT INTO gql_internal.graph_property_indexes "
+		                     "(property_index_id, element_table_id, property_name, column_name, index_name) VALUES (" +
+		                         to_string(property_index_id) + ", " + to_string(target.element_table_id) + ", " +
+		                         GqlQuoteLiteral(target.property_name) + ", " + GqlQuoteLiteral(target.column_name) +
+		                         ", " + GqlQuoteLiteral(index_name) + ")");
+		connection.Commit();
+		EmitPropertyIndexResult(output, state, data, target.property_name, index_name);
+	} catch (...) {
+		if (connection.HasActiveTransaction()) {
+			connection.Rollback();
+		}
+		throw;
+	}
+}
+
+static void DropPropertyIndex(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<SingleRowState>();
+	if (state.done) {
+		return;
+	}
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("DROP PROPERTY INDEX is not eligible inside an explicit transaction");
+	}
+	auto &data = input.bind_data->Cast<PropertyIndexBindData>();
+	Connection connection(*context.db);
+	GqlEnsureStorage(connection);
+	auto target = ResolvePropertyIndexTarget(connection, data.graph_name, data.property_name);
+	auto existing = GqlQuery(connection, "SELECT index_name FROM gql_internal.graph_property_indexes WHERE "
+	                                     "element_table_id = " +
+	                                         to_string(target.element_table_id) +
+	                                         " AND property_name = " + GqlQuoteLiteral(target.property_name));
+	if (existing->RowCount() == 0) {
+		EmitPropertyIndexResult(output, state, data, target.property_name, string());
+		return;
+	}
+	auto index_name = existing->GetValue(0, 0).GetValue<string>();
+	connection.BeginTransaction();
+	try {
+		auto qualified_index = GqlQuoteIdentifier(target.catalog_name) + "." + GqlQuoteIdentifier(target.schema_name) +
+		                       "." + GqlQuoteIdentifier(index_name);
+		GqlQuery(connection, "DROP INDEX IF EXISTS " + qualified_index);
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_property_indexes WHERE element_table_id = " +
+		                         to_string(target.element_table_id) +
+		                         " AND property_name = " + GqlQuoteLiteral(target.property_name));
+		connection.Commit();
+		EmitPropertyIndexResult(output, state, data, target.property_name, index_name);
+	} catch (...) {
+		if (connection.HasActiveTransaction()) {
+			connection.Rollback();
+		}
+		throw;
+	}
+}
+
 struct GraphRow {
 	Value graph_id;
 	Value graph_name;
@@ -343,6 +538,22 @@ struct GraphRow {
 	Value vertex_count;
 	Value edge_count;
 	Value created_at;
+};
+
+struct PropertyIndexRow {
+	Value graph_name;
+	Value property_name;
+	Value index_name;
+	Value catalog_name;
+	Value schema_name;
+	Value table_name;
+	Value column_name;
+};
+
+struct PropertyIndexRowsState : GlobalTableFunctionState {
+	bool initialized = false;
+	idx_t offset = 0;
+	vector<PropertyIndexRow> rows;
 };
 
 struct GraphRowsState : GlobalTableFunctionState {
@@ -361,6 +572,51 @@ static unique_ptr<FunctionData> GraphsBind(ClientContext &, TableFunctionBindInp
 
 static unique_ptr<GlobalTableFunctionState> GraphsInit(ClientContext &, TableFunctionInitInput &) {
 	return make_uniq<GraphRowsState>();
+}
+
+static unique_ptr<FunctionData> PropertyIndexesBind(ClientContext &, TableFunctionBindInput &,
+                                                    vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"graph_name", "property_name", "index_name", "catalog_name", "schema_name", "table_name", "column_name"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return nullptr;
+}
+
+static unique_ptr<GlobalTableFunctionState> PropertyIndexesInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<PropertyIndexRowsState>();
+}
+
+static void PropertyIndexesFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<PropertyIndexRowsState>();
+	if (!state.initialized) {
+		Connection connection(*context.db);
+		GqlEnsureStorage(connection);
+		auto indexes = GqlQuery(
+		    connection,
+		    "SELECT g.graph_name, pi.property_name, pi.index_name, et.catalog_name, et.schema_name, et.table_name, "
+		    "pi.column_name FROM gql_internal.graph_property_indexes pi "
+		    "JOIN gql_internal.graph_element_tables et USING (element_table_id) "
+		    "JOIN gql_internal.graphs g USING (graph_id) ORDER BY g.graph_name, pi.property_name");
+		for (idx_t row = 0; row < indexes->RowCount(); row++) {
+			state.rows.push_back({indexes->GetValue(0, row), indexes->GetValue(1, row), indexes->GetValue(2, row),
+			                      indexes->GetValue(3, row), indexes->GetValue(4, row), indexes->GetValue(5, row),
+			                      indexes->GetValue(6, row)});
+		}
+		state.initialized = true;
+	}
+	auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.rows.size() - state.offset);
+	for (idx_t index = 0; index < count; index++) {
+		auto &row = state.rows[state.offset + index];
+		output.SetValue(0, index, row.graph_name);
+		output.SetValue(1, index, row.property_name);
+		output.SetValue(2, index, row.index_name);
+		output.SetValue(3, index, row.catalog_name);
+		output.SetValue(4, index, row.schema_name);
+		output.SetValue(5, index, row.table_name);
+		output.SetValue(6, index, row.column_name);
+	}
+	state.offset += count;
+	output.SetCardinality(count);
 }
 
 static void LoadGraphRows(ClientContext &context, GraphRowsState &state) {
@@ -437,6 +693,28 @@ TableFunction GqlGraphsFunction() {
 	TableFunction function("gql_graphs", {}, GraphsFunction);
 	function.bind = GraphsBind;
 	function.init_global = GraphsInit;
+	return function;
+}
+
+TableFunction GqlCreatePropertyIndexFunction() {
+	TableFunction function("gql_create_property_index", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                       CreatePropertyIndex);
+	function.bind = PropertyIndexBind;
+	function.init_global = SingleRowInit;
+	return function;
+}
+
+TableFunction GqlDropPropertyIndexFunction() {
+	TableFunction function("gql_drop_property_index", {LogicalType::VARCHAR, LogicalType::VARCHAR}, DropPropertyIndex);
+	function.bind = PropertyIndexBind;
+	function.init_global = SingleRowInit;
+	return function;
+}
+
+TableFunction GqlPropertyIndexesFunction() {
+	TableFunction function("gql_property_indexes", {}, PropertyIndexesFunction);
+	function.bind = PropertyIndexesBind;
+	function.init_global = PropertyIndexesInit;
 	return function;
 }
 

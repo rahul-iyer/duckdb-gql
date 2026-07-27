@@ -68,6 +68,15 @@ FROM gql_csr_stats('algo_graph')
 ----
 4	false	false	true
 
+query TIIIRRII rowsort
+SELECT edge_label, edge_count, outgoing_vertex_count, incoming_vertex_count,
+       avg_outgoing_degree, avg_incoming_degree,
+       max_outgoing_degree, max_incoming_degree
+FROM gql_csr_edge_stats('algo_graph')
+----
+express	1	1	1	1.0	1.0	1	1
+route	5	5	4	1.0	1.25	1	2
+
 query II rowsort
 CALL gql_neighbors('algo_graph', 1, 'out')
 ----
@@ -511,6 +520,42 @@ RETURN vertex_id, depth, parent_vertex_id, edge_id, visit_order
 3	1	1	2	3
 4	2	2	3	4
 5	3	4	5	5
+
+# GQL procedure calls expose the same label and target controls as the direct
+# BFS table function. Because target-aware BFS stops at the target level, the
+# maximum emitted depth is the exact shortest-path length.
+query I
+MATCH (seed:node)
+FILTER seed.name = 'one'
+CALL algo.bfs('algo_graph', element_id(seed), 'node', 'route', 4)
+YIELD depth
+RETURN depth
+ORDER BY depth DESC
+LIMIT 1
+----
+2
+
+query I
+MATCH (source:node), (target:node)
+FILTER source.name = 'one' AND target.name = 'four'
+CALL algo.shortest_path_length(
+    'algo_graph', element_id(source), element_id(target), 'Node', 'ROUTE'
+)
+YIELD distance
+RETURN distance
+----
+2
+
+query I
+MATCH (source:node), (target:node)
+FILTER source.name = 'one' AND target.name = 'isolated'
+CALL algo.shortest_path_length(
+    'algo_graph', element_id(source), element_id(target), 'node', 'route'
+)
+YIELD distance
+RETURN distance
+----
+-1
 
 query II
 MATCH (seed:node)

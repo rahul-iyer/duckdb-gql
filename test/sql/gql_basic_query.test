@@ -110,6 +110,23 @@ LIMIT 1
 ----
 Ada	1
 
+# ORDER BY may use a hidden key without changing the RETURN shape.
+query T
+MATCH (person:Person)
+RETURN person.name AS name
+ORDER BY person.age ASC
+----
+Ada
+Grace
+Ada
+
+statement error
+MATCH (person:Person)
+RETURN DISTINCT person.name AS name
+ORDER BY person.age ASC
+----
+<REGEX>:.*GQL ORDER BY expressions must appear in RETURN when DISTINCT or CALL is used.*
+
 query TTTTII rowsort
 MATCH (person:Person) WHERE person.name = 'Ada'
 RETURN LOWER(person.name) AS lower_name,
@@ -171,6 +188,40 @@ OPTIONAL MATCH (source)-[]->(middle), (middle)-[]->(destination)
 RETURN middle.name AS middle_name, destination.name AS destination_name
 ----
 Grace	Ada
+
+# TRAIL edge uniqueness is scoped to one path pattern. Independent patterns
+# in the same MATCH stage and a later MATCH stage may reuse the same edge.
+query II rowsort
+MATCH (source:Person)-[rel_one:KNOWS]->(destination:Person),
+      (source)-[rel_two:KNOWS]->(destination)
+RETURN element_id(rel_one), element_id(rel_two)
+----
+1	1
+2	2
+
+query II rowsort
+MATCH (source:Person)-[rel_one:KNOWS]->(destination:Person)
+MATCH (source)-[rel_two:KNOWS]->(destination)
+RETURN element_id(rel_one), element_id(rel_two)
+----
+1	1
+2	2
+
+query II rowsort
+MATCH (source:Person)-[rel_one:KNOWS]->(destination:Person)
+OPTIONAL MATCH (source)-[rel_two:KNOWS]->(destination)
+RETURN element_id(rel_one), element_id(rel_two)
+----
+1	1
+2	2
+
+query TTI
+MATCH (source:Person), (destination:Person)
+WHERE source.age = 42 AND destination.age = 30
+OPTIONAL MATCH (source)-[:KNOWS]->(middle:Person)-[:KNOWS]->(destination)
+RETURN source.name, middle.name, element_id(destination)
+----
+Ada	Grace	3
 
 query TT
 MATCH (source:Person) WHERE source.age = 42

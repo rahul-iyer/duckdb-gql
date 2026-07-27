@@ -12,6 +12,9 @@ TableFunction GqlCreateGraphFunction();
 TableFunction GqlDropGraphFunction();
 TableFunction GqlSetGraphFunction();
 TableFunction GqlGraphsFunction();
+TableFunction GqlCreatePropertyIndexFunction();
+TableFunction GqlDropPropertyIndexFunction();
+TableFunction GqlPropertyIndexesFunction();
 TableFunction GqlMutationControlFunction();
 string GqlGetSelectedGraph(ClientContext &context);
 

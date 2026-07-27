@@ -17,10 +17,10 @@ COPY (
 statement ok
 COPY (
     SELECT * FROM (VALUES
-        ('1', '2', 'KNOWS'),
-        ('2', '3', 'KNOWS'),
-        ('3', '4', 'KNOWS')
-    ) edges(":START_ID", ":END_ID", ":TYPE")
+        ('1', '2', 'KNOWS', 2020),
+        ('2', '3', 'KNOWS', 2021),
+        ('3', '4', 'KNOWS', 2022)
+    ) edges(":START_ID", ":END_ID", ":TYPE", "since:int")
 ) TO '__TEST_DIR__/gql_optimizer_edges.csv' (FORMAT CSV, HEADER)
 
 statement ok
@@ -202,15 +202,45 @@ Ada	Grace
 statement ok
 PRAGMA disable_profiling
 
-query II
+query III
 SELECT contains(lower(content), 'gql_csr_expand'),
-       contains(lower(content), 'graph_1_edges')
+       contains(lower(content), 'graph_1_edges'),
+       contains(lower(content), 'gql_vertex_fetch')
 FROM read_text('__TEST_DIR__/gql_csr_fixed_hop_plan.txt')
 ----
-true	false
+true	false	true
 
-# Returning the complete edge value requires properties from the canonical
-# edge table and deliberately retains the ordinary table-backed path.
+# A same-stage topology chain uses CSR only for its selective first frontier.
+# The next edge remains relational so DuckDB can scan and reorder the broad
+# frontier in bulk instead of nesting lateral delimiter joins.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_bulk_frontier_plan.txt'
+
+query TTT rowsort
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[:KNOWS]->{1,2}(middle:Person),
+      (middle)-[:KNOWS]->(destination:Person)
+RETURN source.name, middle.name, destination.name
+----
+Ada	Grace	Linus
+Ada	Linus	Edsger
+
+statement ok
+PRAGMA disable_profiling
+
+query III
+SELECT contains(lower(content), 'gql_csr_path_expand'),
+       contains(lower(content), 'graph_1_edges'),
+       contains(lower(content), 'gql_vertex_fetch')
+FROM read_text('__TEST_DIR__/gql_csr_bulk_frontier_plan.txt')
+----
+true	false	false
+
+# Returning the complete edge value uses CSR to generate candidate edge IDs,
+# then directly fetches their authoritative canonical rows.
 statement ok
 PRAGMA enable_profiling = 'query_tree'
 
@@ -225,12 +255,40 @@ RETURN relationship
 statement ok
 PRAGMA disable_profiling
 
-query II
+query III
 SELECT contains(lower(content), 'gql_csr_expand'),
-       contains(lower(content), 'graph_1_edges')
+       contains(lower(content), 'graph_1_edges'),
+       contains(lower(content), 'gql_edge_fetch')
 FROM read_text('__TEST_DIR__/gql_csr_edge_value_fallback_plan.txt')
 ----
-false	true
+true	false	true
+
+# A scalar edge-property predicate uses the same hybrid path and reads the
+# property from canonical storage after CSR candidate generation.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_edge_property_plan.txt'
+
+query TI
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[relationship:KNOWS]->(destination:Person)
+WHERE relationship.since = 2020
+RETURN destination.name, relationship.since
+----
+Grace	2020
+
+statement ok
+PRAGMA disable_profiling
+
+query III
+SELECT contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'graph_1_edges'),
+       contains(lower(content), 'gql_edge_fetch')
+FROM read_text('__TEST_DIR__/gql_csr_edge_property_plan.txt')
+----
+true	false	true
 
 query II
 EXPLAIN CALL algo.degree('optimizer_plan')
@@ -265,8 +323,8 @@ FROM read_text('__TEST_DIR__/gql_csr_stale_fallback_plan.txt')
 ----
 false	false
 
-# Broad labels stay on the native list path. A posting scan is selected only
-# when its exact CSR cardinality is small enough to reduce the candidate set.
+# Posting access requires both a point-like property predicate and a selective
+# label. Label-only scans remain ordinary native-list scans.
 statement ok
 COPY (
     SELECT CAST(i AS VARCHAR) AS ":ID",
@@ -317,6 +375,32 @@ FROM read_text('__TEST_DIR__/gql_csr_broad_label_plan.txt')
 ----
 false	true
 
+# Even with a literal equality predicate, a broad label whose exact posting
+# cardinality exceeds the optimizer threshold remains a native-list scan.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_csr_broad_point_label_plan.txt'
+
+query I
+MATCH (person:Person) WHERE person.metric = 1
+RETURN count(*)
+----
+1
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'),
+       contains(lower(content), 'list_contains')
+FROM read_text('__TEST_DIR__/gql_csr_broad_point_label_plan.txt')
+----
+false	true
+
+# A selective label plus a literal equality predicate chooses its exact CSR
+# posting and eliminates row-by-row label membership evaluation.
 statement ok
 PRAGMA enable_profiling = 'query_tree'
 
@@ -338,3 +422,42 @@ SELECT contains(lower(content), 'gql_csr_vertices'),
 FROM read_text('__TEST_DIR__/gql_csr_selective_label_plan.txt')
 ----
 true	false
+
+# A rebuilt CSR may still accelerate topology after a direct SQL write changes
+# the canonical-to-physical edge-ID mapping. The optimizer must keep canonical
+# edge properties on the scan fallback instead of deriving an invalid row ID.
+statement ok
+SESSION SET GRAPH optimizer_plan
+
+statement ok
+UPDATE gql_data.graph_1_edges
+SET __gql_edge_id = 10
+WHERE __gql_edge_id = 1
+
+statement ok
+CALL gql_build_csr('optimizer_plan')
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_edge_fetch_layout_fallback_plan.txt'
+
+query TI
+MATCH (source:Person) WHERE source.age = 42
+MATCH (source)-[relationship:KNOWS]->(destination:Person)
+WHERE relationship.since = 2020
+RETURN destination.name, relationship.since
+----
+Grace	2020
+
+statement ok
+PRAGMA disable_profiling
+
+query III
+SELECT contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'graph_1_edges'),
+       contains(lower(content), 'gql_edge_fetch')
+FROM read_text('__TEST_DIR__/gql_edge_fetch_layout_fallback_plan.txt')
+----
+true	true	false

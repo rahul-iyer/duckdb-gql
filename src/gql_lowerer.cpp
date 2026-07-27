@@ -6,6 +6,7 @@
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/positional_reference_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
@@ -16,14 +17,9 @@
 
 namespace duckdb {
 
-// The table-function executor still accepts the original flattened MATCH
-// payload. Keep that representation at this compatibility boundary; the
-// binder and all future optimizer passes operate on the ordered logical tree.
 struct GqlCompatibilityMatch {
 	vector<GqlBoundPattern> patterns;
 	vector<shared_ptr<GqlBoundExpression>> predicates;
-	vector<shared_ptr<GqlBoundExpression>> optional_predicates;
-	vector<idx_t> optional_predicate_stages;
 	idx_t binding_count = 0;
 	bool optional = false;
 };
@@ -36,25 +32,14 @@ static void FlattenMatchStage(const shared_ptr<GqlLogicalOperator> &operation, b
 	if (operation->type == GqlLogicalOperatorType::FILTER) {
 		const auto &filter = operation->Cast<GqlLogicalFilter>();
 		FlattenMatchStage(filter.child, optional, optional_stage, result);
-		if (optional && optional_stage > 0) {
-			result.optional_predicates.push_back(filter.predicate);
-			result.optional_predicate_stages.push_back(optional_stage);
-		} else {
-			result.predicates.push_back(filter.predicate);
-		}
+		result.predicates.push_back(filter.predicate);
 		return;
 	}
 	if (operation->type != GqlLogicalOperatorType::MATCH || operation->child) {
 		throw InternalException("GQL APPLY right side must be one MATCH stage");
 	}
 	const auto &match = operation->Cast<GqlLogicalMatch>();
-	if (match.patterns.empty()) {
-		throw InternalException("GQL logical MATCH stage has no patterns");
-	}
 	for (const auto &source_pattern : match.patterns) {
-		if (source_pattern.optional || source_pattern.optional_stage > 0) {
-			throw InternalException("GQL logical MATCH contains compatibility optional metadata");
-		}
 		auto pattern = source_pattern;
 		pattern.optional = optional;
 		pattern.optional_stage = optional ? optional_stage : 0;
@@ -70,12 +55,10 @@ static void FlattenMatchPipeline(const shared_ptr<GqlLogicalOperator> &operation
 	case GqlLogicalOperatorType::MATCH:
 		FlattenMatchStage(operation, false, 0, result);
 		return;
-	case GqlLogicalOperatorType::FILTER: {
-		const auto &filter = operation->Cast<GqlLogicalFilter>();
-		FlattenMatchPipeline(filter.child, result);
-		result.predicates.push_back(filter.predicate);
+	case GqlLogicalOperatorType::FILTER:
+		FlattenMatchPipeline(operation->child, result);
+		result.predicates.push_back(operation->Cast<GqlLogicalFilter>().predicate);
 		return;
-	}
 	case GqlLogicalOperatorType::INNER_APPLY: {
 		const auto &apply = operation->Cast<GqlLogicalInnerApply>();
 		FlattenMatchPipeline(apply.child, result);
@@ -85,29 +68,22 @@ static void FlattenMatchPipeline(const shared_ptr<GqlLogicalOperator> &operation
 	case GqlLogicalOperatorType::LEFT_APPLY: {
 		const auto &apply = operation->Cast<GqlLogicalLeftApply>();
 		if (apply.child && apply.child->type == GqlLogicalOperatorType::UNIT) {
-			if (apply.child->child || apply.optional_stage != 0 || !result.patterns.empty()) {
-				throw InternalException("Invalid leading GQL LEFT_APPLY");
-			}
 			result.optional = true;
 		} else {
-			if (apply.optional_stage == 0) {
-				throw InternalException("Nested GQL LEFT_APPLY has no optional stage");
-			}
 			FlattenMatchPipeline(apply.child, result);
 		}
 		FlattenMatchStage(apply.right, true, apply.optional_stage, result);
 		return;
 	}
 	case GqlLogicalOperatorType::UNIT:
-		throw InternalException("GQL UNIT is only valid below a leading LEFT_APPLY");
 	case GqlLogicalOperatorType::PROJECT:
 	case GqlLogicalOperatorType::CALL:
-		throw InternalException("Nested GQL projection in MATCH pipeline");
+		throw InternalException("Invalid operator in GQL MATCH compatibility pipeline");
 	}
 	throw InternalException("Unknown GQL logical operator");
 }
 
-static void FindRecursivePattern(const shared_ptr<GqlLogicalOperator> &operation,
+static void FindUnboundedPattern(const shared_ptr<GqlLogicalOperator> &operation,
                                  const GqlBoundPatternElement *&recursive_edge,
                                  const GqlBoundPattern *&recursive_pattern) {
 	if (!operation) {
@@ -129,11 +105,11 @@ static void FindRecursivePattern(const shared_ptr<GqlLogicalOperator> &operation
 		}
 		return;
 	}
-	FindRecursivePattern(operation->child, recursive_edge, recursive_pattern);
+	FindUnboundedPattern(operation->child, recursive_edge, recursive_pattern);
 	if (operation->type == GqlLogicalOperatorType::INNER_APPLY) {
-		FindRecursivePattern(operation->Cast<GqlLogicalInnerApply>().right, recursive_edge, recursive_pattern);
+		FindUnboundedPattern(operation->Cast<GqlLogicalInnerApply>().right, recursive_edge, recursive_pattern);
 	} else if (operation->type == GqlLogicalOperatorType::LEFT_APPLY) {
-		FindRecursivePattern(operation->Cast<GqlLogicalLeftApply>().right, recursive_edge, recursive_pattern);
+		FindUnboundedPattern(operation->Cast<GqlLogicalLeftApply>().right, recursive_edge, recursive_pattern);
 	}
 }
 
@@ -222,8 +198,7 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 	const auto &project = plan.root->Cast<GqlLogicalProject>();
 	const GqlBoundPatternElement *recursive_edge = nullptr;
 	const GqlBoundPattern *recursive_pattern = nullptr;
-	FindRecursivePattern(project.child, recursive_edge, recursive_pattern);
-
+	FindUnboundedPattern(project.child, recursive_edge, recursive_pattern);
 	vector<Value> projection_programs;
 	vector<Value> projection_names;
 	for (const auto &projection : project.projections) {
@@ -239,67 +214,60 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 		order_descending.emplace_back(order.descending);
 		order_nulls.emplace_back(Value::UTINYINT(order.null_order_specified ? (order.nulls_first ? 1 : 2) : 0));
 	}
-	auto append_result_modifiers = [&](vector<Value> &parameters, bool optional) {
-		parameters.emplace_back(optional);
-		parameters.emplace_back(project.distinct);
-		parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, order_indices));
-		parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, order_descending));
-		parameters.emplace_back(Value::LIST(LogicalType::UTINYINT, order_nulls));
-		parameters.emplace_back(project.has_limit);
-		parameters.emplace_back(Value::UBIGINT(project.limit));
-		parameters.emplace_back(project.has_offset);
-		parameters.emplace_back(Value::UBIGINT(project.offset));
-	};
-
 	if (recursive_edge) {
 		GqlCompatibilityMatch match;
 		match.binding_count = plan.binding_count;
 		FlattenMatchPipeline(project.child, match);
-		vector<Value> filter_programs;
-		for (const auto &predicate : match.predicates) {
-			filter_programs.push_back(GqlSerializeExpression(*predicate));
-		}
-		if (match.patterns.size() != 1 || !recursive_pattern || recursive_pattern->elements.size() != 3 ||
-		    recursive_pattern->elements[1].type != GqlPatternElementType::EDGE ||
-		    &recursive_pattern->elements[1] != recursive_edge) {
-			throw NotImplementedException("Unbounded quantified GQL paths combined "
-			                              "with other pattern factors or patterns");
-		}
-		const auto &source = recursive_pattern->elements[0];
-		const auto &target = recursive_pattern->elements[2];
-		vector<Value> source_labels;
-		vector<Value> edge_labels;
-		vector<Value> target_labels;
-		for (const auto &label : source.labels) {
-			source_labels.emplace_back(label);
-		}
-		for (const auto &label : recursive_edge->labels) {
-			edge_labels.emplace_back(label);
-		}
-		for (const auto &label : target.labels) {
-			target_labels.emplace_back(label);
-		}
+		if (match.patterns.size() == 1 && recursive_pattern && recursive_pattern->elements.size() == 3 &&
+		    recursive_pattern->elements[1].type == GqlPatternElementType::EDGE &&
+		    &recursive_pattern->elements[1] == recursive_edge) {
+			vector<Value> filter_programs;
+			for (const auto &predicate : match.predicates) {
+				filter_programs.push_back(GqlSerializeExpression(*predicate));
+			}
+			const auto &source = recursive_pattern->elements[0];
+			const auto &target = recursive_pattern->elements[2];
+			vector<Value> source_labels;
+			vector<Value> edge_labels;
+			vector<Value> target_labels;
+			for (const auto &label : source.labels) {
+				source_labels.emplace_back(label);
+			}
+			for (const auto &label : recursive_edge->labels) {
+				edge_labels.emplace_back(label);
+			}
+			for (const auto &label : target.labels) {
+				target_labels.emplace_back(label);
+			}
 
-		ParserExtensionPlanResult result;
-		result.requires_valid_transaction = true;
-		result.return_type = StatementReturnType::QUERY_RESULT;
-		result.function = GqlRecursiveMatchFunction();
-		result.parameters.emplace_back(Value::UBIGINT(match.binding_count));
-		result.parameters.emplace_back(Value::UBIGINT(source.binding_index));
-		result.parameters.emplace_back(Value::UBIGINT(recursive_edge->binding_index));
-		result.parameters.emplace_back(Value::UBIGINT(target.binding_index));
-		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(source_labels)));
-		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(edge_labels)));
-		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(target_labels)));
-		result.parameters.emplace_back(recursive_edge->edge_direction == GqlEdgeDirection::LEFT);
-		result.parameters.emplace_back(Value::UBIGINT(recursive_edge->minimum_repetitions));
-		result.parameters.emplace_back(Value::LIST(GqlExpressionProgramType(), std::move(projection_programs)));
-		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(projection_names)));
-		result.parameters.emplace_back(Value::LIST(GqlExpressionProgramType(), std::move(filter_programs)));
-		append_result_modifiers(result.parameters, match.optional);
-		return result;
+			ParserExtensionPlanResult result;
+			result.requires_valid_transaction = true;
+			result.return_type = StatementReturnType::QUERY_RESULT;
+			result.function = GqlRecursiveMatchFunction();
+			result.parameters.emplace_back(Value::UBIGINT(match.binding_count));
+			result.parameters.emplace_back(Value::UBIGINT(source.binding_index));
+			result.parameters.emplace_back(Value::UBIGINT(recursive_edge->binding_index));
+			result.parameters.emplace_back(Value::UBIGINT(target.binding_index));
+			result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(source_labels)));
+			result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(edge_labels)));
+			result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(target_labels)));
+			result.parameters.emplace_back(recursive_edge->edge_direction == GqlEdgeDirection::LEFT);
+			result.parameters.emplace_back(Value::UBIGINT(recursive_edge->minimum_repetitions));
+			result.parameters.emplace_back(Value::LIST(GqlExpressionProgramType(), std::move(projection_programs)));
+			result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(projection_names)));
+			result.parameters.emplace_back(Value::LIST(GqlExpressionProgramType(), std::move(filter_programs)));
+			result.parameters.emplace_back(match.optional);
+			result.parameters.emplace_back(project.distinct);
+			result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, order_indices));
+			result.parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, order_descending));
+			result.parameters.emplace_back(Value::LIST(LogicalType::UTINYINT, order_nulls));
+			result.parameters.emplace_back(project.has_limit);
+			result.parameters.emplace_back(Value::UBIGINT(project.limit));
+			result.parameters.emplace_back(project.has_offset);
+			result.parameters.emplace_back(Value::UBIGINT(project.offset));
+			return result;
+		}
 	}
-
 	GqlSerializedLogicalProgram program;
 	program.root = SerializeLogicalNode(project.child, program);
 	vector<Value> pattern_sizes;
@@ -307,6 +275,10 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 	vector<Value> binding_indices;
 	vector<Value> labels;
 	vector<Value> reverses;
+	vector<Value> quantified;
+	vector<Value> unbounded;
+	vector<Value> minimum_repetitions;
+	vector<Value> maximum_repetitions;
 	for (const auto &pattern : program.patterns) {
 		pattern_sizes.emplace_back(Value::UBIGINT(pattern.elements.size()));
 		for (const auto &element : pattern.elements) {
@@ -314,6 +286,10 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 			binding_indices.emplace_back(Value::UBIGINT(element.binding_index));
 			labels.emplace_back(StringUtil::Join(element.labels, ";"));
 			reverses.emplace_back(element.edge_direction == GqlEdgeDirection::LEFT);
+			quantified.emplace_back(element.quantified);
+			unbounded.emplace_back(element.unbounded);
+			minimum_repetitions.emplace_back(Value::UBIGINT(element.minimum_repetitions));
+			maximum_repetitions.emplace_back(Value::UBIGINT(element.maximum_repetitions));
 		}
 	}
 
@@ -327,6 +303,10 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 	result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(binding_indices)));
 	result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(labels)));
 	result.parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, std::move(reverses)));
+	result.parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, std::move(quantified)));
+	result.parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, std::move(unbounded)));
+	result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(minimum_repetitions)));
+	result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(maximum_repetitions)));
 	result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(program.match_pattern_counts)));
 	result.parameters.emplace_back(Value::LIST(LogicalType::UTINYINT, std::move(program.node_types)));
 	result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(program.child_indices)));
@@ -439,7 +419,18 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 
 	auto select = make_uniq<SelectNode>();
 	select->from_table = std::move(function_ref);
-	select->select_list.push_back(make_uniq<StarExpression>());
+	auto visible_count = project.visible_projection_count == DConstants::INVALID_INDEX
+	                         ? project.projections.size()
+	                         : project.visible_projection_count;
+	if (visible_count == project.projections.size()) {
+		select->select_list.push_back(make_uniq<StarExpression>());
+	} else {
+		for (idx_t index = 0; index < visible_count; index++) {
+			auto expression = make_uniq<ColumnRefExpression>(project.projections[index].name);
+			expression->SetAlias(project.projections[index].name);
+			select->select_list.push_back(std::move(expression));
+		}
+	}
 	return std::move(select);
 }
 
@@ -452,11 +443,70 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 		statement->node = LowerSelectNode(plans[0]);
 		return std::move(statement);
 	}
+
+	const auto &first_project = plans[0].root->Cast<GqlLogicalProject>();
+	auto distinct = first_project.distinct;
+	auto order_by = first_project.order_by;
+	auto has_limit = first_project.has_limit;
+	auto limit = first_project.limit;
+	auto has_offset = first_project.has_offset;
+	auto offset = first_project.offset;
+	for (auto &plan : plans) {
+		if (!plan.root || plan.root->type != GqlLogicalOperatorType::PROJECT) {
+			throw InternalException("GQL alternative must end in projection");
+		}
+		auto &project = plan.root->Cast<GqlLogicalProject>();
+		if (project.distinct != distinct || project.order_by.size() != order_by.size() ||
+		    project.has_limit != has_limit || project.limit != limit || project.has_offset != has_offset ||
+		    project.offset != offset) {
+			throw InternalException("GQL alternatives have inconsistent result modifiers");
+		}
+		for (idx_t index = 0; index < order_by.size(); index++) {
+			const auto &expected = order_by[index];
+			const auto &actual = project.order_by[index];
+			if (actual.projection_index != expected.projection_index || actual.descending != expected.descending ||
+			    actual.null_order_specified != expected.null_order_specified ||
+			    actual.nulls_first != expected.nulls_first) {
+				throw InternalException("GQL alternatives have inconsistent ordering");
+			}
+		}
+		project.distinct = false;
+		project.order_by.clear();
+		project.has_limit = false;
+		project.limit = 0;
+		project.has_offset = false;
+		project.offset = 0;
+	}
+
 	auto set_operation = make_uniq<SetOperationNode>();
 	set_operation->setop_type = SetOperationType::UNION;
 	set_operation->setop_all = true;
 	for (const auto &plan : plans) {
 		set_operation->children.push_back(LowerSelectNode(plan));
+	}
+	if (distinct) {
+		set_operation->modifiers.push_back(make_uniq<DistinctModifier>());
+	}
+	if (!order_by.empty()) {
+		auto order = make_uniq<OrderModifier>();
+		for (const auto &entry : order_by) {
+			order->orders.emplace_back(entry.descending ? OrderType::DESCENDING : OrderType::ASCENDING,
+			                           entry.null_order_specified ? (entry.nulls_first ? OrderByNullType::NULLS_FIRST
+			                                                                           : OrderByNullType::NULLS_LAST)
+			                                                      : OrderByNullType::ORDER_DEFAULT,
+			                           make_uniq<PositionalReferenceExpression>(entry.projection_index + 1));
+		}
+		set_operation->modifiers.push_back(std::move(order));
+	}
+	if (has_limit || has_offset) {
+		auto result_limit = make_uniq<LimitModifier>();
+		if (has_limit) {
+			result_limit->limit = make_uniq<ConstantExpression>(Value::UBIGINT(limit));
+		}
+		if (has_offset) {
+			result_limit->offset = make_uniq<ConstantExpression>(Value::UBIGINT(offset));
+		}
+		set_operation->modifiers.push_back(std::move(result_limit));
 	}
 	statement->node = std::move(set_operation);
 	return std::move(statement);

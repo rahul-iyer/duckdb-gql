@@ -98,8 +98,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlNeighborsFunction());
 	loader.RegisterFunction(GqlCsrVerticesFunction());
 	loader.RegisterFunction(GqlCsrExpandFunction());
+	loader.RegisterFunction(GqlCsrPathExpandFunction());
+	loader.RegisterFunction(GqlVertexFetchFunction());
+	loader.RegisterFunction(GqlEdgeFetchFunction());
 	loader.RegisterFunction(GqlBuildCsrFunction());
 	loader.RegisterFunction(GqlCsrStatsFunction());
+	loader.RegisterFunction(GqlCsrEdgeStatsFunction());
+	loader.RegisterFunction(GqlCreatePropertyIndexFunction());
+	loader.RegisterFunction(GqlDropPropertyIndexFunction());
+	loader.RegisterFunction(GqlPropertyIndexesFunction());
 	RegisterAlgorithmFunctions(loader);
 	loader.RegisterFunction(GqlRelationalMatchFunction());
 	loader.RegisterFunction(GqlRecursiveMatchFunction());

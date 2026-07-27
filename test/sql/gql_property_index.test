@@ -1,0 +1,208 @@
+# name: test/sql/gql_property_index.test
+# description: Persistent DuckDB ART indexes provide graph property point access
+# group: [gql]
+
+load __TEST_DIR__/gql_property_index.db
+
+require duckgql
+
+statement ok
+COPY (
+    SELECT 'p' || CAST(i AS VARCHAR) AS "external_id:ID(PropertyIndex)",
+           i::BIGINT AS "id:long",
+           'person-' || CAST(i AS VARCHAR) AS "payload:string",
+           'Person' AS ":LABEL"
+    FROM range(1, 2049) values(i)
+    UNION ALL
+    SELECT 'm' || CAST(i AS VARCHAR) AS "external_id:ID(PropertyIndex)",
+           i::BIGINT AS "id:long",
+           'message-' || CAST(i AS VARCHAR) AS "payload:string",
+           'Message' AS ":LABEL"
+    FROM range(1, 2049) values(i)
+) TO '__TEST_DIR__/gql_property_index_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS')
+    ) edges(":START_ID(PropertyIndex)", ":END_ID(PropertyIndex)", ":TYPE")
+) TO '__TEST_DIR__/gql_property_index_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH property_index ANY
+
+statement ok
+COPY GRAPH property_index FROM (
+    VERTICES '__TEST_DIR__/gql_property_index_vertices.csv',
+    EDGES '__TEST_DIR__/gql_property_index_edges.csv'
+) FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH property_index
+
+# The label predicate prevents DuckDB from choosing ART before the graph
+# property has been registered as an optimizer access path.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_property_before_index_plan.txt'
+
+query T
+MATCH (person:Person) WHERE person.id = 777
+RETURN person.payload
+----
+person-777
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT contains(content, 'Type: Sequential Scan')
+FROM read_text('__TEST_DIR__/gql_property_before_index_plan.txt')
+----
+true
+
+query TTTT
+CALL gql_create_property_index('property_index', 'id')
+----
+true	property_index	id	gql_property_index_1
+
+# Creation is idempotent and retains one physical ART index and one catalog
+# registration.
+query TTTT
+CALL gql_create_property_index('property_index', 'ID')
+----
+true	property_index	id	gql_property_index_1
+
+query TTTTTT
+SELECT graph_name, property_name, index_name, schema_name, table_name, column_name
+FROM gql_property_indexes()
+----
+property_index	id	gql_property_index_1	gql_data	graph_1_vertices	id
+
+query II
+SELECT count(*), count(*) FILTER (WHERE index_name = 'gql_property_index_1')
+FROM duckdb_indexes()
+----
+1	1
+
+# Both the DuckDB index and DuckGQL catalog registration survive reconnect.
+restart
+
+statement ok
+SESSION SET GRAPH property_index
+
+query II
+SELECT count(*), count(*) FILTER (WHERE index_name = 'gql_property_index_1')
+FROM gql_property_indexes()
+----
+1	1
+
+# The optimizer materializes the indexed equality candidates before applying
+# multi-label membership. Equal property values on another label stay excluded.
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_property_index_plan.txt'
+
+query T
+MATCH (person:Person) WHERE person.id = 777
+RETURN person.payload
+----
+person-777
+
+statement ok
+PRAGMA disable_profiling
+
+query II
+SELECT contains(content, 'Type: Index Scan'),
+       contains(lower(content), 'gql_csr_vertices')
+FROM read_text('__TEST_DIR__/gql_property_index_plan.txt')
+----
+true	false
+
+# An equality below OR is not a safe candidate restriction.
+query I rowsort
+MATCH (person:Person) WHERE person.id = 1 OR person.id = 2
+RETURN person.id
+----
+1
+2
+
+# Property lookup seeds a same-stage fixed-hop CSR expansion.
+statement ok
+CALL gql_build_csr('property_index')
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/gql_property_index_csr_plan.txt'
+
+query T
+MATCH (source:Person)-[:KNOWS]->(target:Person)
+WHERE source.id = 1
+RETURN target.payload
+----
+person-2
+
+statement ok
+PRAGMA disable_profiling
+
+query III
+SELECT contains(content, 'Type: Index Scan'),
+       contains(lower(content), 'gql_csr_expand'),
+       contains(lower(content), 'graph_1_edges')
+FROM read_text('__TEST_DIR__/gql_property_index_csr_plan.txt')
+----
+true	true	false
+
+# DuckDB maintains the ART index for direct writes to the authoritative table.
+statement ok
+UPDATE gql_data.graph_1_vertices SET id = 9000 WHERE payload = 'person-777'
+
+query T
+MATCH (person:Person) WHERE person.id = 9000
+RETURN person.payload
+----
+person-777
+
+statement error
+CALL gql_create_property_index('property_index', 'missing')
+----
+<REGEX>:.*has no vertex property 'missing'.*
+
+query TTTT
+CALL gql_drop_property_index('property_index', 'id')
+----
+true	property_index	id	gql_property_index_1
+
+query I
+SELECT count(*) FROM gql_property_indexes()
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_indexes()
+----
+0
+
+# Dropping is idempotent.
+query TTT
+SELECT success, graph_name, property_name
+FROM gql_drop_property_index('property_index', 'id')
+----
+true	property_index	id
+
+statement ok
+BEGIN
+
+statement error
+CALL gql_create_property_index('property_index', 'id')
+----
+<REGEX>:.*not eligible inside an explicit transaction.*
+
+statement ok
+ROLLBACK

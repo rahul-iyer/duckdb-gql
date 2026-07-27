@@ -235,6 +235,16 @@ static void LoadProperties(Connection &connection, GqlElementTableBinding &table
 	}
 }
 
+static void LoadPropertyIndexes(Connection &connection, GqlElementTableBinding &table) {
+	auto result = GqlQuery(connection, "SELECT property_name, index_name FROM "
+	                                   "gql_internal.graph_property_indexes WHERE element_table_id = " +
+	                                       to_string(table.element_table_id));
+	for (idx_t row = 0; row < result->RowCount(); row++) {
+		table.property_indexes.emplace(result->GetValue(0, row).GetValue<string>(),
+		                               result->GetValue(1, row).GetValue<string>());
+	}
+}
+
 static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
 	auto result = GqlQuery(connection, "SELECT mapping_kind, column_name FROM "
 	                                   "gql_internal.graph_label_mappings WHERE "
@@ -289,6 +299,7 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 		target->ownership = tables->GetValue(6, row).GetValue<string>();
 		LoadLabel(connection, *target);
 		LoadProperties(connection, *target);
+		LoadPropertyIndexes(connection, *target);
 	}
 
 	auto endpoints = GqlQuery(connection, "SELECT source_vertex_table_id, target_vertex_table_id, source_columns, "

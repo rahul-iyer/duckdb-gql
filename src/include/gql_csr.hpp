@@ -156,6 +156,14 @@ private:
 	vector<uint32_t> explicit_values;
 };
 
+struct GqlCsrEdgeLabelStats {
+	uint64_t edge_count = 0;
+	uint64_t outgoing_vertex_count = 0;
+	uint64_t incoming_vertex_count = 0;
+	uint64_t max_outgoing_degree = 0;
+	uint64_t max_incoming_degree = 0;
+};
+
 struct GqlCsrSnapshot {
 	uint64_t graph_id;
 	uint64_t graph_version;
@@ -165,6 +173,8 @@ struct GqlCsrSnapshot {
 	string vertex_table_key;
 	string edge_table_key;
 	bool dense_vertex_ids = false;
+	bool vertex_ids_match_rowids = false;
+	bool edge_ids_match_rowids = false;
 	GqlCsrVertexIds vertex_ids;
 	unordered_map<uint64_t, idx_t> ordinal_by_id;
 	vector<idx_t> vertex_label_offsets;
@@ -180,6 +190,7 @@ struct GqlCsrSnapshot {
 	vector<uint64_t> incoming_edge_ids;
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
+	vector<GqlCsrEdgeLabelStats> edge_label_stats;
 	bool edge_labels_single = true;
 	idx_t topology_bytes = 0;
 	idx_t identity_bytes = 0;
@@ -211,7 +222,11 @@ void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);
 TableFunction GqlNeighborsFunction();
 TableFunction GqlCsrVerticesFunction();
 TableFunction GqlCsrExpandFunction();
+TableFunction GqlCsrPathExpandFunction();
+TableFunction GqlVertexFetchFunction();
+TableFunction GqlEdgeFetchFunction();
 TableFunction GqlBuildCsrFunction();
 TableFunction GqlCsrStatsFunction();
+TableFunction GqlCsrEdgeStatsFunction();
 
 } // namespace duckdb

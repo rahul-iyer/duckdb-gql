@@ -32,7 +32,9 @@ static const vector<GqlProcedureDefinition> &AlgorithmProcedures() {
 	     GqlProcedureInputMode::BATCH,
 	     {{"graph", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION},
 	      {"frontier", {GqlTypeId::ELEMENT_ID, false}, GqlProcedureArgumentMode::INPUT},
-	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
+	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true},
+	      {"edge_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true},
+	      {"target_vertex_id", {GqlTypeId::INTEGER, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
 	     {{"vertex_id", {GqlTypeId::ELEMENT_ID, false}},
 	      {"depth", {GqlTypeId::INTEGER, false}},
 	      {"parent_vertex_id", {GqlTypeId::ELEMENT_ID, true}},
@@ -54,12 +56,23 @@ static const vector<GqlProcedureDefinition> &AlgorithmProcedures() {
 	     GqlProcedureInputMode::BATCH,
 	     {{"graph", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION},
 	      {"source", {GqlTypeId::ELEMENT_ID, false}, GqlProcedureArgumentMode::INPUT},
-	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
+	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true},
+	      {"edge_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true},
+	      {"target_vertex_id", {GqlTypeId::INTEGER, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
 	     {{"vertex_id", {GqlTypeId::ELEMENT_ID, false}},
 	      {"distance", {GqlTypeId::INTEGER, false}},
 	      {"parent_vertex_id", {GqlTypeId::ELEMENT_ID, true}},
 	      {"edge_id", {GqlTypeId::ELEMENT_ID, true}},
 	      {"settled_order", {GqlTypeId::INTEGER, false}}}},
+	    {"algo",
+	     "shortest_path_length",
+	     GqlProcedureInputMode::BATCH,
+	     {{"graph", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION},
+	      {"source", {GqlTypeId::ELEMENT_ID, false}, GqlProcedureArgumentMode::INPUT},
+	      {"target", {GqlTypeId::ELEMENT_ID, false}, GqlProcedureArgumentMode::INPUT},
+	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true},
+	      {"edge_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
+	     {{"distance", {GqlTypeId::INTEGER, false}}}},
 	    {"algo",
 	     "pagerank",
 	     GqlProcedureInputMode::NONE,
@@ -241,7 +254,7 @@ static uint32_t ResolveLabel(const GqlCsrSnapshot &snapshot, const string &label
 	if (!filter_label) {
 		return 0;
 	}
-	auto label = snapshot.label_ids.find(label_name);
+	auto label = snapshot.label_ids.find(StringUtil::Lower(label_name));
 	return label == snapshot.label_ids.end() ? std::numeric_limits<uint32_t>::max() : label->second;
 }
 
@@ -1516,6 +1529,8 @@ struct AlgorithmCallGlobalState : GlobalTableFunctionState {
 
 	bool initialized = false;
 	vector<uint64_t> frontier;
+	vector<uint64_t> targets;
+	bool shortest_path_done = false;
 	unique_ptr<FunctionData> nested_bind_data;
 	unique_ptr<GlobalTableFunctionState> nested_global_state;
 };
@@ -1796,8 +1811,12 @@ static unique_ptr<FunctionData> AlgorithmCallBind(ClientContext &, TableFunction
 		literal.type = literal_type;
 		literal.value = values[configuration_index++];
 		if (literal_type == GqlLiteralType::NULL_VALUE ||
-		    (argument.type.id == GqlTypeId::STRING && literal_type != GqlLiteralType::STRING)) {
+		    (argument.type.id == GqlTypeId::STRING && literal_type != GqlLiteralType::STRING) ||
+		    (argument.type.id == GqlTypeId::INTEGER && literal_type != GqlLiteralType::INTEGER)) {
 			throw BinderException("Invalid configuration for GQL procedure 'algo.%s'", procedure_name);
+		}
+		if (argument.type.id == GqlTypeId::INTEGER && std::stoll(literal.value) < 0) {
+			throw BinderException("GQL procedure configuration '%s' must be non-negative", argument.name);
 		}
 		result->configuration.push_back(std::move(literal));
 	}
@@ -1806,7 +1825,12 @@ static unique_ptr<FunctionData> AlgorithmCallBind(ClientContext &, TableFunction
 		// Algorithm ordinals/counts are non-negative and their hot writers use
 		// uint64_t arrays. Keep that physical representation while the GQL binder
 		// continues to expose the values as semantic INTEGERs.
-		return_types.push_back(output.type.id == GqlTypeId::INTEGER ? LogicalType::UBIGINT : GqlDuckType(output.type));
+		if (definition->name == "shortest_path_length" && output.name == "distance") {
+			return_types.push_back(LogicalType::BIGINT);
+		} else {
+			return_types.push_back(output.type.id == GqlTypeId::INTEGER ? LogicalType::UBIGINT
+			                                                            : GqlDuckType(output.type));
+		}
 	}
 	return std::move(result);
 }
@@ -1828,7 +1852,9 @@ static OperatorResultType AlgorithmCallInput(ExecutionContext &, TableFunctionIn
 	if (data.definition->input_mode == GqlProcedureInputMode::NONE) {
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
-	if (data.definition->input_mode != GqlProcedureInputMode::BATCH || child.ColumnCount() != 1) {
+	auto shortest_path = data.definition->name == "shortest_path_length";
+	auto expected_columns = shortest_path ? 2 : 1;
+	if (data.definition->input_mode != GqlProcedureInputMode::BATCH || child.ColumnCount() != expected_columns) {
 		throw InternalException("Invalid runtime input for GQL procedure node");
 	}
 	for (idx_t row = 0; row < child.size(); row++) {
@@ -1837,8 +1863,72 @@ static OperatorResultType AlgorithmCallInput(ExecutionContext &, TableFunctionIn
 			continue;
 		}
 		state.frontier.push_back(value.DefaultCastAs(LogicalType::UBIGINT).GetValue<uint64_t>());
+		if (shortest_path) {
+			auto target = child.data[1].GetValue(row);
+			if (target.IsNull()) {
+				state.frontier.pop_back();
+				continue;
+			}
+			state.targets.push_back(target.DefaultCastAs(LogicalType::UBIGINT).GetValue<uint64_t>());
+		}
 	}
 	return OperatorResultType::NEED_MORE_INPUT;
+}
+
+static int64_t ComputeShortestPathLength(ClientContext &context, const AlgorithmCallBindData &data,
+                                         AlgorithmCallGlobalState &state) {
+	std::sort(state.frontier.begin(), state.frontier.end());
+	state.frontier.erase(std::unique(state.frontier.begin(), state.frontier.end()), state.frontier.end());
+	std::sort(state.targets.begin(), state.targets.end());
+	state.targets.erase(std::unique(state.targets.begin(), state.targets.end()), state.targets.end());
+	if (state.frontier.size() != 1 || state.targets.size() != 1) {
+		throw InvalidInputException(
+		    "GQL shortest_path_length requires exactly one source and one target; found %llu and %llu",
+		    static_cast<unsigned long long>(state.frontier.size()),
+		    static_cast<unsigned long long>(state.targets.size()));
+	}
+
+	auto snapshot = GqlGetCsrSnapshot(context, data.configuration[0].value);
+	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
+	auto edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
+	idx_t projected_count;
+	auto vertex_mask = BuildVertexMask(*snapshot, vertex_label, projected_count);
+	auto source = RequireProjectedVertex(*snapshot, vertex_mask, state.frontier[0], "source");
+	auto target = RequireProjectedVertex(*snapshot, vertex_mask, state.targets[0], "target");
+	if (source == target) {
+		return 0;
+	}
+	bool filter_label;
+	auto required_label = ResolveLabel(*snapshot, edge_label, filter_label);
+	vector<uint8_t> visited(snapshot->vertex_ids.size(), false);
+	vector<pair<idx_t, idx_t>> queue;
+	visited[source] = true;
+	queue.emplace_back(source, 0);
+	for (idx_t head = 0; head < queue.size(); head++) {
+		if (context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		auto vertex = queue[head].first;
+		auto depth = queue[head].second;
+		bool found = false;
+		VisitNeighbors(*snapshot, vertex, CsrDirection::OUT, filter_label, required_label,
+		               [&](idx_t neighbor, uint64_t) {
+			               if (!InVertexProjection(vertex_mask, neighbor) || visited[neighbor]) {
+				               return true;
+			               }
+			               if (neighbor == target) {
+				               found = true;
+				               return false;
+			               }
+			               visited[neighbor] = true;
+			               queue.emplace_back(neighbor, depth + 1);
+			               return true;
+		               });
+		if (found) {
+			return NumericCast<int64_t>(depth + 1);
+		}
+	}
+	return -1;
 }
 
 static void InitializePipelineBfs(ClientContext &context, const AlgorithmCallBindData &data,
@@ -1850,11 +1940,21 @@ static void InitializePipelineBfs(ClientContext &context, const AlgorithmCallBin
 	auto traversal = make_uniq<TraversalBindData>();
 	traversal->graph_name = graph_name;
 	traversal->vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
+	traversal->edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
+	if (data.configuration.size() > 3) {
+		traversal->has_target = true;
+		traversal->target_vertex_id = NumericCast<uint64_t>(std::stoull(data.configuration[3].value));
+	}
 	auto bfs = make_uniq<BfsState>();
 	bfs->initialized = true;
 	bfs->snapshot = std::move(snapshot);
 	idx_t projected_count;
 	bfs->vertex_mask = BuildVertexMask(*bfs->snapshot, traversal->vertex_label, projected_count);
+	bfs->required_label = ResolveLabel(*bfs->snapshot, traversal->edge_label, bfs->filter_label);
+	bfs->has_target = traversal->has_target;
+	if (traversal->has_target) {
+		bfs->target = RequireProjectedVertex(*bfs->snapshot, bfs->vertex_mask, traversal->target_vertex_id, "target");
+	}
 	bfs->visited.resize(bfs->snapshot->vertex_ids.size(), false);
 	for (auto vertex_id : state.frontier) {
 		auto vertex = RequireProjectedVertex(*bfs->snapshot, bfs->vertex_mask, vertex_id, "frontier");
@@ -1939,6 +2039,9 @@ static void InitializeAlgorithmCall(ExecutionContext &context, const AlgorithmCa
 			    "GQL SSSP requires exactly one distinct source vertex; found %llu from %llu input rows",
 			    static_cast<unsigned long long>(source_count), static_cast<unsigned long long>(state.frontier.size()));
 		}
+	} else if (name == "shortest_path_length") {
+		// The two matched element IDs are retained in the call state and the
+		// scalar BFS result is produced during finalize.
 	} else if (name == "dfs") {
 		InitializePipelineDfs(context.client, data, state);
 	} else if (name == "pagerank") {
@@ -1990,7 +2093,14 @@ static OperatorFinalizeResultType AlgorithmCallFinalize(ExecutionContext &contex
 	if (!state.initialized) {
 		InitializeAlgorithmCall(context, data, state);
 	}
-	if (data.definition->name == "bfs" || data.definition->name == "sssp") {
+	if (data.definition->name == "shortest_path_length") {
+		if (state.shortest_path_done) {
+			return OperatorFinalizeResultType::FINISHED;
+		}
+		output.SetCardinality(1);
+		output.SetValue(0, 0, Value::BIGINT(ComputeShortestPathLength(context.client, data, state)));
+		state.shortest_path_done = true;
+	} else if (data.definition->name == "bfs" || data.definition->name == "sssp") {
 		TableFunctionInput nested(state.nested_bind_data.get(), nullptr, state.nested_global_state.get());
 		BfsFunction(context.client, nested, output);
 	} else if (data.definition->name == "dfs") {

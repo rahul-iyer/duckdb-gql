@@ -8,7 +8,7 @@ namespace duckdb {
 
 // Version of the compact logical-node arena passed through DuckDB's
 // parser-extension Value boundary for ordinary fixed MATCH queries.
-static constexpr uint8_t GQL_LOGICAL_PROGRAM_VERSION = 1;
+static constexpr uint8_t GQL_LOGICAL_PROGRAM_VERSION = 2;
 
 enum class GqlTypeId : uint8_t {
 	UNKNOWN,
@@ -240,6 +240,7 @@ public:
 	}
 
 	vector<GqlBoundProjection> projections;
+	idx_t visible_projection_count = DConstants::INVALID_INDEX;
 	vector<GqlBoundOrderBy> order_by;
 	bool distinct = false;
 	bool has_offset = false;
