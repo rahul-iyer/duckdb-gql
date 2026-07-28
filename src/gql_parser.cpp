@@ -11,6 +11,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/simplified_token.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "gql_binder.hpp"
 #include "gql_import.hpp"
@@ -55,6 +56,30 @@ static idx_t SkipGqlTrivia(const string &query, idx_t offset = 0) {
 
 static string NormalizedGqlStart(const string &query) {
 	return StringUtil::Upper(query.substr(SkipGqlTrivia(query)));
+}
+
+static vector<string> SplitGqlOverrideQueries(const string &query) {
+	vector<string> queries;
+	auto tokens = Parser::Tokenize(query);
+	idx_t last_split = 0;
+	for (const auto &token : tokens) {
+		if (token.type != SimplifiedTokenType::SIMPLIFIED_TOKEN_OPERATOR || query[token.start] != ';') {
+			continue;
+		}
+		auto segment = query.substr(last_split, token.start - last_split);
+		StringUtil::Trim(segment);
+		if (!segment.empty()) {
+			segment.push_back(';');
+			queries.push_back(std::move(segment));
+		}
+		last_split = token.start + 1;
+	}
+	auto final_segment = query.substr(last_split);
+	StringUtil::Trim(final_segment);
+	if (!final_segment.empty()) {
+		queries.push_back(std::move(final_segment));
+	}
+	return queries;
 }
 
 static bool StartsWithMergePattern(const string &query) {
@@ -1636,6 +1661,23 @@ ParserExtensionPlanResult GqlPlan(ParserExtensionInfo *, ClientContext &,
 }
 
 ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &query, ParserOptions &options) {
+	auto queries = SplitGqlOverrideQueries(query);
+	if (queries.size() > 1) {
+		try {
+			vector<unique_ptr<SQLStatement>> statements;
+			for (const auto &single_query : queries) {
+				Parser parser(options);
+				parser.ParseQuery(single_query);
+				for (auto &statement : parser.statements) {
+					statements.push_back(std::move(statement));
+				}
+			}
+			return ParserOverrideResult(std::move(statements));
+		} catch (std::exception &error) {
+			return ParserOverrideResult(error);
+		}
+	}
+
 	try {
 		GqlExplainInput explain;
 		if (TryParseGqlExplain(query, options, explain)) {

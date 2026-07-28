@@ -52,6 +52,14 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
+# Parser overrides receive the complete query string. Split mixed batches before
+# lowering so a lifecycle statement cannot force a following MATCH down the
+# legacy extension-statement plan path.
+statement error
+SESSION SET GRAPH mixed; MATCH (n) RETURN n;
+----
+<REGEX>:.*Graph 'mixed' has no native tables.*
+
 query IT
 DROP GRAPH mixed
 ----

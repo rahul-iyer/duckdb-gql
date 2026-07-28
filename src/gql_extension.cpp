@@ -146,7 +146,7 @@ std::string DuckgqlExtension::Version() const {
 #ifdef EXT_VERSION_DUCKGQL
 	return EXT_VERSION_DUCKGQL;
 #else
-	return "0.1.0-dev";
+	return "0.1.0";
 #endif
 }
 
