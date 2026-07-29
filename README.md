@@ -32,6 +32,15 @@ storage and execution engine, plus an explicit CSR layer for graph algorithms.
   persistence, vectorized scans, joins, aggregation, and recursive CTE
   execution beneath the GQL layer.
 
+## Install
+
+DuckGQL is available from DuckDB Community Extensions:
+
+```sql
+INSTALL duckgql FROM community;
+LOAD duckgql;
+```
+
 ## Build from source
 
 DuckGQL currently targets DuckDB `v1.5.5` and uses ANTLR `4.13.2`.
@@ -87,8 +96,8 @@ Then load the downloaded binary:
 LOAD '/absolute/path/to/duckgql.duckdb_extension';
 ```
 
-Only load native extension binaries from a source you trust. DuckGQL is not
-currently published in DuckDB's core or community extension repository.
+Only load native extension binaries from a source you trust. For normal use,
+prefer installing the signed Community Extensions build above.
 
 ## Quick start
 
