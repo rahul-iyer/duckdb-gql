@@ -267,7 +267,7 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			throw BinderException("GQL element_id argument must be a node or edge");
 		}
 		result->binding_index = result->left->binding_index;
-		result->result_type = {GqlTypeId::ELEMENT_ID, false};
+		result->result_type = {GqlTypeId::ELEMENT_ID, result->left->result_type.nullable};
 		return result;
 	case GqlExpressionType::FUNCTION: {
 		for (const auto &argument : expression.arguments) {
@@ -286,19 +286,24 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			throw BinderException("GQL function '%s' requires an argument", expression.function_name);
 		}
 		if (name == "coalesce") {
-			result->result_type = result->arguments[0]->result_type;
-			result->result_type.nullable = true;
+			result->result_type = {GqlTypeId::NULL_VALUE, true};
 			for (const auto &argument : result->arguments) {
-				if (result->result_type.id == GqlTypeId::PROPERTY_VALUE &&
-				    argument->result_type.id != GqlTypeId::PROPERTY_VALUE) {
+				if (argument->result_type.id == GqlTypeId::NULL_VALUE) {
+					continue;
+				}
+				if (result->result_type.id == GqlTypeId::NULL_VALUE ||
+				    (result->result_type.id == GqlTypeId::PROPERTY_VALUE &&
+				     argument->result_type.id != GqlTypeId::PROPERTY_VALUE)) {
 					result->result_type.id = argument->result_type.id;
-				} else if (argument->result_type.id != GqlTypeId::PROPERTY_VALUE &&
-				           result->result_type.id != argument->result_type.id) {
+				} else if (argument->result_type.id == GqlTypeId::PROPERTY_VALUE ||
+				           result->result_type.id == argument->result_type.id) {
+					// PROPERTY_VALUE is refined by any concrete peer type.
+				} else if (IsNumeric(result->result_type.id) && IsNumeric(argument->result_type.id)) {
+					result->result_type.id = NumericResult(result->result_type, argument->result_type).id;
+				} else {
 					throw BinderException("GQL COALESCE arguments must have compatible types");
 				}
-				if (!argument->result_type.nullable) {
-					result->result_type.nullable = false;
-				}
+				result->result_type.nullable = result->result_type.nullable && argument->result_type.nullable;
 			}
 			return result;
 		}
@@ -534,7 +539,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 					binding.name = element.variable.value;
 					binding.index = bound_element.binding_index;
 					binding.type = {element.type == GqlPatternElementType::VERTEX ? GqlTypeId::NODE : GqlTypeId::EDGE,
-					                false};
+					                pattern.optional};
 					binding.source = element.variable.source;
 					DefineBinding(std::move(binding));
 				}
@@ -1178,16 +1183,51 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 			project->distinct = true;
 		}
 	} else {
-		for (const auto &projection : statement.projections) {
-			if (!projection.expression) {
-				throw InternalException("GQL MATCH contains an empty projection");
+		if (statement.return_all) {
+			unordered_set<string> visible_names;
+			for (const auto &entry : let_bindings) {
+				visible_names.insert(entry.first);
 			}
-			auto expression = BindExpression(*projection.expression);
-			GqlBoundProjection bound_projection;
-			bound_projection.name = ProjectionName(projection, *expression);
-			bound_projection.expression = std::move(expression);
-			bound_projection.source = projection.source;
-			project->projections.push_back(std::move(bound_projection));
+			auto scope_index = current_scope;
+			while (scope_index != DConstants::INVALID_INDEX) {
+				if (scope_index >= scopes.size()) {
+					throw InternalException("GQL binder scope parent is invalid");
+				}
+				for (const auto &entry : scopes[scope_index].bindings) {
+					visible_names.insert(entry.first);
+				}
+				scope_index = scopes[scope_index].parent;
+			}
+			vector<string> sorted_names(visible_names.begin(), visible_names.end());
+			std::sort(sorted_names.begin(), sorted_names.end());
+			for (const auto &name : sorted_names) {
+				GqlIdentifier identifier;
+				identifier.value = name;
+				auto binding_index = FindBindingIndex(name);
+				if (binding_index != DConstants::INVALID_INDEX) {
+					identifier.source = bindings[binding_index].source;
+				}
+				GqlExpression expression;
+				expression.type = GqlExpressionType::VARIABLE_REFERENCE;
+				expression.variable = identifier;
+				expression.source = identifier.source;
+				project->projections.push_back({BindExpression(expression), name, identifier.source});
+			}
+			if (project->projections.empty()) {
+				throw BinderException("GQL RETURN * requires at least one visible variable");
+			}
+		} else {
+			for (const auto &projection : statement.projections) {
+				if (!projection.expression) {
+					throw InternalException("GQL MATCH contains an empty projection");
+				}
+				auto expression = BindExpression(*projection.expression);
+				GqlBoundProjection bound_projection;
+				bound_projection.name = ProjectionName(projection, *expression);
+				bound_projection.expression = std::move(expression);
+				bound_projection.source = projection.source;
+				project->projections.push_back(std::move(bound_projection));
+			}
 		}
 	}
 	project->visible_projection_count = project->projections.size();
@@ -1205,8 +1245,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 		}
 		if (bound_order.projection_index == DConstants::INVALID_INDEX) {
 			if (statement.distinct || saw_call_clause) {
-				throw BinderException(
-				    "GQL ORDER BY expressions must appear in RETURN when DISTINCT or CALL is used");
+				throw BinderException("GQL ORDER BY expressions must appear in RETURN when DISTINCT or CALL is used");
 			}
 			bound_order.projection_index = project->projections.size();
 			GqlBoundProjection hidden_order;

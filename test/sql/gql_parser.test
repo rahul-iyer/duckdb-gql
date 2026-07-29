@@ -10,7 +10,7 @@ SELECT 42
 42
 
 query IT
-create graph MiXeD any;
+CREATE /* lifecycle command trivia */ GRAPH MiXeD ANY;
 ----
 true	mixed
 
@@ -45,12 +45,60 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
+# Dispatch uses the same trivia rules as the GQL lexer between keywords and
+# before an INSERT pattern.
+statement error
+OPTIONAL
+/* match keyword trivia */ MATCH (n)
+RETURN n
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
+statement error
+INSERT
+/* pattern trivia */ (:Person)
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before mutation.*
+
 # Leading lexical trivia must not make the parser override miss GQL.
 statement error
 /* leading GQL comment */
 MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
+statement error
+// leading solidus comment
+MATCH (n) RETURN n
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
+# Delimited names are rejected consistently until their canonicalization is
+# supported throughout storage, matching, and projection.
+statement error
+CREATE GRAPH `Mixed Graph` ANY
+----
+<REGEX>:.*GQL feature not implemented: delimited graph names.*
+
+statement error
+MATCH (n:`Person Label`) RETURN n
+----
+<REGEX>:.*GQL feature not implemented: delimited labels in MATCH.*
+
+statement error
+MATCH (n) RETURN n.`First Name`
+----
+<REGEX>:.*GQL feature not implemented: delimited property references.*
+
+statement error
+MATCH (n) RETURN n AS `Node Alias`
+----
+<REGEX>:.*GQL feature not implemented: delimited RETURN aliases.*
+
+statement error
+INSERT (n:`Person Label`)
+----
+<REGEX>:.*GQL feature not implemented: delimited labels in INSERT.*
 
 # Parser overrides receive the complete query string. Split mixed batches before
 # lowering so a lifecycle statement cannot force a following MATCH down the
@@ -61,6 +109,7 @@ SESSION SET GRAPH mixed; MATCH (n) RETURN n;
 <REGEX>:.*Graph 'mixed' has no native tables.*
 
 query IT
-DROP GRAPH mixed
+DROP
+/* lifecycle command trivia */ GRAPH mixed
 ----
 true	mixed

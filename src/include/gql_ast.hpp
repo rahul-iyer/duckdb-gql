@@ -351,6 +351,7 @@ public:
 	vector<GqlMutation> mutations;
 	shared_ptr<GqlInsertStatement> insertion;
 	bool has_mutation = false;
+	bool return_all = false;
 	bool distinct = false;
 	bool has_offset = false;
 	bool has_limit = false;
