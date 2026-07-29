@@ -21,6 +21,7 @@
 #include "gql_transformer.hpp"
 
 #include <cctype>
+#include <initializer_list>
 
 namespace duckdb {
 
@@ -34,7 +35,8 @@ static idx_t SkipGqlTrivia(const string &query, idx_t offset = 0) {
 			offset++;
 			continue;
 		}
-		if (offset + 1 < query.size() && query[offset] == '-' && query[offset + 1] == '-') {
+		if (offset + 1 < query.size() && ((query[offset] == '-' && query[offset + 1] == '-') ||
+		                                  (query[offset] == '/' && query[offset + 1] == '/'))) {
 			offset += 2;
 			while (offset < query.size() && query[offset] != '\n') {
 				offset++;
@@ -54,8 +56,42 @@ static idx_t SkipGqlTrivia(const string &query, idx_t offset = 0) {
 	return offset;
 }
 
-static string NormalizedGqlStart(const string &query) {
-	return StringUtil::Upper(query.substr(SkipGqlTrivia(query)));
+static bool ConsumeGqlKeyword(const string &query, idx_t &offset, const string &keyword) {
+	offset = SkipGqlTrivia(query, offset);
+	if (offset + keyword.size() > query.size() ||
+	    !StringUtil::CIEquals(query.substr(offset, keyword.size()), keyword)) {
+		return false;
+	}
+	auto end = offset + keyword.size();
+	if (end < query.size() && (std::isalnum(static_cast<unsigned char>(query[end])) || query[end] == '_')) {
+		return false;
+	}
+	offset = end;
+	return true;
+}
+
+static bool StartsWithGqlKeywords(const string &query, std::initializer_list<const char *> keywords,
+                                  idx_t *end_offset = nullptr) {
+	idx_t offset = 0;
+	for (const auto keyword : keywords) {
+		if (!ConsumeGqlKeyword(query, offset, keyword)) {
+			return false;
+		}
+	}
+	if (end_offset) {
+		*end_offset = offset;
+	}
+	return true;
+}
+
+static bool StartsWithGqlKeywordsAndCharacter(const string &query, std::initializer_list<const char *> keywords,
+                                              char character) {
+	idx_t offset;
+	if (!StartsWithGqlKeywords(query, keywords, &offset)) {
+		return false;
+	}
+	offset = SkipGqlTrivia(query, offset);
+	return offset < query.size() && query[offset] == character;
 }
 
 static vector<string> SplitGqlOverrideQueries(const string &query) {
@@ -83,12 +119,8 @@ static vector<string> SplitGqlOverrideQueries(const string &query) {
 }
 
 static bool StartsWithMergePattern(const string &query) {
-	auto offset = SkipGqlTrivia(query);
-	if (offset + 5 > query.size() || !StringUtil::CIEquals(query.substr(offset, 5), "MERGE")) {
-		return false;
-	}
-	offset += 5;
-	if (offset < query.size() && (std::isalnum(static_cast<unsigned char>(query[offset])) || query[offset] == '_')) {
+	idx_t offset;
+	if (!StartsWithGqlKeywords(query, {"MERGE"}, &offset)) {
 		return false;
 	}
 	offset = SkipGqlTrivia(query, offset);
@@ -96,12 +128,8 @@ static bool StartsWithMergePattern(const string &query) {
 }
 
 static bool FindAlgorithmCall(const string &query, idx_t &algorithm_offset) {
-	auto offset = SkipGqlTrivia(query);
-	if (offset + 4 > query.size() || !StringUtil::CIEquals(query.substr(offset, 4), "CALL")) {
-		return false;
-	}
-	offset += 4;
-	if (offset < query.size() && (std::isalnum(static_cast<unsigned char>(query[offset])) || query[offset] == '_')) {
+	idx_t offset;
+	if (!StartsWithGqlKeywords(query, {"CALL"}, &offset)) {
 		return false;
 	}
 	offset = SkipGqlTrivia(query, offset);
@@ -218,16 +246,15 @@ public:
 };
 
 static bool StartsWithGqlCommand(const string &query) {
-	auto normalized = NormalizedGqlStart(query);
-	return StringUtil::StartsWith(normalized, "CREATE GRAPH") ||
-	       StringUtil::StartsWith(normalized, "CREATE PROPERTY GRAPH") ||
-	       StringUtil::StartsWith(normalized, "DROP GRAPH") ||
-	       StringUtil::StartsWith(normalized, "DROP PROPERTY GRAPH") ||
-	       StringUtil::StartsWith(normalized, "SESSION SET GRAPH") ||
-	       StringUtil::StartsWith(normalized, "SESSION SET PROPERTY GRAPH") ||
-	       StringUtil::StartsWith(normalized, "COPY GRAPH") || StartsWithMergePattern(query) ||
-	       StringUtil::StartsWith(normalized, "MATCH") || StringUtil::StartsWith(normalized, "OPTIONAL MATCH") ||
-	       StringUtil::StartsWith(normalized, "INSERT (") || StartsWithAlgorithmCall(query);
+	return StartsWithGqlKeywords(query, {"CREATE", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"CREATE", "PROPERTY", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"DROP", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"DROP", "PROPERTY", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"SESSION", "SET", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"SESSION", "SET", "PROPERTY", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) || StartsWithMergePattern(query) ||
+	       StartsWithGqlKeywords(query, {"MATCH"}) || StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) ||
+	       StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') || StartsWithAlgorithmCall(query);
 }
 
 static bool RewriteAlgorithmCall(const string &query, string &rewritten) {
@@ -1289,27 +1316,25 @@ private:
 };
 
 static void ValidateExecutionHint(const string &query) {
-	auto trimmed = query.substr(SkipGqlTrivia(query));
-	auto upper = StringUtil::Upper(trimmed);
 	idx_t offset;
-	if (StringUtil::StartsWith(upper, "OPTIONAL MATCH")) {
-		offset = string("OPTIONAL MATCH").size();
-	} else if (StringUtil::StartsWith(upper, "MATCH")) {
-		offset = string("MATCH").size();
+	if (StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}, &offset)) {
+		// Offset already follows MATCH.
+	} else if (StartsWithGqlKeywords(query, {"MATCH"}, &offset)) {
+		// Offset already follows MATCH.
 	} else {
 		return;
 	}
-	while (offset < trimmed.size() && std::isspace(static_cast<unsigned char>(trimmed[offset]))) {
+	while (offset < query.size() && std::isspace(static_cast<unsigned char>(query[offset]))) {
 		offset++;
 	}
-	if (offset + 3 > trimmed.size() || trimmed.compare(offset, 3, "/*+") != 0) {
+	if (offset + 3 > query.size() || query.compare(offset, 3, "/*+") != 0) {
 		return;
 	}
-	auto end = trimmed.find("*/", offset + 3);
+	auto end = query.find("*/", offset + 3);
 	if (end == string::npos) {
 		throw ParserException("Unterminated GQL execution hint");
 	}
-	auto hint = trimmed.substr(offset + 3, end - offset - 3);
+	auto hint = query.substr(offset + 3, end - offset - 3);
 	StringUtil::Trim(hint);
 	hint = StringUtil::Upper(hint);
 	if (hint == "CSR" || hint == "GQL_CSR") {
@@ -1328,8 +1353,7 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 	}
 
 	auto gql_query = StripTerminator(query);
-	auto normalized = NormalizedGqlStart(gql_query);
-	if (StringUtil::StartsWith(normalized, "COPY GRAPH")) {
+	if (StartsWithGqlKeywords(gql_query, {"COPY", "GRAPH"})) {
 		auto parse_data = make_uniq<GqlParseData>();
 		parse_data->query = gql_query;
 		parse_data->statement = CopyGraphParser(gql_query).Parse();
@@ -1569,8 +1593,8 @@ static bool TryParseGqlExplain(const string &query, ParserOptions &options, GqlE
 	}
 
 	auto inner_query = query.substr(inner_offset);
-	auto upper = NormalizedGqlStart(inner_query);
-	auto is_match = StringUtil::StartsWith(upper, "MATCH") || StringUtil::StartsWith(upper, "OPTIONAL MATCH");
+	auto is_match =
+	    StartsWithGqlKeywords(inner_query, {"MATCH"}) || StartsWithGqlKeywords(inner_query, {"OPTIONAL", "MATCH"});
 	if (!is_match && !StartsWithAlgorithmCall(inner_query)) {
 		if (StartsWithGqlCommand(inner_query)) {
 			throw NotImplementedException("DuckGQL EXPLAIN currently supports MATCH and CALL algo.* queries");
@@ -1760,9 +1784,8 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 		}
 		return ParserOverrideResult(std::move(parser.statements));
 	}
-	auto normalized = NormalizedGqlStart(query);
-	if (!StartsWithMergePattern(query) && !StringUtil::StartsWith(normalized, "INSERT (") &&
-	    !StringUtil::StartsWith(normalized, "MATCH") && !StringUtil::StartsWith(normalized, "OPTIONAL MATCH") &&
+	if (!StartsWithMergePattern(query) && !StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') &&
+	    !StartsWithGqlKeywords(query, {"MATCH"}) && !StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) &&
 	    !StartsWithAlgorithmCall(query)) {
 		return ParserOverrideResult();
 	}

@@ -154,9 +154,41 @@ Ada	Ada
 Ada	Ada
 Grace	Grace
 
+# NULL is neutral while COALESCE selects and validates its concrete result
+# type, regardless of argument order.
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN COALESCE(NULL, 'unknown') AS display_name
+----
+unknown
+
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN COALESCE('known', NULL) AS display_name
+----
+known
+
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN COALESCE(NULL, person.name) AS display_name
+----
+Ada
+
+query I
+MATCH (person:Person) WHERE person.age = 42
+RETURN COALESCE(NULL, NULL) AS missing
+----
+NULL
+
 query T
 OPTIONAL MATCH (person:Missing)
 RETURN person.name AS name
+----
+NULL
+
+query I
+OPTIONAL MATCH (person:Missing)
+RETURN element_id(person) AS person_id
 ----
 NULL
 
@@ -310,6 +342,40 @@ RETURN source.name AS source_name, target.name AS target_name
 ----
 Ada	Grace
 Grace	Ada
+
+# RETURN * expands visible names in ascending order.
+query TTT
+MATCH (person:Person)-[knows:KNOWS]->(friend:Person)
+WHERE element_id(person) = 1
+RETURN *
+----
+{'vertex_id': 2, '__gql_labels': person, 'age': 35, 'name': Grace}	{'edge_id': 1, '__gql_type': knows, '__gql_source': 1, '__gql_target': 2}	{'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}
+
+query TT
+MATCH (source:Person) WHERE source.age = 30
+OPTIONAL MATCH (source)-[:MISSING]->(target:Person)
+RETURN *
+----
+{'vertex_id': 3, '__gql_labels': person, 'age': 30, 'name': Ada}	NULL
+
+query TT
+MATCH (person:Person) WHERE person.age = 42
+LET display_name = person.name
+RETURN *
+----
+Ada	{'vertex_id': 1, '__gql_labels': person, 'age': 42, 'name': Ada}
+
+statement error
+MATCH ()
+RETURN *
+----
+<REGEX>:.*GQL RETURN \* requires at least one visible variable.*
+
+statement error
+MATCH (person:Person)
+RETURN * GROUP BY person
+----
+<REGEX>:.*GQL feature not implemented: MATCH pattern or projection.*
 
 # FILTER ownership also follows clause order across OPTIONAL MATCH stages.
 query TT

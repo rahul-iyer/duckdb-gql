@@ -3080,7 +3080,7 @@ COPY (
         ('n14', 13, ''),
         ('n15', 14, ''),
         ('n16', 15, '')
-    ) fixture(":ID(GqlFixture_candidate_returnskiplimit3_84)", "count:long", ":LABEL")
+    ) fixture(":ID(GqlFixture_candidate_returnskiplimit3_84)", "value_count:long", ":LABEL")
 ) TO '__TEST_DIR__/candidate_returnskiplimit3_84_nodes.csv' (FORMAT CSV, HEADER)
 
 statement ok
@@ -3102,8 +3102,8 @@ SESSION SET GRAPH candidate_returnskiplimit3_84
 
 query I
 MATCH (a)
-RETURN a."count"
-ORDER BY a."count"
+RETURN a.value_count
+ORDER BY a.value_count
 OFFSET 10
 LIMIT 10
 ----
@@ -3710,7 +3710,7 @@ SESSION SET GRAPH candidate_return6_33
 
 query II rowsort
 MATCH (n)
-RETURN n.num AS n, count(n) AS "count"
+RETURN n.num AS n, count(n) AS result_count
 ----
 42	1
 
@@ -10994,7 +10994,7 @@ SESSION SET GRAPH candidate_return6_82
 
 query I rowsort
 MATCH (n)
-RETURN count(n) / 60 / 60 AS "count"
+RETURN count(n) / 60 / 60 AS result_count
 ----
 2
 

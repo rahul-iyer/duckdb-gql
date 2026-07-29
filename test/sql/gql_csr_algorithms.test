@@ -93,6 +93,16 @@ CALL algo.bfs('algo_graph', 1)
 4	2	2	3	3
 5	3	4	5	4
 
+# RETURN * expands yielded columns by ascending name.
+query II
+CALL algo.bfs('algo_graph', 1)
+YIELD vertex_id, depth
+RETURN *
+LIMIT 2
+----
+0	1
+1	2
+
 # DFS uses an iterative frame stack and deterministic CSR adjacency order.
 query IIIII
 CALL algo.dfs('algo_graph', 1)

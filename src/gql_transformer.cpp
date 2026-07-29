@@ -415,7 +415,10 @@ std::any GqlTransformer::visitSessionSetGraphClause(GQLParser::SessionSetGraphCl
 }
 
 std::any GqlTransformer::visitInsertStatement(GQLParser::InsertStatementContext *context) {
-	statement = TransformInsert(*context, false);
+	auto insert = TransformInsert(*context, false);
+	if (insert) {
+		statement = std::move(insert);
+	}
 	return {};
 }
 
@@ -531,7 +534,9 @@ bool GqlTransformer::TransformCall(GQLParser::GqlProgramContext &root) {
 	CollectContexts(&root, return_statements);
 	CollectContexts(&root, order_statements);
 	auto fail = [&]() {
-		Unsupported(root, "CALL/YIELD/RETURN procedure pipeline");
+		if (!statement) {
+			Unsupported(root, "CALL/YIELD/RETURN procedure pipeline");
+		}
 		return false;
 	};
 	if (procedure_calls.size() != 1 || return_statements.size() != 1 || order_statements.size() > 1) {
@@ -601,25 +606,49 @@ bool GqlTransformer::TransformCall(GQLParser::GqlProgramContext &root) {
 	}
 
 	auto body = return_statements[0]->returnStatementBody();
-	if (!body || body->ASTERISK() || !body->returnItemList() || body->groupByClause()) {
+	if (!body || body->groupByClause() || (!body->ASTERISK() && !body->returnItemList())) {
 		return fail();
 	}
 	if (body->setQuantifier()) {
 		call->distinct = body->setQuantifier()->DISTINCT() != nullptr;
 	}
 	std::unordered_set<string> projection_names;
-	for (auto item : body->returnItemList()->returnItem()) {
-		GqlProjection projection;
-		if (!TransformProjection(item, projection) ||
-		    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE ||
-		    yielded_names.find(projection.expression->variable.value) == yielded_names.end()) {
-			return fail();
+	if (body->ASTERISK()) {
+		vector<const GqlYieldItem *> sorted_yields;
+		for (const auto &yield_item : call->yield_items) {
+			sorted_yields.push_back(&yield_item);
 		}
-		auto output_name = projection.alias.IsEmpty() ? projection.expression->variable.value : projection.alias.value;
-		if (!projection_names.insert(output_name).second) {
-			return fail();
+		std::sort(sorted_yields.begin(), sorted_yields.end(), [](const GqlYieldItem *left, const GqlYieldItem *right) {
+			auto left_name = left->alias.IsEmpty() ? left->field.value : left->alias.value;
+			auto right_name = right->alias.IsEmpty() ? right->field.value : right->alias.value;
+			return left_name < right_name;
+		});
+		for (const auto yield_item : sorted_yields) {
+			auto output_name = yield_item->alias.IsEmpty() ? yield_item->field.value : yield_item->alias.value;
+			GqlProjection projection;
+			projection.expression = make_shared_ptr<GqlExpression>();
+			projection.expression->type = GqlExpressionType::VARIABLE_REFERENCE;
+			projection.expression->variable.value = output_name;
+			projection.expression->variable.source = yield_item->source;
+			projection.expression->source = yield_item->source;
+			projection.source = yield_item->source;
+			call->projections.push_back(std::move(projection));
 		}
-		call->projections.push_back(std::move(projection));
+	} else {
+		for (auto item : body->returnItemList()->returnItem()) {
+			GqlProjection projection;
+			if (!TransformProjection(item, projection) ||
+			    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE ||
+			    yielded_names.find(projection.expression->variable.value) == yielded_names.end()) {
+				return fail();
+			}
+			auto output_name =
+			    projection.alias.IsEmpty() ? projection.expression->variable.value : projection.alias.value;
+			if (!projection_names.insert(output_name).second) {
+				return fail();
+			}
+			call->projections.push_back(std::move(projection));
+		}
 	}
 	if (call->projections.empty()) {
 		return fail();
@@ -690,7 +719,9 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		return false;
 	}
 	auto fail = [&]() {
-		Unsupported(root, "MATCH pattern or projection");
+		if (!statement) {
+			Unsupported(root, "MATCH pattern or projection");
+		}
 		return false;
 	};
 	auto base_primitives = match_statements.size() + let_statements.size() + filter_statements.size();
@@ -1060,24 +1091,31 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 	}
 
 	auto body = return_statements[0]->returnStatementBody();
-	if (body->ASTERISK() || !body->returnItemList()) {
+	if (!body->ASTERISK() && !body->returnItemList()) {
+		return fail();
+	}
+	if (body->ASTERISK() && body->groupByClause()) {
 		return fail();
 	}
 	if (body->setQuantifier()) {
 		match->distinct = body->setQuantifier()->DISTINCT() != nullptr;
 	}
-	for (auto item : body->returnItemList()->returnItem()) {
-		GqlProjection projection;
-		if (!TransformProjection(item, projection)) {
-			return fail();
+	if (body->ASTERISK()) {
+		match->return_all = true;
+	} else {
+		for (auto item : body->returnItemList()->returnItem()) {
+			GqlProjection projection;
+			if (!TransformProjection(item, projection)) {
+				return fail();
+			}
+			if (!procedure_calls.empty() &&
+			    (!projection.expression || projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE)) {
+				return fail();
+			}
+			match->projections.push_back(std::move(projection));
 		}
-		if (!procedure_calls.empty() &&
-		    (!projection.expression || projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE)) {
-			return fail();
-		}
-		match->projections.push_back(std::move(projection));
 	}
-	if (match->projections.empty()) {
+	if (!match->return_all && match->projections.empty()) {
 		return fail();
 	}
 	if (auto group_by = body->groupByClause()) {
@@ -1388,6 +1426,7 @@ bool GqlTransformer::TransformLabelExpression(GQLParser::LabelExpressionContext 
                                               vector<GqlIdentifier> &labels) {
 	if (auto name = dynamic_cast<GQLParser::LabelExpressionNameContext *>(&context)) {
 		if (!IsRegularIdentifier(name->labelName()->getText())) {
+			Unsupported(*name, "delimited labels in MATCH");
 			return false;
 		}
 		labels.push_back(TransformIdentifier(*name->labelName()));
@@ -1415,6 +1454,7 @@ bool GqlTransformer::TransformProjection(GQLParser::ReturnItemContext *item, Gql
 	result.source = SourceRange(*item);
 	if (auto alias = item->returnItemAlias()) {
 		if (!IsRegularIdentifier(alias->identifier()->getText())) {
+			Unsupported(*alias, "delimited RETURN aliases");
 			return false;
 		}
 		result.alias = TransformIdentifier(*alias->identifier());
@@ -1618,8 +1658,11 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 		return true;
 	}
 	if (context.propertyName() && context.valueExpressionPrimary()) {
-		if (!IsRegularIdentifier(context.propertyName()->getText()) ||
-		    !TransformExpressionPrimary(*context.valueExpressionPrimary(), expression->left)) {
+		if (!IsRegularIdentifier(context.propertyName()->getText())) {
+			Unsupported(context, "delimited property references");
+			return false;
+		}
+		if (!TransformExpressionPrimary(*context.valueExpressionPrimary(), expression->left)) {
 			return false;
 		}
 		expression->type = GqlExpressionType::PROPERTY_REFERENCE;
@@ -2076,20 +2119,6 @@ void GqlTransformer::Unsupported(antlr4::ParserRuleContext &context, const strin
 }
 
 bool GqlTransformer::IsRegularIdentifier(const string &value) {
-	if (value.size() >= 2 &&
-	    ((value.front() == '"' && value.back() == '"') || (value.front() == '`' && value.back() == '`'))) {
-		auto quote = value.front();
-		for (idx_t index = 1; index + 1 < value.size(); index++) {
-			if (value[index] != quote) {
-				continue;
-			}
-			if (index + 2 >= value.size() || value[index + 1] != quote) {
-				return false;
-			}
-			index++;
-		}
-		return true;
-	}
 	if (value.empty() || !(std::isalpha(static_cast<unsigned char>(value[0])) || value[0] == '_')) {
 		return false;
 	}
