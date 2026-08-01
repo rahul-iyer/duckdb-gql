@@ -27,7 +27,7 @@ CREATE GRAPH broken
 statement error
 CREATE GRAPH typed_graph { (Person :Person {name STRING}) }
 ----
-<REGEX>:.*GQL feature not implemented: typed, copied, or closed graph creation \(line 1, column 0\).*
+<REGEX>:.*GQL feature not implemented: non-inline typed graph creation \(line 1, column 0\).*
 
 statement error
 CREATE GRAPH broken

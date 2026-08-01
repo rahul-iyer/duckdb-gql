@@ -28,7 +28,7 @@ GQL-16.6	path	walk/trail/simple/acyclic modes and all/any/shortest searches	plan
 GQL-16.7	path	concatenation, alternation, union, parentheses, and simplified patterns	partial	parser,binder,execution,csr
 GQL-16.8	label	label name, wildcard, negation, conjunction, disjunction, and grouping	partial	parser,binder,execution
 GQL-16.11	path	fixed/general quantifiers and optional path factors	partial	parser,binder,execution,csr
-GQL-17	types	graph types, element types, labels, properties, and inheritance	planned	parser,binder,catalog,persistence
+GQL-17	types	graph types, element types, labels, properties, and inheritance	partial	parser,binder,catalog,persistence
 GQL-18	values	graph, binding-table, scalar, list, record, path, node, and edge value types	partial	parser,binder,types,execution
 GQL-19	predicates	comparison, null, normalized, source/destination, labels, same/different, property exists	partial	parser,binder,types,execution
 GQL-20	expressions	arithmetic, boolean, concatenation, primary expressions, parameters, literals, and casts	partial	parser,binder,types,execution

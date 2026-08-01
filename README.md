@@ -138,6 +138,20 @@ RETURN a.name AS source_name,
        b.name AS target_name;
 ```
 
+An explicit inline typed schema can instead be persisted with the graph:
+
+```sql
+CREATE GRAPH social_typed TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING}),
+    (Person)-[:KNOWS {since INT32}]->(Person)
+};
+```
+
+Typed creation currently records and validates the node types, edge types,
+labels, property types, nullability, and endpoint aliases while leaving the
+graph empty. Typed table materialization and `COPY GRAPH`/mutation enforcement
+are subsequent implementation slices.
+
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing
 edge endpoints. Trusted inputs can skip those validation scans:
@@ -327,8 +341,8 @@ read-only referenced-table mode is planned.
 - Multiple-path and undirected insertion, general runtime property maps, and
   open-graph schema evolution remain incomplete.
 - Path modes, searches, shortest-path groups, query composition, procedure
-  semantics, graph types, and the complete GQL value/type system remain
-  incomplete.
+  semantics, named graph types, typed storage enforcement, and the complete
+  GQL value/type system remain incomplete.
 - Direct registration of existing DuckDB or DuckLake tables as a graph is not
   exposed.
 

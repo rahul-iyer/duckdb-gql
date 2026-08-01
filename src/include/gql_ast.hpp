@@ -228,6 +228,33 @@ enum class GqlStatementType : uint8_t {
 	UNSUPPORTED
 };
 
+enum class GqlGraphSchemaKind : uint8_t { ANY, INLINE };
+
+struct GqlGraphPropertyDefinition {
+	GqlIdentifier name;
+	string gql_type;
+	bool nullable = true;
+	GqlSourceRange source;
+};
+
+struct GqlGraphElementDefinition {
+	GqlPatternElementType kind = GqlPatternElementType::VERTEX;
+	GqlIdentifier type_name;
+	GqlIdentifier local_alias;
+	vector<GqlIdentifier> labels;
+	vector<GqlGraphPropertyDefinition> properties;
+	GqlIdentifier source_alias;
+	GqlIdentifier target_alias;
+	GqlEdgeDirection direction = GqlEdgeDirection::RIGHT;
+	GqlSourceRange source;
+};
+
+struct GqlGraphSchemaDefinition {
+	GqlGraphSchemaKind kind = GqlGraphSchemaKind::ANY;
+	bool typed = false;
+	vector<GqlGraphElementDefinition> elements;
+};
+
 class GqlStatement {
 public:
 	GqlStatement(GqlStatementType type_p, GqlSourceRange source_p) : type(type_p), source(std::move(source_p)) {
@@ -250,13 +277,15 @@ public:
 
 class GqlCreateGraphStatement final : public GqlStatement {
 public:
-	GqlCreateGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p, bool if_not_exists_p)
+	GqlCreateGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p, bool if_not_exists_p,
+	                        GqlGraphSchemaDefinition schema_p)
 	    : GqlStatement(GqlStatementType::CREATE_GRAPH, std::move(source_p)), graph_name(std::move(graph_name_p)),
-	      if_not_exists(if_not_exists_p) {
+	      if_not_exists(if_not_exists_p), schema(std::move(schema_p)) {
 	}
 
 	GqlIdentifier graph_name;
 	bool if_not_exists;
+	GqlGraphSchemaDefinition schema;
 };
 
 class GqlCopyGraphStatement final : public GqlStatement {

@@ -8,6 +8,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 
+#include <unordered_set>
+
 namespace duckdb {
 
 static constexpr const char *GQL_STATE_KEY = "gql_client_state";
@@ -40,6 +42,7 @@ void GqlEnsureStorage(Connection &connection) {
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.element_table_id_seq START 1");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.label_mapping_id_seq START 1");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.property_index_id_seq START 1");
+	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.schema_element_id_seq START 1");
 	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graphs ("
 	                     "graph_id UBIGINT PRIMARY KEY DEFAULT nextval('gql_internal.graph_id_seq'), "
 	                     "graph_name VARCHAR NOT NULL UNIQUE, "
@@ -54,6 +57,40 @@ void GqlEnsureStorage(Connection &connection) {
 	                     "csr_policy VARCHAR NOT NULL DEFAULT 'DISABLED', "
 	                     "CHECK (storage_mode IN ('EMPTY', 'TABLE_BACKED')), "
 	                     "CHECK (csr_policy IN ('DISABLED', 'MANUAL', 'AUTO')))");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_schemas ("
+	                     "graph_id UBIGINT PRIMARY KEY, "
+	                     "schema_kind VARCHAR NOT NULL, "
+	                     "is_typed BOOLEAN NOT NULL, "
+	                     "CHECK (schema_kind IN ('ANY', 'INLINE')))");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_schema_elements ("
+	                     "schema_element_id UBIGINT PRIMARY KEY DEFAULT "
+	                     "nextval('gql_internal.schema_element_id_seq'), "
+	                     "graph_id UBIGINT NOT NULL, "
+	                     "element_ordinal UBIGINT NOT NULL, "
+	                     "element_kind VARCHAR NOT NULL, "
+	                     "type_name VARCHAR NOT NULL, "
+	                     "local_alias VARCHAR, "
+	                     "source_alias VARCHAR, "
+	                     "target_alias VARCHAR, "
+	                     "direction VARCHAR NOT NULL, "
+	                     "UNIQUE(graph_id, element_kind, type_name), "
+	                     "UNIQUE(graph_id, element_ordinal), "
+	                     "CHECK (element_kind IN ('NODE', 'EDGE')), "
+	                     "CHECK (direction IN ('NONE', 'RIGHT', 'LEFT', 'ANY')))");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_schema_labels ("
+	                     "schema_element_id UBIGINT NOT NULL, "
+	                     "label_ordinal UBIGINT NOT NULL, "
+	                     "label_name VARCHAR NOT NULL, "
+	                     "PRIMARY KEY(schema_element_id, label_name), "
+	                     "UNIQUE(schema_element_id, label_ordinal))");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_schema_properties ("
+	                     "schema_element_id UBIGINT NOT NULL, "
+	                     "property_ordinal UBIGINT NOT NULL, "
+	                     "property_name VARCHAR NOT NULL, "
+	                     "gql_type VARCHAR NOT NULL, "
+	                     "nullable BOOLEAN NOT NULL, "
+	                     "PRIMARY KEY(schema_element_id, property_name), "
+	                     "UNIQUE(schema_element_id, property_ordinal))");
 	auto native_storage_schema = GqlQuery(
 	    connection, "SELECT count(*) FROM duckdb_constraints() WHERE schema_name = 'gql_internal' AND "
 	                "table_name = 'graph_storage' AND constraint_type = 'CHECK' AND constraint_text LIKE '%EMPTY%'");
@@ -112,6 +149,8 @@ void GqlEnsureStorage(Connection &connection) {
 	                     "UNIQUE(element_table_id, property_name))");
 	GqlQuery(connection, "INSERT INTO gql_internal.graph_storage (graph_id, storage_mode, schema_version, csr_policy) "
 	                     "SELECT graph_id, 'EMPTY', 0, 'DISABLED' FROM gql_internal.graphs ON CONFLICT DO NOTHING");
+	GqlQuery(connection, "INSERT INTO gql_internal.graph_schemas (graph_id, schema_kind, is_typed) "
+	                     "SELECT graph_id, 'ANY', false FROM gql_internal.graphs ON CONFLICT DO NOTHING");
 }
 
 static bool GraphExists(Connection &connection, const string &graph_name) {
@@ -136,6 +175,57 @@ struct CommandBindData : TableFunctionData {
 
 	string graph_name;
 	bool conditional;
+};
+
+struct GraphSchemaProperty {
+	string name;
+	string gql_type;
+	bool nullable;
+
+	bool operator==(const GraphSchemaProperty &other) const {
+		return name == other.name && gql_type == other.gql_type && nullable == other.nullable;
+	}
+};
+
+struct GraphSchemaElement {
+	string kind;
+	string type_name;
+	string local_alias;
+	string source_alias;
+	string target_alias;
+	string direction;
+	vector<string> labels;
+	vector<GraphSchemaProperty> properties;
+
+	bool operator==(const GraphSchemaElement &other) const {
+		return kind == other.kind && type_name == other.type_name && local_alias == other.local_alias &&
+		       source_alias == other.source_alias && target_alias == other.target_alias &&
+		       direction == other.direction && labels == other.labels && properties == other.properties;
+	}
+};
+
+struct CreateGraphBindData : TableFunctionData {
+	CreateGraphBindData(string graph_name_p, bool conditional_p, string schema_kind_p, bool typed_p,
+	                    vector<GraphSchemaElement> elements_p)
+	    : graph_name(std::move(graph_name_p)), conditional(conditional_p), schema_kind(std::move(schema_kind_p)),
+	      typed(typed_p), elements(std::move(elements_p)) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<CreateGraphBindData>(graph_name, conditional, schema_kind, typed, elements);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto other = dynamic_cast<const CreateGraphBindData *>(&other_p);
+		return other && graph_name == other->graph_name && conditional == other->conditional &&
+		       schema_kind == other->schema_kind && typed == other->typed && elements == other->elements;
+	}
+
+	string graph_name;
+	bool conditional;
+	string schema_kind;
+	bool typed;
+	vector<GraphSchemaElement> elements;
 };
 
 struct PropertyIndexBindData : TableFunctionData {
@@ -191,6 +281,142 @@ static unique_ptr<FunctionData> CommandBind(ClientContext &, TableFunctionBindIn
 	return make_uniq<CommandBindData>(input.inputs[0].GetValue<string>(), input.inputs.size() > 1 &&
 	                                                                          !input.inputs[1].IsNull() &&
 	                                                                          input.inputs[1].GetValue<bool>());
+}
+
+static vector<string> ReadCreateGraphStrings(const Value &value) {
+	vector<string> result;
+	for (const auto &entry : ListValue::GetChildren(value)) {
+		if (entry.IsNull()) {
+			throw BinderException("Typed graph schema values cannot be NULL");
+		}
+		result.push_back(entry.GetValue<string>());
+	}
+	return result;
+}
+
+static vector<uint64_t> ReadCreateGraphIndices(const Value &value) {
+	vector<uint64_t> result;
+	for (const auto &entry : ListValue::GetChildren(value)) {
+		if (entry.IsNull()) {
+			throw BinderException("Typed graph schema element indices cannot be NULL");
+		}
+		result.push_back(entry.GetValue<uint64_t>());
+	}
+	return result;
+}
+
+static vector<bool> ReadCreateGraphBooleans(const Value &value) {
+	vector<bool> result;
+	for (const auto &entry : ListValue::GetChildren(value)) {
+		if (entry.IsNull()) {
+			throw BinderException("Typed graph schema flags cannot be NULL");
+		}
+		result.push_back(entry.GetValue<bool>());
+	}
+	return result;
+}
+
+static unique_ptr<FunctionData> CreateGraphBind(ClientContext &, TableFunctionBindInput &input,
+                                                vector<LogicalType> &return_types, vector<string> &names) {
+	if (input.inputs.size() != 16 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
+	    input.inputs[3].IsNull()) {
+		throw BinderException("Invalid CREATE GRAPH schema payload");
+	}
+	auto graph_name = input.inputs[0].GetValue<string>();
+	auto conditional = input.inputs[1].GetValue<bool>();
+	auto schema_kind = input.inputs[2].GetValue<string>();
+	auto typed = input.inputs[3].GetValue<bool>();
+	auto element_kinds = ReadCreateGraphStrings(input.inputs[4]);
+	auto type_names = ReadCreateGraphStrings(input.inputs[5]);
+	auto local_aliases = ReadCreateGraphStrings(input.inputs[6]);
+	auto source_aliases = ReadCreateGraphStrings(input.inputs[7]);
+	auto target_aliases = ReadCreateGraphStrings(input.inputs[8]);
+	auto directions = ReadCreateGraphStrings(input.inputs[9]);
+	if (graph_name.empty()) {
+		throw BinderException("A graph name is required");
+	}
+	if ((schema_kind != "ANY" && schema_kind != "INLINE") || (schema_kind == "ANY" && typed) ||
+	    (schema_kind == "INLINE" && !typed)) {
+		throw BinderException("Invalid CREATE GRAPH schema kind");
+	}
+	auto element_count = element_kinds.size();
+	if (type_names.size() != element_count || local_aliases.size() != element_count ||
+	    source_aliases.size() != element_count || target_aliases.size() != element_count ||
+	    directions.size() != element_count || (schema_kind == "ANY" && element_count != 0) ||
+	    (schema_kind == "INLINE" && element_count == 0)) {
+		throw BinderException("Invalid typed graph element schema");
+	}
+
+	vector<GraphSchemaElement> elements(element_count);
+	std::unordered_set<string> element_names;
+	std::unordered_set<string> node_aliases;
+	for (idx_t index = 0; index < element_count; index++) {
+		auto &element = elements[index];
+		element.kind = element_kinds[index];
+		element.type_name = type_names[index];
+		element.local_alias = local_aliases[index];
+		element.source_alias = source_aliases[index];
+		element.target_alias = target_aliases[index];
+		element.direction = directions[index];
+		if ((element.kind != "NODE" && element.kind != "EDGE") || element.type_name.empty() ||
+		    (element.direction != "NONE" && element.direction != "RIGHT" && element.direction != "LEFT" &&
+		     element.direction != "ANY") ||
+		    !element_names.insert(element.kind + ":" + element.type_name).second) {
+			throw BinderException("Invalid or duplicate typed graph element type '%s'", element.type_name);
+		}
+		if (element.kind == "NODE") {
+			if (element.direction != "NONE" || element.local_alias.empty() || !element.source_alias.empty() ||
+			    !element.target_alias.empty() || !node_aliases.insert(element.local_alias).second) {
+				throw BinderException("Invalid or duplicate typed graph node alias '%s'", element.local_alias);
+			}
+		} else if (element.direction == "NONE" || element.source_alias.empty() || element.target_alias.empty()) {
+			throw BinderException("Typed graph edge '%s' requires source and target node aliases", element.type_name);
+		}
+	}
+	for (const auto &element : elements) {
+		if (element.kind == "EDGE" && (node_aliases.find(element.source_alias) == node_aliases.end() ||
+		                               node_aliases.find(element.target_alias) == node_aliases.end())) {
+			throw BinderException("Typed graph edge '%s' references an unknown node alias", element.type_name);
+		}
+	}
+
+	auto label_indices = ReadCreateGraphIndices(input.inputs[10]);
+	auto label_names = ReadCreateGraphStrings(input.inputs[11]);
+	if (label_indices.size() != label_names.size()) {
+		throw BinderException("Invalid typed graph label schema");
+	}
+	vector<std::unordered_set<string>> labels_seen(element_count);
+	for (idx_t index = 0; index < label_indices.size(); index++) {
+		if (label_indices[index] >= element_count || label_names[index].empty() ||
+		    !labels_seen[label_indices[index]].insert(label_names[index]).second) {
+			throw BinderException("Invalid or duplicate typed graph label '%s'", label_names[index]);
+		}
+		elements[label_indices[index]].labels.push_back(label_names[index]);
+	}
+
+	auto property_indices = ReadCreateGraphIndices(input.inputs[12]);
+	auto property_names = ReadCreateGraphStrings(input.inputs[13]);
+	auto property_types = ReadCreateGraphStrings(input.inputs[14]);
+	auto property_nullables = ReadCreateGraphBooleans(input.inputs[15]);
+	if (property_names.size() != property_indices.size() || property_types.size() != property_indices.size() ||
+	    property_nullables.size() != property_indices.size()) {
+		throw BinderException("Invalid typed graph property schema");
+	}
+	vector<std::unordered_set<string>> properties_seen(element_count);
+	for (idx_t index = 0; index < property_indices.size(); index++) {
+		if (property_indices[index] >= element_count || property_names[index].empty() ||
+		    property_types[index].empty() ||
+		    !properties_seen[property_indices[index]].insert(property_names[index]).second) {
+			throw BinderException("Invalid or duplicate typed graph property '%s'", property_names[index]);
+		}
+		elements[property_indices[index]].properties.push_back(
+		    {property_names[index], property_types[index], property_nullables[index]});
+	}
+
+	names = {"success", "graph_name"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return make_uniq<CreateGraphBindData>(std::move(graph_name), conditional, std::move(schema_kind), typed,
+	                                      std::move(elements));
 }
 
 static unique_ptr<FunctionData> SetGraphBind(ClientContext &, TableFunctionBindInput &input,
@@ -278,7 +504,7 @@ static void CreateGraph(ClientContext &context, TableFunctionInput &input, DataC
 	if (!context.transaction.IsAutoCommit()) {
 		throw NotImplementedException("CREATE GRAPH is not eligible inside an explicit transaction");
 	}
-	auto &data = input.bind_data->Cast<CommandBindData>();
+	auto &data = input.bind_data->Cast<CreateGraphBindData>();
 	Connection connection(*context.db);
 	GqlEnsureStorage(connection);
 	if (GraphExists(connection, data.graph_name)) {
@@ -288,11 +514,56 @@ static void CreateGraph(ClientContext &context, TableFunctionInput &input, DataC
 		EmitCommandResult(output, state, data.graph_name);
 		return;
 	}
-	GqlQuery(connection,
-	         "INSERT INTO gql_internal.graphs (graph_name) VALUES (" + GqlQuoteLiteral(data.graph_name) + ")");
-	GqlQuery(connection, "INSERT INTO gql_internal.graph_storage (graph_id, storage_mode, schema_version, csr_policy) "
-	                     "SELECT graph_id, 'EMPTY', 0, 'DISABLED' FROM gql_internal.graphs WHERE graph_name = " +
-	                         GqlQuoteLiteral(data.graph_name));
+	connection.BeginTransaction();
+	try {
+		auto graph_id = GqlQuery(connection, "INSERT INTO gql_internal.graphs (graph_name) VALUES (" +
+		                                         GqlQuoteLiteral(data.graph_name) + ") RETURNING graph_id")
+		                    ->GetValue(0, 0)
+		                    .GetValue<uint64_t>();
+		GqlQuery(connection, "INSERT INTO gql_internal.graph_storage "
+		                     "(graph_id, storage_mode, schema_version, csr_policy) VALUES (" +
+		                         to_string(graph_id) + ", 'EMPTY', 0, 'DISABLED')");
+		GqlQuery(connection, "INSERT INTO gql_internal.graph_schemas (graph_id, schema_kind, is_typed) VALUES (" +
+		                         to_string(graph_id) + ", " + GqlQuoteLiteral(data.schema_kind) + ", " +
+		                         (data.typed ? "true" : "false") + ")");
+		for (idx_t element_index = 0; element_index < data.elements.size(); element_index++) {
+			auto &element = data.elements[element_index];
+			auto local_alias = element.local_alias.empty() ? "NULL" : GqlQuoteLiteral(element.local_alias);
+			auto source_alias = element.source_alias.empty() ? "NULL" : GqlQuoteLiteral(element.source_alias);
+			auto target_alias = element.target_alias.empty() ? "NULL" : GqlQuoteLiteral(element.target_alias);
+			auto schema_element_id =
+			    GqlQuery(connection, "INSERT INTO gql_internal.graph_schema_elements "
+			                         "(graph_id, element_ordinal, element_kind, type_name, local_alias, source_alias, "
+			                         "target_alias, direction) VALUES (" +
+			                             to_string(graph_id) + ", " + to_string(element_index) + ", " +
+			                             GqlQuoteLiteral(element.kind) + ", " + GqlQuoteLiteral(element.type_name) +
+			                             ", " + local_alias + ", " + source_alias + ", " + target_alias + ", " +
+			                             GqlQuoteLiteral(element.direction) + ") RETURNING schema_element_id")
+			        ->GetValue(0, 0)
+			        .GetValue<uint64_t>();
+			for (idx_t label_index = 0; label_index < element.labels.size(); label_index++) {
+				GqlQuery(connection, "INSERT INTO gql_internal.graph_schema_labels "
+				                     "(schema_element_id, label_ordinal, label_name) VALUES (" +
+				                         to_string(schema_element_id) + ", " + to_string(label_index) + ", " +
+				                         GqlQuoteLiteral(element.labels[label_index]) + ")");
+			}
+			for (idx_t property_index = 0; property_index < element.properties.size(); property_index++) {
+				auto &property = element.properties[property_index];
+				GqlQuery(connection,
+				         "INSERT INTO gql_internal.graph_schema_properties "
+				         "(schema_element_id, property_ordinal, property_name, gql_type, nullable) VALUES (" +
+				             to_string(schema_element_id) + ", " + to_string(property_index) + ", " +
+				             GqlQuoteLiteral(property.name) + ", " + GqlQuoteLiteral(property.gql_type) + ", " +
+				             (property.nullable ? "true" : "false") + ")");
+			}
+		}
+		connection.Commit();
+	} catch (...) {
+		if (connection.HasActiveTransaction()) {
+			connection.Rollback();
+		}
+		throw;
+	}
 	EmitCommandResult(output, state, data.graph_name);
 }
 
@@ -346,6 +617,14 @@ static void DropGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		                     "(SELECT element_table_id FROM gql_internal.graph_element_tables WHERE graph_id = " +
 		                         to_string(graph_id) + ")");
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_element_tables WHERE graph_id = " + to_string(graph_id));
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_schema_properties WHERE schema_element_id IN "
+		                     "(SELECT schema_element_id FROM gql_internal.graph_schema_elements WHERE graph_id = " +
+		                         to_string(graph_id) + ")");
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_schema_labels WHERE schema_element_id IN "
+		                     "(SELECT schema_element_id FROM gql_internal.graph_schema_elements WHERE graph_id = " +
+		                         to_string(graph_id) + ")");
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_schema_elements WHERE graph_id = " + to_string(graph_id));
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_schemas WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_storage WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graphs WHERE graph_id = " + to_string(graph_id));
 		connection.Commit();
@@ -669,8 +948,16 @@ static void GraphsFunction(ClientContext &context, TableFunctionInput &input, Da
 }
 
 TableFunction GqlCreateGraphFunction() {
-	TableFunction function("gql_create_graph", {LogicalType::VARCHAR, LogicalType::BOOLEAN}, CreateGraph);
-	function.bind = CommandBind;
+	TableFunction function("gql_create_graph",
+	                       {LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::BOOLEAN,
+	                        LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                        LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                        LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                        LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::VARCHAR),
+	                        LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::VARCHAR),
+	                        LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::BOOLEAN)},
+	                       CreateGraph);
+	function.bind = CreateGraphBind;
 	function.init_global = SingleRowInit;
 	return function;
 }

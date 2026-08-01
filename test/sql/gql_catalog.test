@@ -102,3 +102,133 @@ query IT
 DROP GRAPH IF EXISTS social
 ----
 true	social
+
+# Explicit inline typed schemas are catalog metadata in this slice. The graph
+# remains EMPTY until a later typed storage/materialization slice consumes the
+# declarations.
+query IT
+CREATE GRAPH typed_social TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING}),
+    (Company :Company {id INT64 NOT NULL, name STRING}),
+    (Person)-[:KNOWS {since INT32}]->(Person)
+}
+----
+true	typed_social
+
+query TI
+SELECT s.schema_kind, s.is_typed
+FROM gql_internal.graph_schemas s
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+----
+INLINE	true
+
+query ITT
+SELECT e.element_ordinal, e.element_kind, e.type_name
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+ORDER BY e.element_ordinal
+----
+0	NODE	person
+1	NODE	company
+2	EDGE	knows
+
+query TTT
+SELECT e.type_name, e.source_alias, e.target_alias
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social' AND e.element_kind = 'EDGE'
+----
+knows	person	person
+
+query TT
+SELECT e.type_name, l.label_name
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graph_schema_labels l USING (schema_element_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+ORDER BY e.element_ordinal, l.label_ordinal
+----
+person	person
+company	company
+knows	knows
+
+query TTIT
+SELECT e.type_name, p.property_name, p.nullable, p.gql_type
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graph_schema_properties p USING (schema_element_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+ORDER BY e.element_ordinal, p.property_ordinal
+----
+person	id	false	INT64
+person	name	true	STRING
+company	id	false	INT64
+company	name	true	STRING
+knows	since	true	INT32
+
+query T
+SELECT storage_mode
+FROM gql_internal.graph_storage s
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+----
+EMPTY
+
+query IT
+CREATE GRAPH IF NOT EXISTS typed_social TYPED {
+    (Replacement :Replacement {different STRING})
+}
+----
+true	typed_social
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'typed_social'
+----
+3
+
+statement error
+CREATE GRAPH invalid_properties TYPED {
+    (Person :Person {name STRING, name INT64})
+}
+----
+<REGEX>:.*duplicate typed graph property 'name'.*
+
+statement error
+CREATE GRAPH invalid_endpoint TYPED {
+    (Person :Person {name STRING}),
+    (Missing)-[:KNOWS]->(Person)
+}
+----
+<REGEX>:.*edge 'knows' references an unknown node alias.*
+
+query I
+SELECT count(*) FROM gql_internal.graphs
+WHERE graph_name IN ('invalid_properties', 'invalid_endpoint')
+----
+0
+
+query IT
+DROP GRAPH typed_social
+----
+true	typed_social
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_schemas s
+LEFT JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_id IS NULL
+----
+0
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_schema_elements e
+LEFT JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_id IS NULL
+----
+0

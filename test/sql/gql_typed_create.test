@@ -1,0 +1,74 @@
+# name: test/sql/gql_typed_create.test
+# description: Persist and remove explicit inline typed graph schemas
+# group: [gql]
+
+load __TEST_DIR__/gql_typed_create.db
+
+require duckgql
+
+query IT
+CREATE GRAPH persistent_typed TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING}),
+    (Person)-[:KNOWS {since INT32}]->(Person)
+}
+----
+true	persistent_typed
+
+restart
+
+query TIT
+SELECT s.schema_kind, s.is_typed, st.storage_mode
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_schemas s USING (graph_id)
+JOIN gql_internal.graph_storage st USING (graph_id)
+WHERE g.graph_name = 'persistent_typed'
+----
+INLINE	true	EMPTY
+
+query ITT
+SELECT e.element_ordinal, e.element_kind, e.type_name
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'persistent_typed'
+ORDER BY e.element_ordinal
+----
+0	NODE	person
+1	EDGE	knows
+
+query TTIT
+SELECT e.type_name, p.property_name, p.nullable, p.gql_type
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graph_schema_properties p USING (schema_element_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'persistent_typed'
+ORDER BY e.element_ordinal, p.property_ordinal
+----
+person	id	false	INT64
+person	name	true	STRING
+knows	since	true	INT32
+
+statement ok
+DROP GRAPH persistent_typed
+
+restart
+
+query I
+SELECT count(*) FROM gql_internal.graphs WHERE graph_name = 'persistent_typed'
+----
+0
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_schemas s
+LEFT JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_id IS NULL
+----
+0
+
+query I
+SELECT count(*)
+FROM gql_internal.graph_schema_elements e
+LEFT JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_id IS NULL
+----
+0

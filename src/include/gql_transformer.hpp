@@ -28,6 +28,15 @@ private:
 	shared_ptr<GqlInsertStatement> TransformInsert(GQLParser::InsertStatementContext &context, bool allow_expressions);
 	bool TransformInsertElement(GQLParser::InsertElementPatternFillerContext *filler, GqlInsertElement &element,
 	                            bool allow_expressions);
+	bool TransformInlineGraphSchema(GQLParser::NestedGraphTypeSpecificationContext &context,
+	                                GqlGraphSchemaDefinition &result);
+	bool TransformNodeType(GQLParser::NodeTypeSpecificationContext &context, GqlGraphElementDefinition &result);
+	bool TransformEdgeType(GQLParser::EdgeTypeSpecificationContext &context, GqlGraphElementDefinition &result);
+	bool TransformNodeTypeFiller(GQLParser::NodeTypeFillerContext *filler, GqlGraphElementDefinition &result);
+	bool TransformEdgeTypeFiller(GQLParser::EdgeTypeFillerContext *filler, GqlGraphElementDefinition &result);
+	bool TransformGraphTypeLabels(GQLParser::LabelSetPhraseContext *phrase, vector<GqlIdentifier> &result);
+	bool TransformGraphTypeProperties(GQLParser::PropertyTypesSpecificationContext *specification,
+	                                  vector<GqlGraphPropertyDefinition> &result);
 	bool TransformMatch(GQLParser::GqlProgramContext &root);
 	bool TransformCall(GQLParser::GqlProgramContext &root);
 	bool TransformMutation(GQLParser::PrimitiveDataModifyingStatementContext &context, GqlMatchStatement &match);

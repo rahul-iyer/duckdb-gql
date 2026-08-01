@@ -124,9 +124,8 @@ std::any GqlTransformer::visitCreateGraphStatement(GQLParser::CreateGraphStateme
 		Unsupported(*context, "CREATE OR REPLACE GRAPH");
 		return {};
 	}
-	if (!context->openGraphType() || !context->openGraphType()->ANY() || context->ofGraphType() ||
-	    context->graphSource()) {
-		Unsupported(*context, "typed, copied, or closed graph creation");
+	if (context->graphSource()) {
+		Unsupported(*context, "copied graph creation");
 		return {};
 	}
 	auto parent_and_name = context->catalogGraphParentAndName();
@@ -139,9 +138,246 @@ std::any GqlTransformer::visitCreateGraphStatement(GQLParser::CreateGraphStateme
 		Unsupported(*context, "delimited graph names");
 		return {};
 	}
+	GqlGraphSchemaDefinition schema;
+	if (auto open = context->openGraphType()) {
+		if (!open->ANY() || open->typed()) {
+			Unsupported(*context, "typed open graph creation");
+			return {};
+		}
+	} else if (auto of_type = context->ofGraphType()) {
+		if (!of_type->typed() || !of_type->nestedGraphTypeSpecification() || of_type->graphTypeReference() ||
+		    of_type->graphTypeLikeGraph()) {
+			Unsupported(*context, "non-inline typed graph creation");
+			return {};
+		}
+		schema.kind = GqlGraphSchemaKind::INLINE;
+		schema.typed = true;
+		if (!TransformInlineGraphSchema(*of_type->nestedGraphTypeSpecification(), schema)) {
+			Unsupported(*context, "typed inline graph schema form");
+			return {};
+		}
+	} else {
+		Unsupported(*context, "graph schema");
+		return {};
+	}
 	statement = make_shared_ptr<GqlCreateGraphStatement>(SourceRange(*context), TransformIdentifier(*graph_name),
-	                                                     context->IF() != nullptr);
+	                                                     context->IF() != nullptr, std::move(schema));
 	return {};
+}
+
+bool GqlTransformer::TransformInlineGraphSchema(GQLParser::NestedGraphTypeSpecificationContext &context,
+                                                GqlGraphSchemaDefinition &result) {
+	auto body = context.graphTypeSpecificationBody();
+	if (!body || !body->elementTypeList()) {
+		return false;
+	}
+	for (auto specification : body->elementTypeList()->elementTypeSpecification()) {
+		GqlGraphElementDefinition element;
+		element.source = SourceRange(*specification);
+		if (auto node = specification->nodeTypeSpecification()) {
+			if (!TransformNodeType(*node, element)) {
+				return false;
+			}
+		} else if (auto edge = specification->edgeTypeSpecification()) {
+			if (!TransformEdgeType(*edge, element)) {
+				return false;
+			}
+		} else {
+			return false;
+		}
+		result.elements.push_back(std::move(element));
+	}
+	return !result.elements.empty();
+}
+
+bool GqlTransformer::TransformNodeType(GQLParser::NodeTypeSpecificationContext &context,
+                                       GqlGraphElementDefinition &result) {
+	auto pattern = context.nodeTypePattern();
+	if (!pattern || context.nodeTypePhrase()) {
+		return false;
+	}
+	result.kind = GqlPatternElementType::VERTEX;
+	if (auto name = pattern->nodeTypeName()) {
+		if (!IsRegularIdentifier(name->getText())) {
+			return false;
+		}
+		result.type_name = TransformIdentifier(*name);
+	}
+	if (auto alias = pattern->localNodeTypeAlias()) {
+		if (!IsRegularIdentifier(alias->getText())) {
+			return false;
+		}
+		result.local_alias = TransformIdentifier(*alias);
+	}
+	if (!TransformNodeTypeFiller(pattern->nodeTypeFiller(), result)) {
+		return false;
+	}
+	if (result.type_name.IsEmpty()) {
+		if (!result.local_alias.IsEmpty()) {
+			result.type_name = result.local_alias;
+		} else if (!result.labels.empty()) {
+			result.type_name = result.labels[0];
+		}
+	}
+	if (result.local_alias.IsEmpty()) {
+		result.local_alias = result.type_name;
+	}
+	return !result.type_name.IsEmpty();
+}
+
+bool GqlTransformer::TransformEdgeType(GQLParser::EdgeTypeSpecificationContext &context,
+                                       GqlGraphElementDefinition &result) {
+	auto pattern = context.edgeTypePattern();
+	if (!pattern || context.edgeTypePhrase()) {
+		return false;
+	}
+	result.kind = GqlPatternElementType::EDGE;
+	if (auto name = pattern->edgeTypeName()) {
+		if (!IsRegularIdentifier(name->getText())) {
+			return false;
+		}
+		result.type_name = TransformIdentifier(*name);
+	}
+
+	GQLParser::SourceNodeTypeReferenceContext *source = nullptr;
+	GQLParser::DestinationNodeTypeReferenceContext *target = nullptr;
+	GQLParser::EdgeTypeFillerContext *filler = nullptr;
+	if (auto directed = pattern->edgeTypePatternDirected()) {
+		if (auto right = directed->edgeTypePatternPointingRight()) {
+			source = right->sourceNodeTypeReference();
+			target = right->destinationNodeTypeReference();
+			filler = right->arcTypePointingRight()->edgeTypeFiller();
+			result.direction = GqlEdgeDirection::RIGHT;
+		} else if (auto left = directed->edgeTypePatternPointingLeft()) {
+			source = left->sourceNodeTypeReference();
+			target = left->destinationNodeTypeReference();
+			filler = left->arcTypePointingLeft()->edgeTypeFiller();
+			result.direction = GqlEdgeDirection::LEFT;
+		} else {
+			return false;
+		}
+	} else if (auto undirected = pattern->edgeTypePatternUndirected()) {
+		source = undirected->sourceNodeTypeReference();
+		target = undirected->destinationNodeTypeReference();
+		filler = undirected->arcTypeUndirected()->edgeTypeFiller();
+		result.direction = GqlEdgeDirection::ANY;
+	} else {
+		return false;
+	}
+	if (!source || !target || !source->sourceNodeTypeAlias() || !target->destinationNodeTypeAlias() ||
+	    source->nodeTypeFiller() || target->nodeTypeFiller() ||
+	    !IsRegularIdentifier(source->sourceNodeTypeAlias()->getText()) ||
+	    !IsRegularIdentifier(target->destinationNodeTypeAlias()->getText())) {
+		return false;
+	}
+	result.source_alias = TransformIdentifier(*source->sourceNodeTypeAlias());
+	result.target_alias = TransformIdentifier(*target->destinationNodeTypeAlias());
+	if (!TransformEdgeTypeFiller(filler, result)) {
+		return false;
+	}
+	if (result.type_name.IsEmpty() && !result.labels.empty()) {
+		result.type_name = result.labels[0];
+	}
+	return !result.type_name.IsEmpty();
+}
+
+bool GqlTransformer::TransformNodeTypeFiller(GQLParser::NodeTypeFillerContext *filler,
+                                             GqlGraphElementDefinition &result) {
+	if (!filler) {
+		return true;
+	}
+	if (filler->nodeTypeKeyLabelSet()) {
+		return false;
+	}
+	auto content = filler->nodeTypeImpliedContent();
+	if (!content) {
+		return true;
+	}
+	if (auto labels = content->nodeTypeLabelSet()) {
+		if (!TransformGraphTypeLabels(labels->labelSetPhrase(), result.labels)) {
+			return false;
+		}
+	}
+	if (auto properties = content->nodeTypePropertyTypes()) {
+		if (!TransformGraphTypeProperties(properties->propertyTypesSpecification(), result.properties)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool GqlTransformer::TransformEdgeTypeFiller(GQLParser::EdgeTypeFillerContext *filler,
+                                             GqlGraphElementDefinition &result) {
+	if (!filler) {
+		return true;
+	}
+	if (filler->edgeTypeKeyLabelSet()) {
+		return false;
+	}
+	auto content = filler->edgeTypeImpliedContent();
+	if (!content) {
+		return true;
+	}
+	if (auto labels = content->edgeTypeLabelSet()) {
+		if (!TransformGraphTypeLabels(labels->labelSetPhrase(), result.labels)) {
+			return false;
+		}
+	}
+	if (auto properties = content->edgeTypePropertyTypes()) {
+		if (!TransformGraphTypeProperties(properties->propertyTypesSpecification(), result.properties)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool GqlTransformer::TransformGraphTypeLabels(GQLParser::LabelSetPhraseContext *phrase, vector<GqlIdentifier> &result) {
+	if (!phrase) {
+		return true;
+	}
+	if (auto label = phrase->labelName()) {
+		if (!IsRegularIdentifier(label->getText())) {
+			return false;
+		}
+		result.push_back(TransformIdentifier(*label));
+		return true;
+	}
+	auto specification = phrase->labelSetSpecification();
+	if (!specification) {
+		return false;
+	}
+	for (auto label : specification->labelName()) {
+		if (!IsRegularIdentifier(label->getText())) {
+			return false;
+		}
+		result.push_back(TransformIdentifier(*label));
+	}
+	return !result.empty();
+}
+
+bool GqlTransformer::TransformGraphTypeProperties(GQLParser::PropertyTypesSpecificationContext *specification,
+                                                  vector<GqlGraphPropertyDefinition> &result) {
+	if (!specification || !specification->propertyTypeList()) {
+		return true;
+	}
+	for (auto property : specification->propertyTypeList()->propertyType()) {
+		if (!property->propertyName() || !property->propertyValueType() ||
+		    !property->propertyValueType()->valueType() || !IsRegularIdentifier(property->propertyName()->getText())) {
+			return false;
+		}
+		GqlGraphPropertyDefinition definition;
+		definition.name = TransformIdentifier(*property->propertyName());
+		definition.source = SourceRange(*property);
+		definition.gql_type = StringUtil::Upper(property->propertyValueType()->valueType()->getText());
+		definition.nullable = !StringUtil::EndsWith(definition.gql_type, "NOTNULL") ||
+		                      dynamic_cast<GQLParser::ClosedDynamicUnionTypeAtl2Context *>(
+		                          property->propertyValueType()->valueType()) != nullptr;
+		if (!definition.nullable && StringUtil::EndsWith(definition.gql_type, "NOTNULL")) {
+			definition.gql_type.resize(definition.gql_type.size() - 7);
+		}
+		result.push_back(std::move(definition));
+	}
+	return true;
 }
 
 std::any GqlTransformer::visitDropGraphStatement(GQLParser::DropGraphStatementContext *context) {

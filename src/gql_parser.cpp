@@ -1604,9 +1604,57 @@ ParserExtensionPlanResult GqlPlan(ParserExtensionInfo *, ClientContext &,
 	switch (statement.type) {
 	case GqlStatementType::CREATE_GRAPH: {
 		auto &create = statement.Cast<GqlCreateGraphStatement>();
+		vector<Value> element_kinds;
+		vector<Value> type_names;
+		vector<Value> local_aliases;
+		vector<Value> source_aliases;
+		vector<Value> target_aliases;
+		vector<Value> directions;
+		vector<Value> label_element_indices;
+		vector<Value> label_names;
+		vector<Value> property_element_indices;
+		vector<Value> property_names;
+		vector<Value> property_types;
+		vector<Value> property_nullables;
+		for (idx_t element_index = 0; element_index < create.schema.elements.size(); element_index++) {
+			auto &element = create.schema.elements[element_index];
+			element_kinds.emplace_back(element.kind == GqlPatternElementType::VERTEX ? "NODE" : "EDGE");
+			type_names.emplace_back(element.type_name.value);
+			local_aliases.emplace_back(element.local_alias.value);
+			source_aliases.emplace_back(element.source_alias.value);
+			target_aliases.emplace_back(element.target_alias.value);
+			directions.emplace_back(element.kind == GqlPatternElementType::VERTEX  ? "NONE"
+			                        : element.direction == GqlEdgeDirection::RIGHT ? "RIGHT"
+			                        : element.direction == GqlEdgeDirection::LEFT  ? "LEFT"
+			                                                                       : "ANY");
+			for (auto &label : element.labels) {
+				label_element_indices.emplace_back(Value::UBIGINT(element_index));
+				label_names.emplace_back(label.value);
+			}
+			for (auto &property : element.properties) {
+				property_element_indices.emplace_back(Value::UBIGINT(element_index));
+				property_names.emplace_back(property.name.value);
+				property_types.emplace_back(property.gql_type);
+				property_nullables.emplace_back(property.nullable);
+			}
+		}
 		result.function = GqlCreateGraphFunction();
 		result.parameters.emplace_back(create.graph_name.value);
 		result.parameters.emplace_back(create.if_not_exists);
+		result.parameters.emplace_back(create.schema.kind == GqlGraphSchemaKind::ANY ? "ANY" : "INLINE");
+		result.parameters.emplace_back(create.schema.typed);
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(element_kinds)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(type_names)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(local_aliases)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(source_aliases)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(target_aliases)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(directions)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(label_element_indices)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(label_names)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::UBIGINT, std::move(property_element_indices)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(property_names)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::VARCHAR, std::move(property_types)));
+		result.parameters.emplace_back(Value::LIST(LogicalType::BOOLEAN, std::move(property_nullables)));
 		return result;
 	}
 	case GqlStatementType::COPY_GRAPH: {
