@@ -42,6 +42,7 @@ TableFunction GqlWccFunction();
 TableFunction GqlSccFunction();
 TableFunction GqlTriangleCountFunction();
 TableFunction GqlLccFunction();
+TableFunction GqlLouvainFunction();
 TableFunction GqlDegreeFunction();
 TableFunction GqlClosenessFunction();
 

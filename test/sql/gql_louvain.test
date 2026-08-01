@@ -1,0 +1,147 @@
+# name: test/sql/gql_louvain.test
+# description: CSR-native multilevel Louvain community detection
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', 'node;left', 'one'),
+        ('2', 'node;left', 'two'),
+        ('3', 'node;left', 'three'),
+        ('4', 'node;right', 'four'),
+        ('5', 'node;right', 'five'),
+        ('6', 'node;right', 'six'),
+        ('7', 'node;isolated', 'isolated')
+    ) vertices("external_id:ID", ":LABEL", "name:string")
+) TO '__TEST_DIR__/gql_louvain_vertices.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('1', '2', 'route'),
+        ('2', '3', 'route'),
+        ('3', '1', 'route'),
+        ('2', '1', 'route'),
+        ('1', '2', 'route'),
+        ('1', '1', 'route'),
+        ('4', '5', 'route'),
+        ('5', '6', 'route'),
+        ('6', '4', 'route'),
+        ('3', '4', 'express')
+    ) edges(":START_ID", ":END_ID", ":TYPE")
+) TO '__TEST_DIR__/gql_louvain_edges.csv' (FORMAT CSV, HEADER)
+
+query IT
+CREATE GRAPH louvain_graph ANY
+----
+true	louvain_graph
+
+query ITII
+COPY GRAPH louvain_graph FROM (
+    VERTICES '__TEST_DIR__/gql_louvain_vertices.csv',
+    EDGES '__TEST_DIR__/gql_louvain_edges.csv'
+) FORMAT GRAPH
+----
+true	louvain_graph	7	10
+
+statement ok
+CALL gql_build_csr('louvain_graph')
+
+# Louvain uses a simple undirected projection. Reciprocal/parallel arcs are
+# coalesced and self-loops are ignored, leaving two triangles joined by one
+# bridge plus an isolated vertex.
+query IIIR
+SELECT vertex_id, community_id, community_size, round(modularity, 6)
+FROM system.algo.louvain('louvain_graph')
+ORDER BY vertex_id
+----
+1	1	3	0.357143
+2	1	3	0.357143
+3	1	3	0.357143
+4	4	3	0.357143
+5	4	3	0.357143
+6	4	3	0.357143
+7	7	1	0.357143
+
+query III
+SELECT min(levels) >= 1, min(iterations) >= 1, bool_and(converged)
+FROM system.algo.louvain('louvain_graph')
+----
+true	true	true
+
+# A higher resolution preserves all singleton communities on this graph.
+query III
+SELECT count(DISTINCT community_id), min(community_size), max(community_size)
+FROM system.algo.louvain('louvain_graph', resolution := 10.0)
+----
+7	1	1
+
+# Vertex labels define an induced graph projection.
+query III
+SELECT vertex_id, community_id, community_size
+FROM system.algo.louvain('louvain_graph', vertex_label := 'left')
+ORDER BY vertex_id
+----
+1	1	3
+2	1	3
+3	1	3
+
+# Edge labels independently project the simple undirected topology.
+query III rowsort
+SELECT vertex_id, community_id, community_size
+FROM system.algo.louvain('louvain_graph', edge_label := 'express')
+----
+1	1	1
+2	2	1
+3	3	2
+4	3	2
+5	5	1
+6	6	1
+7	7	1
+
+# CALL/YIELD can fetch registered vertex properties while preserving the
+# algorithm's community outputs and named controls.
+query TII rowsort
+CALL algo.louvain(
+    'louvain_graph',
+    resolution := 1.0,
+    max_iterations := 8
+)
+YIELD name, community_id, community_size
+RETURN name, community_id, community_size
+----
+five	4	3
+four	4	3
+isolated	7	1
+one	1	3
+six	4	3
+three	1	3
+two	1	3
+
+query I
+SELECT count(*)
+FROM system.algo.louvain('louvain_graph', vertex_label := 'missing')
+----
+0
+
+statement error
+CALL algo.louvain('louvain_graph', resolution := 0.0)
+----
+resolution must be positive and finite
+
+statement error
+CALL algo.louvain('louvain_graph', max_iterations := 0)
+----
+max_iterations must be positive
+
+statement error
+CALL algo.louvain('louvain_graph', max_levels := 0)
+----
+max_levels must be positive
+
+statement error
+CALL algo.louvain('louvain_graph', tolerance := -1.0)
+----
+tolerance must be non-negative and finite

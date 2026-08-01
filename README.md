@@ -26,8 +26,8 @@ storage and execution engine, plus an explicit CSR layer for graph algorithms.
 - Standalone node and directed-path `INSERT`, fixed directed
   `MATCH`-and-`INSERT`, property `SET` and `REMOVE`, and edge/node deletion.
 - Explicit CSR-backed BFS, DFS, unweighted SSSP, PageRank, weak and strong
-  components, degree, closeness, local clustering coefficient, and triangle
-  counting.
+  components, Louvain community detection, degree, closeness, local clustering
+  coefficient, and triangle counting.
 - Caller-controlled DuckDB transactions for graph queries and mutations, plus
   persistence, vectorized scans, joins, aggregation, and recursive CTE
   execution beneath the GQL layer.
@@ -225,7 +225,19 @@ CALL algo.pagerank(
 YIELD vertex_id, rank
 RETURN vertex_id, rank
 ORDER BY rank DESC;
+
+CALL algo.louvain(
+    'social',
+    resolution := 1.0,
+    max_iterations := 32
+)
+YIELD vertex_id, community_id, community_size, modularity
+RETURN vertex_id, community_id, community_size, modularity
+ORDER BY community_size DESC, vertex_id;
 ```
+
+Louvain currently uses an unweighted simple-undirected projection: reciprocal
+and parallel edges are coalesced, and self-loops are ignored.
 
 CSR snapshots are connection-local and version checked. Graph mutations and
 direct SQL writes to a graph's vertex or edge tables invalidate the affected

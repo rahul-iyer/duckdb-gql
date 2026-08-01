@@ -89,6 +89,7 @@ static void RegisterAlgorithmFunctions(ExtensionLoader &loader) {
 	register_function(GqlSccFunction());
 	register_function(GqlTriangleCountFunction());
 	register_function(GqlLccFunction());
+	register_function(GqlLouvainFunction());
 	register_function(GqlDegreeFunction());
 	register_function(GqlClosenessFunction());
 }

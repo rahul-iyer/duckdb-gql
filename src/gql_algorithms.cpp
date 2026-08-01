@@ -118,6 +118,18 @@ static const vector<GqlProcedureDefinition> &AlgorithmProcedures() {
 	      {"directed_neighbor_edge_count", {GqlTypeId::INTEGER, false}},
 	      {"local_clustering_coefficient", {GqlTypeId::DOUBLE, false}}}},
 	    {"algo",
+	     "louvain",
+	     GqlProcedureInputMode::NONE,
+	     {{"graph", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION},
+	      {"vertex_label", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION, true}},
+	     {{"vertex_id", {GqlTypeId::ELEMENT_ID, false}},
+	      {"community_id", {GqlTypeId::ELEMENT_ID, false}},
+	      {"community_size", {GqlTypeId::INTEGER, false}},
+	      {"modularity", {GqlTypeId::DOUBLE, false}},
+	      {"levels", {GqlTypeId::INTEGER, false}},
+	      {"iterations", {GqlTypeId::INTEGER, false}},
+	      {"converged", {GqlTypeId::BOOLEAN, false}}}},
+	    {"algo",
 	     "degree",
 	     GqlProcedureInputMode::NONE,
 	     {{"graph", {GqlTypeId::STRING, false}, GqlProcedureArgumentMode::CONFIGURATION},
@@ -1295,6 +1307,444 @@ static void LccFunction(ClientContext &context, TableFunctionInput &input, DataC
 	output.SetCardinality(count);
 }
 
+struct LouvainBindData : GraphAlgorithmBindData {
+	double resolution = 1.0;
+	idx_t max_iterations = 32;
+	idx_t max_levels = 32;
+	double tolerance = 1e-12;
+};
+
+static unique_ptr<FunctionData> LouvainBind(ClientContext &, TableFunctionBindInput &input,
+                                            vector<LogicalType> &return_types, vector<string> &names) {
+	auto projection = ReadGraphAlgorithmBind(input, "Louvain");
+	auto result = make_uniq<LouvainBindData>();
+	result->graph_name = std::move(projection->graph_name);
+	result->edge_label = std::move(projection->edge_label);
+	result->vertex_label = std::move(projection->vertex_label);
+	if (auto value = NamedParameter(input, "resolution")) {
+		if (!value->IsNull()) {
+			result->resolution = value->GetValue<double>();
+		}
+	}
+	if (auto value = NamedParameter(input, "max_iterations")) {
+		if (!value->IsNull()) {
+			auto max_iterations = value->GetValue<int64_t>();
+			if (max_iterations <= 0) {
+				throw BinderException("GQL Louvain max_iterations must be positive");
+			}
+			result->max_iterations = NumericCast<idx_t>(max_iterations);
+		}
+	}
+	if (auto value = NamedParameter(input, "max_levels")) {
+		if (!value->IsNull()) {
+			auto max_levels = value->GetValue<int64_t>();
+			if (max_levels <= 0) {
+				throw BinderException("GQL Louvain max_levels must be positive");
+			}
+			result->max_levels = NumericCast<idx_t>(max_levels);
+		}
+	}
+	if (auto value = NamedParameter(input, "tolerance")) {
+		if (!value->IsNull()) {
+			result->tolerance = value->GetValue<double>();
+		}
+	}
+	if (!std::isfinite(result->resolution) || result->resolution <= 0.0) {
+		throw BinderException("GQL Louvain resolution must be positive and finite");
+	}
+	if (!std::isfinite(result->tolerance) || result->tolerance < 0.0) {
+		throw BinderException("GQL Louvain tolerance must be non-negative and finite");
+	}
+	names = {"vertex_id", "community_id", "community_size", "modularity", "levels", "iterations", "converged"};
+	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::DOUBLE,
+	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::BOOLEAN};
+	return std::move(result);
+}
+
+struct LouvainGraph {
+	vector<uint64_t> offsets;
+	GqlCsrOrdinals neighbors;
+	vector<double> weights;
+	vector<double> degrees;
+	double total_degree = 0.0;
+
+	idx_t VertexCount() const {
+		return degrees.size();
+	}
+
+	double EdgeWeight(idx_t edge) const {
+		return weights.empty() ? 1.0 : weights[edge];
+	}
+};
+
+template <class CALLBACK>
+static void VisitLouvainNeighbors(const GqlCsrSnapshot &snapshot, idx_t snapshot_vertex,
+                                  const vector<idx_t> &snapshot_to_projected, vector<idx_t> &markers,
+                                  idx_t projected_vertex, bool filter_label, uint32_t required_label,
+                                  CALLBACK &&callback) {
+	auto visit = [&](idx_t snapshot_neighbor, uint64_t) {
+		auto projected_neighbor = snapshot_to_projected[snapshot_neighbor];
+		if (projected_neighbor == std::numeric_limits<idx_t>::max() || projected_neighbor == projected_vertex ||
+		    markers[projected_neighbor] == projected_vertex) {
+			return true;
+		}
+		markers[projected_neighbor] = projected_vertex;
+		callback(projected_neighbor);
+		return true;
+	};
+	VisitRange(snapshot.outgoing_offsets, snapshot.outgoing_neighbors, snapshot.outgoing_edge_ids,
+	           snapshot.outgoing_label_ids, snapshot_vertex, filter_label, required_label, visit);
+	VisitRange(snapshot.incoming_offsets, snapshot.incoming_neighbors, snapshot.incoming_edge_ids,
+	           snapshot.incoming_label_ids, snapshot_vertex, filter_label, required_label, visit);
+}
+
+static LouvainGraph BuildLouvainGraph(ClientContext &context, const GqlCsrSnapshot &snapshot,
+                                      const vector<uint8_t> &vertex_mask, const string &edge_label,
+                                      idx_t projected_count, vector<idx_t> &projected_to_snapshot) {
+	const auto invalid = std::numeric_limits<idx_t>::max();
+	vector<idx_t> snapshot_to_projected(snapshot.vertex_ids.size(), invalid);
+	projected_to_snapshot.reserve(projected_count);
+	for (idx_t snapshot_vertex = 0; snapshot_vertex < snapshot.vertex_ids.size(); snapshot_vertex++) {
+		if (!InVertexProjection(vertex_mask, snapshot_vertex)) {
+			continue;
+		}
+		snapshot_to_projected[snapshot_vertex] = projected_to_snapshot.size();
+		projected_to_snapshot.push_back(snapshot_vertex);
+	}
+
+	LouvainGraph graph;
+	const auto vertex_count = projected_to_snapshot.size();
+	graph.offsets.assign(vertex_count + 1, 0);
+	graph.degrees.assign(vertex_count, 0.0);
+	if (vertex_count == 0) {
+		return graph;
+	}
+	bool filter_label;
+	auto required_label = ResolveLabel(snapshot, edge_label, filter_label);
+	vector<idx_t> markers(vertex_count, invalid);
+	for (idx_t vertex = 0; vertex < vertex_count; vertex++) {
+		if (context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		idx_t degree = 0;
+		VisitLouvainNeighbors(snapshot, projected_to_snapshot[vertex], snapshot_to_projected, markers, vertex,
+		                      filter_label, required_label, [&](idx_t) { degree++; });
+		graph.offsets[vertex + 1] = graph.offsets[vertex] + degree;
+		graph.degrees[vertex] = static_cast<double>(degree);
+	}
+
+	const auto edge_count = NumericCast<idx_t>(graph.offsets.back());
+	graph.neighbors.Resize(edge_count, vertex_count - 1 <= std::numeric_limits<uint32_t>::max());
+	std::fill(markers.begin(), markers.end(), invalid);
+	for (idx_t vertex = 0; vertex < vertex_count; vertex++) {
+		auto cursor = NumericCast<idx_t>(graph.offsets[vertex]);
+		VisitLouvainNeighbors(snapshot, projected_to_snapshot[vertex], snapshot_to_projected, markers, vertex,
+		                      filter_label, required_label,
+		                      [&](idx_t neighbor) { graph.neighbors.Set(cursor++, neighbor); });
+	}
+	graph.total_degree = static_cast<double>(edge_count);
+	return graph;
+}
+
+struct LouvainMoveResult {
+	vector<idx_t> communities;
+	idx_t community_count = 0;
+	idx_t iterations = 0;
+	bool converged = false;
+};
+
+static LouvainMoveResult LouvainLocalMove(ClientContext &context, const LouvainGraph &graph,
+                                          const LouvainBindData &data) {
+	LouvainMoveResult result;
+	const auto vertex_count = graph.VertexCount();
+	result.communities.resize(vertex_count);
+	vector<double> community_totals(vertex_count, 0.0);
+	for (idx_t vertex = 0; vertex < vertex_count; vertex++) {
+		result.communities[vertex] = vertex;
+		community_totals[vertex] = graph.degrees[vertex];
+	}
+	if (vertex_count == 0 || graph.total_degree == 0.0) {
+		result.community_count = vertex_count;
+		result.iterations = vertex_count == 0 ? 0 : 1;
+		result.converged = true;
+		return result;
+	}
+
+	vector<uint64_t> affinity_markers(vertex_count, 0);
+	vector<double> affinities(vertex_count, 0.0);
+	vector<idx_t> candidates;
+	candidates.reserve(64);
+	const auto minimum_score_gain = data.tolerance * graph.total_degree;
+	uint64_t affinity_epoch = 0;
+	for (idx_t iteration = 0; iteration < data.max_iterations; iteration++) {
+		bool moved = false;
+		for (idx_t vertex = 0; vertex < vertex_count; vertex++) {
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			const auto degree = graph.degrees[vertex];
+			if (degree == 0.0) {
+				continue;
+			}
+			const auto current = result.communities[vertex];
+			candidates.clear();
+			if (++affinity_epoch == 0) {
+				std::fill(affinity_markers.begin(), affinity_markers.end(), 0);
+				affinity_epoch = 1;
+			}
+			auto touch = [&](idx_t community) {
+				if (affinity_markers[community] == affinity_epoch) {
+					return;
+				}
+				affinity_markers[community] = affinity_epoch;
+				affinities[community] = 0.0;
+				candidates.push_back(community);
+			};
+			touch(current);
+			for (idx_t edge = graph.offsets[vertex]; edge < graph.offsets[vertex + 1]; edge++) {
+				auto neighbor = graph.neighbors[edge];
+				if (neighbor == vertex) {
+					continue;
+				}
+				auto community = result.communities[neighbor];
+				touch(community);
+				affinities[community] += graph.EdgeWeight(edge);
+			}
+
+			community_totals[current] -= degree;
+			auto score = [&](idx_t community) {
+				return affinities[community] -
+				       data.resolution * degree * community_totals[community] / graph.total_degree;
+			};
+			auto best = current;
+			auto current_score = score(current);
+			auto best_score = current_score;
+			for (auto community : candidates) {
+				auto candidate_score = score(community);
+				if (candidate_score > best_score + minimum_score_gain ||
+				    (candidate_score > current_score + minimum_score_gain &&
+				     std::abs(candidate_score - best_score) <= minimum_score_gain && community < best)) {
+					best = community;
+					best_score = candidate_score;
+				}
+			}
+			result.communities[vertex] = best;
+			community_totals[best] += degree;
+			moved |= best != current;
+		}
+		result.iterations = iteration + 1;
+		if (!moved) {
+			result.converged = true;
+			break;
+		}
+	}
+
+	const auto invalid = std::numeric_limits<idx_t>::max();
+	vector<idx_t> compact(vertex_count, invalid);
+	for (idx_t vertex = 0; vertex < vertex_count; vertex++) {
+		auto community = result.communities[vertex];
+		if (compact[community] == invalid) {
+			compact[community] = result.community_count++;
+		}
+		result.communities[vertex] = compact[community];
+	}
+	return result;
+}
+
+static LouvainGraph CoarsenLouvainGraph(ClientContext &context, const LouvainGraph &graph,
+                                        const LouvainMoveResult &move) {
+	LouvainGraph coarse;
+	const auto coarse_count = move.community_count;
+	coarse.offsets.reserve(coarse_count + 1);
+	coarse.offsets.push_back(0);
+	coarse.degrees.assign(coarse_count, 0.0);
+
+	vector<idx_t> member_offsets(coarse_count + 1, 0);
+	for (auto community : move.communities) {
+		member_offsets[community + 1]++;
+	}
+	for (idx_t community = 0; community < coarse_count; community++) {
+		member_offsets[community + 1] += member_offsets[community];
+	}
+	vector<idx_t> members(graph.VertexCount());
+	auto member_cursors = member_offsets;
+	for (idx_t vertex = 0; vertex < graph.VertexCount(); vertex++) {
+		members[member_cursors[move.communities[vertex]]++] = vertex;
+	}
+
+	const auto invalid = std::numeric_limits<idx_t>::max();
+	vector<idx_t> markers(coarse_count, invalid);
+	vector<double> affinities(coarse_count, 0.0);
+	vector<idx_t> targets;
+	vector<idx_t> coarse_neighbors;
+	vector<double> coarse_weights;
+	auto estimated_count =
+	    coarse_count > std::numeric_limits<idx_t>::max() / 8 ? std::numeric_limits<idx_t>::max() : coarse_count * 8;
+	auto reserve_count = MinValue<idx_t>(graph.neighbors.size(), estimated_count);
+	coarse_neighbors.reserve(reserve_count);
+	coarse_weights.reserve(reserve_count);
+	for (idx_t community = 0; community < coarse_count; community++) {
+		if (context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		targets.clear();
+		for (idx_t member = member_offsets[community]; member < member_offsets[community + 1]; member++) {
+			auto vertex = members[member];
+			for (idx_t edge = graph.offsets[vertex]; edge < graph.offsets[vertex + 1]; edge++) {
+				auto target = move.communities[graph.neighbors[edge]];
+				if (markers[target] != community) {
+					markers[target] = community;
+					affinities[target] = 0.0;
+					targets.push_back(target);
+				}
+				affinities[target] += graph.EdgeWeight(edge);
+			}
+		}
+		std::sort(targets.begin(), targets.end());
+		for (auto target : targets) {
+			auto weight = affinities[target];
+			coarse_neighbors.push_back(target);
+			coarse_weights.push_back(weight);
+			coarse.degrees[community] += weight;
+		}
+		coarse.offsets.push_back(coarse_neighbors.size());
+	}
+
+	coarse.neighbors.Resize(coarse_neighbors.size(), coarse_count - 1 <= std::numeric_limits<uint32_t>::max());
+	for (idx_t edge = 0; edge < coarse_neighbors.size(); edge++) {
+		coarse.neighbors.Set(edge, coarse_neighbors[edge]);
+	}
+	coarse.weights = std::move(coarse_weights);
+	coarse.total_degree = graph.total_degree;
+	return coarse;
+}
+
+static double LouvainModularity(const LouvainGraph &graph, const vector<idx_t> &communities, idx_t community_count,
+                                double resolution) {
+	if (graph.total_degree == 0.0) {
+		return 0.0;
+	}
+	vector<double> community_degrees(community_count, 0.0);
+	double internal_weight = 0.0;
+	for (idx_t vertex = 0; vertex < graph.VertexCount(); vertex++) {
+		auto community = communities[vertex];
+		community_degrees[community] += graph.degrees[vertex];
+		for (idx_t edge = graph.offsets[vertex]; edge < graph.offsets[vertex + 1]; edge++) {
+			if (communities[graph.neighbors[edge]] == community) {
+				internal_weight += graph.EdgeWeight(edge);
+			}
+		}
+	}
+	double degree_penalty = 0.0;
+	for (auto degree : community_degrees) {
+		auto fraction = degree / graph.total_degree;
+		degree_penalty += fraction * fraction;
+	}
+	return internal_weight / graph.total_degree - resolution * degree_penalty;
+}
+
+struct LouvainState : GlobalTableFunctionState {
+	bool initialized = false;
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	vector<idx_t> projected_to_snapshot;
+	vector<idx_t> communities;
+	vector<uint64_t> community_ids;
+	vector<idx_t> community_sizes;
+	double modularity = 0.0;
+	idx_t levels = 0;
+	idx_t iterations = 0;
+	bool converged = false;
+	idx_t offset = 0;
+};
+
+static unique_ptr<GlobalTableFunctionState> LouvainInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<LouvainState>();
+}
+
+static void ComputeLouvain(ClientContext &context, const LouvainBindData &data, LouvainState &state) {
+	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	idx_t projected_count;
+	auto vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
+	auto original_graph = BuildLouvainGraph(context, *state.snapshot, vertex_mask, data.edge_label, projected_count,
+	                                        state.projected_to_snapshot);
+	if (projected_count == 0) {
+		state.converged = true;
+		state.initialized = true;
+		return;
+	}
+	vector<idx_t> original_communities(projected_count);
+	for (idx_t vertex = 0; vertex < projected_count; vertex++) {
+		original_communities[vertex] = vertex;
+	}
+	idx_t final_community_count = projected_count;
+	state.converged = true;
+	const LouvainGraph *graph = &original_graph;
+	unique_ptr<LouvainGraph> coarse_graph;
+	for (idx_t level = 0; level < data.max_levels; level++) {
+		auto move = LouvainLocalMove(context, *graph, data);
+		state.levels++;
+		state.iterations += move.iterations;
+		state.converged &= move.converged;
+		for (idx_t vertex = 0; vertex < projected_count; vertex++) {
+			original_communities[vertex] = move.communities[original_communities[vertex]];
+		}
+		final_community_count = move.community_count;
+		if (move.community_count == graph->VertexCount()) {
+			break;
+		}
+		if (level + 1 == data.max_levels) {
+			state.converged = false;
+			break;
+		}
+		coarse_graph = make_uniq<LouvainGraph>(CoarsenLouvainGraph(context, *graph, move));
+		graph = coarse_graph.get();
+	}
+
+	state.modularity = LouvainModularity(original_graph, original_communities, final_community_count, data.resolution);
+	const auto invalid_id = std::numeric_limits<uint64_t>::max();
+	vector<uint64_t> minimum_ids(final_community_count, invalid_id);
+	vector<idx_t> sizes(final_community_count, 0);
+	for (idx_t vertex = 0; vertex < projected_count; vertex++) {
+		auto community = original_communities[vertex];
+		auto snapshot_vertex = state.projected_to_snapshot[vertex];
+		minimum_ids[community] = MinValue(minimum_ids[community], state.snapshot->vertex_ids[snapshot_vertex]);
+		sizes[community]++;
+	}
+	state.communities = std::move(original_communities);
+	state.community_ids = std::move(minimum_ids);
+	state.community_sizes = std::move(sizes);
+	state.initialized = true;
+}
+
+static void LouvainFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &data = input.bind_data->Cast<LouvainBindData>();
+	auto &state = input.global_state->Cast<LouvainState>();
+	if (!state.initialized) {
+		ComputeLouvain(context, data, state);
+	}
+	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
+	auto community_ids = FlatVector::GetData<uint64_t>(output.data[1]);
+	auto community_sizes = FlatVector::GetData<uint64_t>(output.data[2]);
+	auto modularities = FlatVector::GetData<double>(output.data[3]);
+	auto levels = FlatVector::GetData<uint64_t>(output.data[4]);
+	auto iterations = FlatVector::GetData<uint64_t>(output.data[5]);
+	auto converged = FlatVector::GetData<bool>(output.data[6]);
+	idx_t count = 0;
+	while (count < STANDARD_VECTOR_SIZE && state.offset < state.projected_to_snapshot.size()) {
+		auto vertex = state.offset++;
+		auto community = state.communities[vertex];
+		vertex_ids[count] = state.snapshot->vertex_ids[state.projected_to_snapshot[vertex]];
+		community_ids[count] = state.community_ids[community];
+		community_sizes[count] = state.community_sizes[community];
+		modularities[count] = state.modularity;
+		levels[count] = state.levels;
+		iterations[count] = state.iterations;
+		converged[count] = state.converged;
+		count++;
+	}
+	output.SetCardinality(count);
+}
+
 static unique_ptr<FunctionData> DegreeBind(ClientContext &, TableFunctionBindInput &input,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = ReadGraphAlgorithmBind(input, "degree");
@@ -2068,6 +2518,12 @@ static void InitializeAlgorithmCall(ExecutionContext &context, const AlgorithmCa
 		bind->vertex_label = vertex_label;
 		state.nested_bind_data = std::move(bind);
 		state.nested_global_state = make_uniq<LccState>();
+	} else if (name == "louvain") {
+		auto bind = make_uniq<LouvainBindData>();
+		bind->graph_name = graph_name;
+		bind->vertex_label = vertex_label;
+		state.nested_bind_data = std::move(bind);
+		state.nested_global_state = make_uniq<LouvainState>();
 	} else if (name == "degree") {
 		auto bind = make_uniq<GraphAlgorithmBindData>();
 		bind->graph_name = graph_name;
@@ -2117,6 +2573,8 @@ static OperatorFinalizeResultType AlgorithmCallFinalize(ExecutionContext &contex
 			TriangleCountFunction(context.client, nested, output);
 		} else if (data.definition->name == "lcc") {
 			LccFunction(context.client, nested, output);
+		} else if (data.definition->name == "louvain") {
+			LouvainFunction(context.client, nested, output);
 		} else if (data.definition->name == "degree") {
 			DegreeFunction(context.client, nested, output);
 		} else if (data.definition->name == "closeness") {
@@ -2228,6 +2686,18 @@ TableFunction GqlLccFunction() {
 	TableFunction function("lcc", {LogicalType::VARCHAR}, LccFunction);
 	function.bind = LccBind;
 	function.init_global = LccInit;
+	AddProjectionParameters(function);
+	return function;
+}
+
+TableFunction GqlLouvainFunction() {
+	TableFunction function("louvain", {LogicalType::VARCHAR}, LouvainFunction);
+	function.bind = LouvainBind;
+	function.init_global = LouvainInit;
+	function.named_parameters["resolution"] = LogicalType::DOUBLE;
+	function.named_parameters["max_iterations"] = LogicalType::BIGINT;
+	function.named_parameters["max_levels"] = LogicalType::BIGINT;
+	function.named_parameters["tolerance"] = LogicalType::DOUBLE;
 	AddProjectionParameters(function);
 	return function;
 }
