@@ -103,9 +103,7 @@ DROP GRAPH IF EXISTS social
 ----
 true	social
 
-# Explicit inline typed schemas are catalog metadata in this slice. The graph
-# remains EMPTY until a later typed storage/materialization slice consumes the
-# declarations.
+# Explicit inline typed schemas materialize managed wide tables immediately.
 query IT
 CREATE GRAPH typed_social TYPED {
     (Person :Person {id INT64 NOT NULL, name STRING}),
@@ -174,7 +172,7 @@ FROM gql_internal.graph_storage s
 JOIN gql_internal.graphs g USING (graph_id)
 WHERE g.graph_name = 'typed_social'
 ----
-EMPTY
+TABLE_BACKED
 
 query IT
 CREATE GRAPH IF NOT EXISTS typed_social TYPED {

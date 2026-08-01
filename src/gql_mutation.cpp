@@ -31,6 +31,7 @@
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
+#include <algorithm>
 #include <atomic>
 
 namespace duckdb {
@@ -62,6 +63,21 @@ static unique_ptr<ParsedExpression> Or(unique_ptr<ParsedExpression> left, unique
 
 static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_ptr<ParsedExpression>> arguments) {
 	return make_uniq<FunctionExpression>(name, std::move(arguments));
+}
+
+static unique_ptr<ParsedExpression> Subtract(unique_ptr<ParsedExpression> left, unique_ptr<ParsedExpression> right) {
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(std::move(left));
+	arguments.push_back(std::move(right));
+	auto result = make_uniq<FunctionExpression>("-", std::move(arguments));
+	result->is_operator = true;
+	return std::move(result);
+}
+
+static void AppendStructField(vector<unique_ptr<ParsedExpression>> &fields, unique_ptr<ParsedExpression> expression,
+                              const string &name) {
+	expression->SetAlias(name);
+	fields.push_back(std::move(expression));
 }
 
 static Value LabelListValue(const vector<string> &labels) {
@@ -202,6 +218,24 @@ static unique_ptr<SQLStatement> ControlStatement(const string &command_id, bool 
 	return std::move(statement);
 }
 
+static string ControlSnapshotName(const string &command_id) {
+	return "_" + command_id + "_control";
+}
+
+static unique_ptr<SQLStatement> QuietBeginControlStatement(const string &command_id) {
+	auto create = make_uniq<CreateStatement>();
+	auto info = make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, ControlSnapshotName(command_id));
+	info->temporary = true;
+	auto select = make_uniq<SelectNode>();
+	select->from_table = FunctionTable("gql_mutation_control", {Value(command_id), Value(true)}, "gql_control");
+	select->select_list.push_back(make_uniq<StarExpression>());
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	info->query = std::move(statement);
+	create->info = std::move(info);
+	return std::move(create);
+}
+
 static unique_ptr<SQLStatement> ResultStatement() {
 	auto select = make_uniq<SelectNode>();
 	select->from_table = make_uniq<EmptyTableRef>();
@@ -211,6 +245,38 @@ static unique_ptr<SQLStatement> ResultStatement() {
 	auto statement = make_uniq<SelectStatement>();
 	statement->node = std::move(select);
 	return std::move(statement);
+}
+
+static unique_ptr<SQLStatement> InsertNodeResultStatement(const string &command_id, idx_t vertex_count,
+                                                          idx_t vertex_index, const string &return_name) {
+	auto select = make_uniq<SelectNode>();
+	select->from_table = FunctionTable(
+	    "gql_insert_result",
+	    {Value(command_id), Value::UBIGINT(vertex_count), Value::UBIGINT(vertex_index), Value(return_name)},
+	    "gql_insert_result");
+	select->select_list.push_back(make_uniq<StarExpression>());
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return std::move(statement);
+}
+
+static unique_ptr<ParsedExpression> VertexNode(const GqlTableGraphBinding &graph, const string &vertex_alias,
+                                               const string &return_name) {
+	vector<unique_ptr<ParsedExpression>> fields;
+	AppendStructField(fields, Column(vertex_alias, graph.vertex.key_column), "vertex_id");
+	vector<unique_ptr<ParsedExpression>> label_arguments;
+	label_arguments.push_back(Column(vertex_alias, graph.vertex.label_column));
+	label_arguments.push_back(Constant(Value(";")));
+	AppendStructField(fields, Function("array_to_string", std::move(label_arguments)), "__gql_labels");
+	vector<pair<string, string>> properties(graph.vertex.property_columns.begin(), graph.vertex.property_columns.end());
+	std::sort(properties.begin(), properties.end(),
+	          [](const auto &left, const auto &right) { return StringUtil::CILessThan(left.first, right.first); });
+	for (const auto &property : properties) {
+		AppendStructField(fields, Column(vertex_alias, property.second), property.first);
+	}
+	auto node = Function("struct_pack", std::move(fields));
+	node->SetAlias(return_name);
+	return std::move(node);
 }
 
 static unique_ptr<SQLStatement> CreateSnapshot(const vector<GqlLogicalPlan> &plans, const string &snapshot_name) {
@@ -612,6 +678,55 @@ static unique_ptr<TableRef> InsertTargetBindReplace(ClientContext &context, Tabl
 	return std::move(result);
 }
 
+static unique_ptr<TableRef> InsertResultBindReplace(ClientContext &context, TableFunctionBindInput &input) {
+	if (input.inputs.size() != 4 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
+	    input.inputs[3].IsNull()) {
+		throw BinderException("GQL INSERT result requires a command id, vertex count, vertex index, and result name");
+	}
+	auto command_id = input.inputs[0].GetValue<string>();
+	auto vertex_count = input.inputs[1].GetValue<uint64_t>();
+	auto vertex_index = input.inputs[2].GetValue<uint64_t>();
+	auto return_name = input.inputs[3].GetValue<string>();
+	if (command_id.empty() || vertex_count == 0 || vertex_index >= vertex_count || return_name.empty()) {
+		throw BinderException("Invalid GQL INSERT node result specification");
+	}
+	auto graph = LoadSelectedGraph(context);
+	if (!StringUtil::CIEquals(graph.vertex.key_column, "__gql_id") ||
+	    !StringUtil::CIEquals(graph.vertex.label_column, "__gql_label") || !graph.vertex.label_is_list) {
+		throw NotImplementedException("GQL INSERT RETURN requires canonical managed vertex storage");
+	}
+
+	auto vertex_alias = "gql_insert_return_vertex";
+	auto vertex = make_uniq<BaseTableRef>();
+	vertex->catalog_name = graph.vertex.catalog_name;
+	vertex->schema_name = graph.vertex.schema_name;
+	vertex->table_name = graph.vertex.table_name;
+	vertex->alias = vertex_alias;
+	auto control =
+	    FunctionTable("gql_mutation_control", {Value(command_id), Value(false)}, "gql_insert_return_control");
+	auto join = make_uniq<JoinRef>(JoinRefType::REGULAR);
+	join->left = std::move(vertex);
+	join->right = std::move(control);
+	join->type = JoinType::INNER;
+	join->condition = Constant(Value(true));
+
+	vector<unique_ptr<ParsedExpression>> sequence_arguments;
+	sequence_arguments.push_back(Constant(Value("gql_internal.graph_" + to_string(graph.graph_id) + "_vertex_id_seq")));
+	unique_ptr<ParsedExpression> inserted_id = Function("currval", std::move(sequence_arguments));
+	auto offset = vertex_count - vertex_index - 1;
+	if (offset != 0) {
+		inserted_id = Subtract(std::move(inserted_id), Constant(Value::UBIGINT(offset)));
+	}
+
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(join);
+	select->where_clause = Equal(Column(vertex_alias, graph.vertex.key_column), std::move(inserted_id));
+	select->select_list.push_back(VertexNode(graph, vertex_alias, return_name));
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement));
+}
+
 static unique_ptr<TableRef> InsertIdsBindReplace(ClientContext &context, TableFunctionBindInput &input) {
 	if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("GQL INSERT id allocation requires vertex and edge counts");
@@ -641,6 +756,14 @@ TableFunction GqlInsertTargetFunction() {
 	TableFunction function("gql_insert_target", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::VARCHAR)},
 	                       nullptr, nullptr);
 	function.bind_replace = InsertTargetBindReplace;
+	return function;
+}
+
+TableFunction GqlInsertResultFunction() {
+	TableFunction function("gql_insert_result",
+	                       {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR},
+	                       nullptr, nullptr);
+	function.bind_replace = InsertResultBindReplace;
 	return function;
 }
 
@@ -873,7 +996,8 @@ vector<unique_ptr<SQLStatement>> GqlLowerInsert(const GqlInsertStatement &insert
 	auto command_id = "gql_insert_" + to_string(next_insert_command_id.fetch_add(1, std::memory_order_relaxed));
 	auto snapshot_name = "_" + command_id;
 	vector<unique_ptr<SQLStatement>> statements;
-	statements.push_back(ControlStatement(command_id, true));
+	statements.push_back(QuietBeginControlStatement(command_id));
+	statements.push_back(DropSnapshot(ControlSnapshotName(command_id)));
 	statements.push_back(CreateInsertIds(snapshot_name, insert.vertices.size(), insert.edges.size()));
 	for (idx_t index = 0; index < insert.vertices.size(); index++) {
 		statements.push_back(LowerInsertVertex(snapshot_name, index, insert.vertices[index]));
@@ -883,8 +1007,13 @@ vector<unique_ptr<SQLStatement>> GqlLowerInsert(const GqlInsertStatement &insert
 	}
 	statements.push_back(UpdateGraphVersionAlways());
 	statements.push_back(DropSnapshot(snapshot_name));
-	statements.push_back(ControlStatement(command_id, false));
-	statements.push_back(ResultStatement());
+	if (insert.return_vertex_index != DConstants::INVALID_INDEX) {
+		statements.push_back(InsertNodeResultStatement(command_id, insert.vertices.size(), insert.return_vertex_index,
+		                                               insert.return_name));
+	} else {
+		statements.push_back(ControlStatement(command_id, false));
+		statements.push_back(ResultStatement());
+	}
 	return statements;
 }
 

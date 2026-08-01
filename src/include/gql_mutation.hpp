@@ -15,6 +15,7 @@ TableFunction GqlMutationTargetFunction();
 TableFunction GqlClearPropertiesSourceFunction();
 TableFunction GqlMutationGraphFunction();
 TableFunction GqlInsertTargetFunction();
+TableFunction GqlInsertResultFunction();
 TableFunction GqlInsertIdsFunction();
 TableFunction GqlMatchInsertIdsFunction();
 TableFunction GqlMergeTargetFunction();

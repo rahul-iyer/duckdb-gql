@@ -1,5 +1,6 @@
 #include "gql_storage.hpp"
 
+#include "gql_catalog.hpp"
 #include "gql_sql_utils.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -8,6 +9,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 
+#include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace duckdb {
@@ -203,6 +206,249 @@ struct GraphSchemaElement {
 		       direction == other.direction && labels == other.labels && properties == other.properties;
 	}
 };
+
+static string TypedPropertyDuckType(const string &gql_type) {
+	auto type = StringUtil::Upper(gql_type);
+	static const unordered_map<string, string> TYPE_MAP = {
+	    {"BOOL", "BOOLEAN"},
+	    {"BOOLEAN", "BOOLEAN"},
+	    {"STRING", "VARCHAR"},
+	    {"CHAR", "VARCHAR"},
+	    {"VARCHAR", "VARCHAR"},
+	    {"BYTES", "BLOB"},
+	    {"BINARY", "BLOB"},
+	    {"VARBINARY", "BLOB"},
+	    {"INT8", "TINYINT"},
+	    {"INTEGER8", "TINYINT"},
+	    {"INT16", "SMALLINT"},
+	    {"INTEGER16", "SMALLINT"},
+	    {"SMALLINT", "SMALLINT"},
+	    {"SMALLINTEGER", "SMALLINT"},
+	    {"INT32", "INTEGER"},
+	    {"INTEGER32", "INTEGER"},
+	    {"INT", "INTEGER"},
+	    {"INTEGER", "INTEGER"},
+	    {"INT64", "BIGINT"},
+	    {"INTEGER64", "BIGINT"},
+	    {"BIGINT", "BIGINT"},
+	    {"BIGINTEGER", "BIGINT"},
+	    {"INT128", "HUGEINT"},
+	    {"INTEGER128", "HUGEINT"},
+	    {"UINT8", "UTINYINT"},
+	    {"UINT16", "USMALLINT"},
+	    {"USMALLINT", "USMALLINT"},
+	    {"UINT32", "UINTEGER"},
+	    {"UINT", "UINTEGER"},
+	    {"UINT64", "UBIGINT"},
+	    {"UBIGINT", "UBIGINT"},
+	    {"UINT128", "UHUGEINT"},
+	    {"FLOAT32", "FLOAT"},
+	    {"REAL", "FLOAT"},
+	    {"FLOAT", "FLOAT"},
+	    {"FLOAT64", "DOUBLE"},
+	    {"DOUBLE", "DOUBLE"},
+	    {"DOUBLEPRECISION", "DOUBLE"},
+	    {"DATE", "DATE"},
+	    {"TIME", "TIME"},
+	    {"LOCALTIME", "TIME"},
+	    {"ZONEDTIME", "TIME WITH TIME ZONE"},
+	    {"TIMEWITHTIMEZONE", "TIME WITH TIME ZONE"},
+	    {"LOCALDATETIME", "TIMESTAMP"},
+	    {"TIMESTAMP", "TIMESTAMP"},
+	    {"TIMESTAMPWITHOUTTIMEZONE", "TIMESTAMP"},
+	    {"ZONEDDATETIME", "TIMESTAMP WITH TIME ZONE"},
+	    {"TIMESTAMPWITHTIMEZONE", "TIMESTAMP WITH TIME ZONE"},
+	};
+	auto entry = TYPE_MAP.find(type);
+	if (entry != TYPE_MAP.end()) {
+		return entry->second;
+	}
+	if (type == "DECIMAL" || type == "DEC") {
+		return "DECIMAL";
+	}
+	if (StringUtil::StartsWith(type, "DECIMAL(") || StringUtil::StartsWith(type, "DEC(")) {
+		auto open = type.find('(');
+		if (type.back() == ')' && open != string::npos) {
+			auto parameters = type.substr(open + 1, type.size() - open - 2);
+			bool valid = !parameters.empty();
+			idx_t commas = 0;
+			for (auto character : parameters) {
+				if (character == ',') {
+					commas++;
+				} else if (character < '0' || character > '9') {
+					valid = false;
+				}
+			}
+			if (valid && commas <= 1) {
+				return "DECIMAL(" + parameters + ")";
+			}
+		}
+	}
+	throw BinderException("Typed graph property type '%s' cannot be materialized as a DuckDB column", gql_type);
+}
+
+struct TypedPhysicalProperty {
+	string name;
+	string gql_type;
+	string duck_type;
+};
+
+static vector<TypedPhysicalProperty> CollectTypedProperties(const vector<GraphSchemaElement> &elements,
+                                                            const string &kind) {
+	vector<TypedPhysicalProperty> result;
+	unordered_map<string, idx_t> indexes;
+	for (const auto &element : elements) {
+		if (element.kind != kind) {
+			continue;
+		}
+		for (const auto &property : element.properties) {
+			auto duck_type = TypedPropertyDuckType(property.gql_type);
+			auto inserted = indexes.emplace(property.name, result.size());
+			if (inserted.second) {
+				result.push_back({property.name, property.gql_type, std::move(duck_type)});
+			} else if (result[inserted.first->second].duck_type != duck_type) {
+				throw BinderException("Typed graph property '%s' has incompatible types '%s' and '%s'", property.name,
+				                      result[inserted.first->second].gql_type, property.gql_type);
+			}
+		}
+	}
+	return result;
+}
+
+static vector<string> TypedNodeLabels(const GraphSchemaElement &element) {
+	if (!element.labels.empty()) {
+		return element.labels;
+	}
+	return {element.type_name};
+}
+
+static string TypedNodeCondition(const GraphSchemaElement &element) {
+	auto labels = TypedNodeLabels(element);
+	string result = "len(" + GqlQuoteIdentifier("__gql_label") + ") = " + to_string(labels.size());
+	for (const auto &label : labels) {
+		result += " AND list_contains(" + GqlQuoteIdentifier("__gql_label") + ", " + GqlQuoteLiteral(label) + ")";
+	}
+	return "(" + result + ")";
+}
+
+static string TypedEdgeLabel(const GraphSchemaElement &element) {
+	return element.labels.empty() ? element.type_name : element.labels[0];
+}
+
+static string TypedElementCondition(const GraphSchemaElement &element) {
+	if (element.kind == "NODE") {
+		return TypedNodeCondition(element);
+	}
+	return GqlQuoteIdentifier("__gql_type") + " = " + GqlQuoteLiteral(TypedEdgeLabel(element));
+}
+
+static void ValidateTypedMaterialization(const vector<GraphSchemaElement> &elements) {
+	unordered_set<string> node_discriminators;
+	unordered_set<string> edge_discriminators;
+	for (const auto &element : elements) {
+		for (const auto &property : element.properties) {
+			if (StringUtil::StartsWith(property.name, "__gql_")) {
+				throw BinderException("Typed graph property '%s' conflicts with a reserved storage column",
+				                      property.name);
+			}
+			TypedPropertyDuckType(property.gql_type);
+		}
+		if (element.kind == "NODE") {
+			auto labels = TypedNodeLabels(element);
+			std::sort(labels.begin(), labels.end());
+			auto discriminator = StringUtil::Join(labels, "\x1f");
+			if (!node_discriminators.insert(discriminator).second) {
+				throw BinderException("Typed graph node types must have distinct label sets");
+			}
+		} else {
+			if (element.labels.size() > 1) {
+				throw BinderException(
+				    "Typed graph edge '%s' has multiple labels, but native edge storage supports one type",
+				    element.type_name);
+			}
+			if (!edge_discriminators.insert(TypedEdgeLabel(element)).second) {
+				throw BinderException("Typed graph edge types must have distinct labels");
+			}
+		}
+	}
+	CollectTypedProperties(elements, "NODE");
+	CollectTypedProperties(elements, "EDGE");
+}
+
+static string TypedPropertyConstraints(const vector<GraphSchemaElement> &elements, const string &kind,
+                                       const vector<TypedPhysicalProperty> &properties) {
+	string result;
+	for (const auto &element : elements) {
+		if (element.kind != kind) {
+			continue;
+		}
+		auto condition = TypedElementCondition(element);
+		unordered_map<string, bool> declared;
+		for (const auto &property : element.properties) {
+			declared.emplace(property.name, property.nullable);
+			if (!property.nullable) {
+				result += ", CHECK (NOT " + condition + " OR " + GqlQuoteIdentifier(property.name) + " IS NOT NULL)";
+			}
+		}
+		for (const auto &property : properties) {
+			if (declared.find(property.name) == declared.end()) {
+				result += ", CHECK (NOT " + condition + " OR " + GqlQuoteIdentifier(property.name) + " IS NULL)";
+			}
+		}
+	}
+	return result;
+}
+
+static string TypedDiscriminatorConstraint(const vector<GraphSchemaElement> &elements, const string &kind) {
+	string expression;
+	for (const auto &element : elements) {
+		if (element.kind != kind) {
+			continue;
+		}
+		if (!expression.empty()) {
+			expression += " OR ";
+		}
+		expression += TypedElementCondition(element);
+	}
+	return ", CHECK (" + (expression.empty() ? "false" : expression) + ")";
+}
+
+static string TypedPropertyColumns(const vector<TypedPhysicalProperty> &properties) {
+	string result;
+	for (const auto &property : properties) {
+		result += ", " + GqlQuoteIdentifier(property.name) + " " + property.duck_type;
+	}
+	return result;
+}
+
+static void MaterializeTypedGraph(Connection &connection, uint64_t graph_id, const string &graph_name,
+                                  const vector<GraphSchemaElement> &elements) {
+	auto vertex_properties = CollectTypedProperties(elements, "NODE");
+	auto edge_properties = CollectTypedProperties(elements, "EDGE");
+	GqlQuery(connection, "CREATE SCHEMA IF NOT EXISTS gql_data");
+	auto current_catalog = GqlQuery(connection, "SELECT current_database()")->GetValue(0, 0).GetValue<string>();
+	auto vertex_table = "graph_" + to_string(graph_id) + "_vertices";
+	auto edge_table = "graph_" + to_string(graph_id) + "_edges";
+	auto qualified_vertex = GqlQuoteIdentifier(current_catalog) + ".gql_data." + GqlQuoteIdentifier(vertex_table);
+	auto qualified_edge = GqlQuoteIdentifier(current_catalog) + ".gql_data." + GqlQuoteIdentifier(edge_table);
+
+	GqlQuery(connection, "CREATE TABLE " + qualified_vertex + " (" + GqlQuoteIdentifier("__gql_id") +
+	                         " UBIGINT PRIMARY KEY, " + GqlQuoteIdentifier("__gql_label") + " VARCHAR[] NOT NULL" +
+	                         TypedPropertyColumns(vertex_properties) + TypedDiscriminatorConstraint(elements, "NODE") +
+	                         TypedPropertyConstraints(elements, "NODE", vertex_properties) + ")");
+	GqlQuery(connection, "CREATE TABLE " + qualified_edge + " (" + GqlQuoteIdentifier("__gql_edge_id") +
+	                         " UBIGINT PRIMARY KEY, " + GqlQuoteIdentifier("__gql_source_id") + " UBIGINT NOT NULL, " +
+	                         GqlQuoteIdentifier("__gql_target_id") + " UBIGINT NOT NULL, " +
+	                         GqlQuoteIdentifier("__gql_type") + " VARCHAR NOT NULL" +
+	                         TypedPropertyColumns(edge_properties) + TypedDiscriminatorConstraint(elements, "EDGE") +
+	                         TypedPropertyConstraints(elements, "EDGE", edge_properties) + ")");
+	GqlQuery(connection, "CREATE SEQUENCE gql_internal." +
+	                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_vertex_id_seq") + " START 1");
+	GqlQuery(connection, "CREATE SEQUENCE gql_internal." +
+	                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_edge_id_seq") + " START 1");
+	GqlAttachManagedGraphTables(connection, graph_name, qualified_vertex, "__gql_id", "__gql_label", qualified_edge,
+	                            "__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type", false);
+}
 
 struct CreateGraphBindData : TableFunctionData {
 	CreateGraphBindData(string graph_name_p, bool conditional_p, string schema_kind_p, bool typed_p,
@@ -412,6 +658,9 @@ static unique_ptr<FunctionData> CreateGraphBind(ClientContext &, TableFunctionBi
 		elements[property_indices[index]].properties.push_back(
 		    {property_names[index], property_types[index], property_nullables[index]});
 	}
+	if (typed) {
+		ValidateTypedMaterialization(elements);
+	}
 
 	names = {"success", "graph_name"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
@@ -556,6 +805,9 @@ static void CreateGraph(ClientContext &context, TableFunctionInput &input, DataC
 				             GqlQuoteLiteral(property.name) + ", " + GqlQuoteLiteral(property.gql_type) + ", " +
 				             (property.nullable ? "true" : "false") + ")");
 			}
+		}
+		if (data.typed) {
+			MaterializeTypedGraph(connection, graph_id, data.graph_name, data.elements);
 		}
 		connection.Commit();
 	} catch (...) {

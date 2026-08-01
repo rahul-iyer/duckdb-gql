@@ -1,5 +1,5 @@
 # name: test/sql/gql_typed_create.test
-# description: Persist and remove explicit inline typed graph schemas
+# description: Materialize, persist, mutate, and remove explicit inline typed graph schemas
 # group: [gql]
 
 load __TEST_DIR__/gql_typed_create.db
@@ -23,7 +23,7 @@ JOIN gql_internal.graph_schemas s USING (graph_id)
 JOIN gql_internal.graph_storage st USING (graph_id)
 WHERE g.graph_name = 'persistent_typed'
 ----
-INLINE	true	EMPTY
+INLINE	true	TABLE_BACKED
 
 query ITT
 SELECT e.element_ordinal, e.element_kind, e.type_name
@@ -46,6 +46,91 @@ ORDER BY e.element_ordinal, p.property_ordinal
 person	id	false	INT64
 person	name	true	STRING
 knows	since	true	INT32
+
+query TTI
+SELECT et.element_kind, pm.property_name, pm.gql_type
+FROM gql_internal.graphs g
+JOIN gql_internal.graph_element_tables et USING (graph_id)
+JOIN gql_internal.graph_property_mappings pm USING (element_table_id)
+WHERE g.graph_name = 'persistent_typed'
+ORDER BY et.element_kind DESC, pm.property_name
+----
+VERTEX	id	BIGINT
+VERTEX	name	VARCHAR
+EDGE	since	INTEGER
+
+statement ok
+SESSION SET GRAPH persistent_typed
+
+statement ok
+INSERT (alice:Person {id: 1, name: 'Alice'})
+       -[:KNOWS {since: 2020}]->
+       (bob:Person {id: 2, name: 'Bob'})
+
+query TTI
+MATCH (source:Person)-[relationship:KNOWS]->(target:Person)
+RETURN source.name, target.name, relationship.since
+----
+Alice	Bob	2020
+
+# INSERT RETURN exposes the newly created variable as the same node struct used
+# by MATCH. A path can return any one directly inserted node, including the
+# first node whose generated ID precedes the sequence's current value.
+query T
+INSERT (carol:Person {id: 3, name: 'Carol'})
+RETURN carol
+----
+{'vertex_id': 3, '__gql_labels': person, 'id': 3, 'name': Carol}
+
+query T
+INSERT (dave:Person {id: 4, name: 'Dave'})
+       -[:KNOWS {since: 2021}]->
+       (eve:Person {id: 5, name: 'Eve'})
+RETURN dave AS created
+----
+{'vertex_id': 4, '__gql_labels': person, 'id': 4, 'name': Dave}
+
+# Returning a node does not take ownership of a caller-controlled transaction.
+statement ok
+BEGIN TRANSACTION
+
+query T
+INSERT (temporary:Person {id: 6, name: 'Temporary'})
+RETURN temporary
+----
+{'vertex_id': 6, '__gql_labels': person, 'id': 6, 'name': Temporary}
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (person:Person) WHERE person.id = 6
+RETURN count(*)
+----
+0
+
+# The native columns enforce scalar types, while generated CHECK constraints
+# enforce the selected node/edge type and its per-type nullability.
+statement error
+INSERT (:Person {name: 'Missing id'})
+----
+<REGEX>:.*CHECK constraint failed.*
+
+statement error
+INSERT (:Other {id: 30, name: 'Unknown type'})
+----
+<REGEX>:.*CHECK constraint failed.*
+
+statement error
+INSERT (:Person {id: 40, name: 'Bad edge'})-[:KNOWS {since: 'not-an-integer'}]->(:Person {id: 41})
+----
+<REGEX>:.*Could not convert string.*
+
+query I
+MATCH (person:Person) WHERE person.id = 40 OR person.id = 41
+RETURN count(*)
+----
+0
 
 statement ok
 DROP GRAPH persistent_typed
@@ -70,5 +155,11 @@ SELECT count(*)
 FROM gql_internal.graph_schema_elements e
 LEFT JOIN gql_internal.graphs g USING (graph_id)
 WHERE g.graph_id IS NULL
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_tables()
+WHERE schema_name = 'gql_data' AND table_name LIKE 'graph_%'
 ----
 0

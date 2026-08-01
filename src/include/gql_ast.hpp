@@ -329,6 +329,8 @@ public:
 
 	vector<GqlInsertElement> vertices;
 	vector<GqlInsertEdge> edges;
+	idx_t return_vertex_index = DConstants::INVALID_INDEX;
+	string return_name;
 };
 
 // MERGE is a project-owned Cypher compatibility extension. It is deliberately

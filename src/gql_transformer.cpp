@@ -88,9 +88,13 @@ shared_ptr<GqlStatement> GqlTransformer::Transform(GQLParser::GqlProgramContext 
 	vector<GQLParser::NamedProcedureCallContext *> procedure_calls;
 	vector<GQLParser::SimpleMatchStatementContext *> match_statements;
 	vector<GQLParser::PrimitiveDataModifyingStatementContext *> modifying_statements;
+	vector<GQLParser::ReturnStatementContext *> return_statements;
+	vector<GQLParser::OrderByAndPageStatementContext *> order_statements;
 	CollectContexts(&root, procedure_calls);
 	CollectContexts(&root, match_statements);
 	CollectContexts(&root, modifying_statements);
+	CollectContexts(&root, return_statements);
+	CollectContexts(&root, order_statements);
 	if (!procedure_calls.empty() && match_statements.empty()) {
 		TransformCall(root);
 		if (!statement) {
@@ -106,6 +110,50 @@ shared_ptr<GqlStatement> GqlTransformer::Transform(GQLParser::GqlProgramContext 
 		return statement;
 	}
 	visit(&root);
+	if (statement && statement->type == GqlStatementType::INSERT && !return_statements.empty()) {
+		auto insert = dynamic_cast<GqlInsertStatement *>(statement.get());
+		if (!insert) {
+			throw InternalException("Invalid GQL INSERT statement");
+		}
+		auto unsupported = [&](const string &feature) {
+			Unsupported(root, feature);
+			return statement;
+		};
+		if (return_statements.size() != 1 || !order_statements.empty()) {
+			return unsupported("INSERT RETURN with multiple result clauses or ordering");
+		}
+		auto body = return_statements[0]->returnStatementBody();
+		if (!body || body->ASTERISK() || body->setQuantifier() || body->groupByClause() || !body->returnItemList() ||
+		    body->returnItemList()->returnItem().size() != 1) {
+			return unsupported("INSERT RETURN form other than one node variable");
+		}
+		GqlProjection projection;
+		if (!TransformProjection(body->returnItemList()->returnItem()[0], projection) || !projection.expression ||
+		    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE) {
+			return unsupported("INSERT RETURN expression other than a node variable");
+		}
+		idx_t vertex_index = DConstants::INVALID_INDEX;
+		for (idx_t index = 0; index < insert->vertices.size(); index++) {
+			if (insert->vertices[index].variable.value != projection.expression->variable.value) {
+				continue;
+			}
+			if (vertex_index != DConstants::INVALID_INDEX) {
+				return unsupported("ambiguous INSERT RETURN node variable");
+			}
+			vertex_index = index;
+		}
+		if (vertex_index == DConstants::INVALID_INDEX) {
+			for (const auto &edge : insert->edges) {
+				if (edge.variable.value == projection.expression->variable.value) {
+					return unsupported("INSERT RETURN edge values");
+				}
+			}
+			return unsupported("INSERT RETURN unknown node variable");
+		}
+		insert->return_vertex_index = vertex_index;
+		insert->return_name =
+		    projection.alias.IsEmpty() ? projection.expression->variable.value : projection.alias.value;
+	}
 	if (!statement) {
 		TransformMatch(root);
 	}

@@ -147,10 +147,29 @@ CREATE GRAPH social_typed TYPED {
 };
 ```
 
-Typed creation currently records and validates the node types, edge types,
-labels, property types, nullability, and endpoint aliases while leaving the
-graph empty. Typed table materialization and `COPY GRAPH`/mutation enforcement
-are subsequent implementation slices.
+Typed creation records and validates the schema and immediately materializes
+empty managed vertex and edge tables. Select the graph and insert into it
+without a separate `COPY GRAPH` step:
+
+```sql
+SESSION SET GRAPH social_typed;
+
+INSERT (alice:Person {id: 1, name: 'Alice'})
+       -[:KNOWS {since: 2020}]->
+       (bob:Person {id: 2, name: 'Bob'})
+RETURN alice;
+```
+
+The native columns enforce scalar conversions, and table constraints enforce
+declared labels/edge types, allowed properties, and per-type `NOT NULL`
+properties. Properties shared by multiple node or edge types must map to the
+same DuckDB physical type.
+
+`INSERT RETURN` currently returns one directly inserted node variable. The
+result has the same node struct representation as `MATCH`, including its
+generated `vertex_id`, labels, and mapped properties. Edge values, multiple
+return items, expressions, ordering, and pagination are not yet supported on
+standalone `INSERT RETURN`.
 
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing
