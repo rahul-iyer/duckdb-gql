@@ -212,7 +212,9 @@ selective node-label postings, and fixed-hop CSR expansions. Relational
 lowering only materializes those choices; DuckDB then costs and reorders the
 resulting native join graph.
 
-Algorithm calls can be inspected after building their CSR snapshot:
+Algorithm calls can be inspected directly. Execution automatically builds the
+smallest CSR projection required by the algorithm; an explicit full snapshot is
+only needed when inspecting optimizer-selected CSR access paths:
 
 ```sql
 CALL gql_build_csr('social');
@@ -224,15 +226,16 @@ RETURN vertex_id, rank;
 
 ## Graph algorithms
 
-Graph algorithms require an explicit, derived CSR snapshot. `MATCH` keeps
-DuckDB tables authoritative and uses relational/recursive operators, but can
-also consume a valid snapshot's node-label postings and selective fixed-hop
-adjacency. If no current snapshot exists, the same query falls back to table
-scans and joins.
+Graph algorithms automatically build and cache a derived CSR projection on
+first use. Directional topology, edge identity, edge/vertex labels, postings,
+and fanout statistics are independent capabilities: each algorithm requests
+only the structures required by its output and filters. `MATCH` keeps DuckDB
+tables authoritative and uses relational/recursive operators, but can also
+consume an explicitly built full snapshot's node-label postings and selective
+fixed-hop adjacency. If no current full snapshot exists, the same query falls
+back to table scans and joins.
 
 ```sql
-CALL gql_build_csr('social');
-
 CALL algo.bfs('social', 1, direction := 'out', max_depth := 4);
 
 CALL algo.pagerank(
@@ -260,9 +263,10 @@ and parallel edges are coalesced, and self-loops are ignored.
 
 CSR snapshots are connection-local and version checked. Graph mutations and
 direct SQL writes to a graph's vertex or edge tables invalidate the affected
-snapshot instead of allowing an algorithm to use stale data. Run
-`CALL gql_build_csr('social')` again before the next algorithm call. CSR
-construction and CSR algorithms must run in autocommit mode.
+snapshot instead of allowing an algorithm to use stale data. The next algorithm
+call rebuilds its required projection automatically. Run `gql_build_csr`
+explicitly only to prepare the full optimizer/neighbor/inspection snapshot.
+CSR construction and CSR algorithms must run in autocommit mode.
 
 Weighted SSSP is not implemented.
 
@@ -275,11 +279,13 @@ SELECT * FROM gql_csr_stats('social');
 SELECT * FROM gql_csr_edge_stats('social');
 ```
 
-`gql_csr_edge_stats` reports per-type edge counts, active source/target
-counts, average directional degree, and maximum directional degree. The graph
-optimizer uses these connection-local statistics to compare a correlated CSR
-frontier with a bulk edge-table scan and to avoid treating a highly skewed
-one-row endpoint as uniformly selective.
+`gql_csr_stats` reports the smallest current projection and exposes capability
+columns such as `has_outgoing`, `has_incoming`, `has_edge_ids`, and
+`has_edge_labels`. `gql_csr_edge_stats` reports per-type edge counts, active
+source/target counts, average directional degree, and maximum directional
+degree. The graph optimizer uses these connection-local statistics to compare
+a correlated CSR frontier with a bulk edge-table scan and to avoid treating a
+highly skewed one-row endpoint as uniformly selective.
 
 ## Storage model
 

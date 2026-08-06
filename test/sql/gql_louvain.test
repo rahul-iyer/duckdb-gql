@@ -46,12 +46,9 @@ COPY GRAPH louvain_graph FROM (
 ----
 true	louvain_graph	7	10
 
-statement ok
-CALL gql_build_csr('louvain_graph')
-
 # Louvain uses a simple undirected projection. Reciprocal/parallel arcs are
-# coalesced and self-loops are ignored, leaving two triangles joined by one
-# bridge plus an isolated vertex.
+# coalesced and self-loops are ignored. It automatically requests bidirectional
+# topology without edge identity or label arrays for this unfiltered call.
 query IIIR
 SELECT vertex_id, community_id, community_size, round(modularity, 6)
 FROM system.algo.louvain('louvain_graph')
@@ -64,6 +61,12 @@ ORDER BY vertex_id
 5	4	3	0.357143
 6	4	3	0.357143
 7	7	1	0.357143
+
+query IIIII
+SELECT has_outgoing, has_incoming, has_edge_ids, has_edge_labels, has_vertex_labels
+FROM gql_csr_stats('louvain_graph')
+----
+true	true	false	false	false
 
 query III
 SELECT min(levels) >= 1, min(iterations) >= 1, bool_and(converged)

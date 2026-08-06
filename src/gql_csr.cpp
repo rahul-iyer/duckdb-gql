@@ -112,7 +112,7 @@ static string QualifiedTable(const GqlElementTableBinding &table) {
 }
 
 struct GqlCsrCacheState : ClientContextState {
-	unordered_map<uint64_t, shared_ptr<GqlCsrSnapshot>> snapshots;
+	unordered_map<uint64_t, vector<shared_ptr<GqlCsrSnapshot>>> snapshots;
 	unordered_map<string, uint64_t> graph_ids_by_name;
 	uint64_t build_count = 0;
 };
@@ -185,7 +185,33 @@ static idx_t LabelDictionaryStorageBytes(const unordered_map<string, uint32_t> &
 	return bytes;
 }
 
-static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, const string &graph_name) {
+static bool CsrHasCapabilities(GqlCsrCapabilities available, GqlCsrCapabilities required) {
+	return (available & required) == required;
+}
+
+static GqlCsrCapabilities NormalizeCsrCapabilities(GqlCsrCapabilities capabilities) {
+	if (capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS) {
+		capabilities |= GQL_CSR_VERTEX_LABELS;
+	}
+	if (capabilities & GQL_CSR_EDGE_STATS) {
+		capabilities |= GQL_CSR_OUTGOING | GQL_CSR_INCOMING | GQL_CSR_EDGE_LABELS;
+	}
+	if ((capabilities & (GQL_CSR_OUTGOING | GQL_CSR_INCOMING)) == 0) {
+		throw InternalException("GQL CSR snapshot requires outgoing or incoming topology");
+	}
+	return capabilities;
+}
+
+static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, const string &graph_name,
+                                                     GqlCsrCapabilities requested_capabilities) {
+	auto capabilities = NormalizeCsrCapabilities(requested_capabilities);
+	const bool build_outgoing = capabilities & GQL_CSR_OUTGOING;
+	const bool build_incoming = capabilities & GQL_CSR_INCOMING;
+	const bool build_edge_ids = capabilities & GQL_CSR_EDGE_IDS;
+	const bool build_edge_labels = capabilities & GQL_CSR_EDGE_LABELS;
+	const bool build_vertex_labels = capabilities & GQL_CSR_VERTEX_LABELS;
+	const bool build_vertex_label_postings = capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS;
+	const bool build_edge_stats = capabilities & GQL_CSR_EDGE_STATS;
 	GqlTableGraphBinding binding;
 	if (!GqlTryLoadTableGraph(context, graph_name, binding)) {
 		throw InvalidInputException("CSR algorithms require a table-backed graph; "
@@ -194,6 +220,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	Connection connection(*context.db);
 	auto snapshot = make_shared_ptr<GqlCsrSnapshot>();
+	snapshot->capabilities = capabilities;
 	snapshot->write_generation = ReadCsrWriteGeneration(context);
 	snapshot->vertex_table_key =
 	    CsrTableKey(binding.vertex.catalog_name, binding.vertex.schema_name, binding.vertex.table_name);
@@ -209,7 +236,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	auto vertex_count = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + QualifiedTable(binding.vertex));
 	snapshot->vertex_ids.reserve(NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()));
 	auto vertex_label_projection =
-	    binding.vertex.label_column.empty() ? "CAST(NULL AS VARCHAR[])"
+	    !build_vertex_labels || binding.vertex.label_column.empty() ? "CAST(NULL AS VARCHAR[])"
 	    : binding.vertex.label_is_list
 	        ? GqlQuoteIdentifier(binding.vertex.label_column)
 	        : "string_split(CAST(" + GqlQuoteIdentifier(binding.vertex.label_column) + " AS VARCHAR), ';')";
@@ -219,7 +246,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	                                     QualifiedTable(binding.vertex) + " ORDER BY vertex_id");
 	GqlThrowOnError(*vertices);
 	snapshot->vertex_ids_match_rowids = StringUtil::CIEquals(binding.vertex.ownership, "MANAGED");
-	snapshot->vertex_label_offsets.push_back(0);
+	if (build_vertex_labels) {
+		snapshot->vertex_label_offsets.push_back(0);
+	}
 	while (auto chunk = vertices->Fetch()) {
 		UnifiedVectorFormat vertex_data;
 		UnifiedVectorFormat label_data;
@@ -249,7 +278,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			}
 			snapshot->vertex_ids.push_back(vertex_id);
 			auto label_index = label_data.sel->get_index(row);
-			if (label_data.validity.RowIsValid(label_index)) {
+			if (build_vertex_labels && label_data.validity.RowIsValid(label_index)) {
 				auto label_list = label_lists[label_index];
 				auto label_start = snapshot->vertex_label_ids.size();
 				for (idx_t offset = 0; offset < label_list.length; offset++) {
@@ -267,7 +296,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 					}
 				}
 			}
-			snapshot->vertex_label_offsets.push_back(snapshot->vertex_label_ids.size());
+			if (build_vertex_labels) {
+				snapshot->vertex_label_offsets.push_back(snapshot->vertex_label_ids.size());
+			}
 		}
 	}
 	snapshot->dense_vertex_ids = true;
@@ -288,24 +319,25 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->vertex_ids.MakeImplicitDense();
 	}
 
-	// Invert the per-vertex labels into compact posting lists. The posting
-	// index belongs to the versioned CSR snapshot, so it inherits the same
-	// invalidation rules as topology and can never outlive its source tables.
-	const auto vertex_label_count = snapshot->label_ids.size();
-	snapshot->vertex_label_posting_offsets.assign(vertex_label_count + 2, 0);
-	for (const auto label_id : snapshot->vertex_label_ids) {
-		snapshot->vertex_label_posting_offsets[label_id + 1]++;
-	}
-	FinalizeOffsets(snapshot->vertex_label_posting_offsets);
 	const bool compact_vertex_ordinals =
 	    snapshot->vertex_ids.empty() || snapshot->vertex_ids.size() - 1 <= std::numeric_limits<uint32_t>::max();
-	snapshot->vertex_label_postings.Resize(snapshot->vertex_label_ids.size(), compact_vertex_ordinals);
-	auto vertex_label_cursor = snapshot->vertex_label_posting_offsets;
-	for (idx_t vertex = 0; vertex < snapshot->vertex_ids.size(); vertex++) {
-		for (idx_t offset = snapshot->vertex_label_offsets[vertex]; offset < snapshot->vertex_label_offsets[vertex + 1];
-		     offset++) {
-			auto label_id = snapshot->vertex_label_ids[offset];
-			snapshot->vertex_label_postings.Set(vertex_label_cursor[label_id]++, vertex);
+	if (build_vertex_label_postings) {
+		// Invert per-vertex labels only for optimizer/frontier consumers. Pure
+		// algorithms filter directly over the compact per-vertex label arrays.
+		const auto vertex_label_count = snapshot->label_ids.size();
+		snapshot->vertex_label_posting_offsets.assign(vertex_label_count + 2, 0);
+		for (const auto label_id : snapshot->vertex_label_ids) {
+			snapshot->vertex_label_posting_offsets[label_id + 1]++;
+		}
+		FinalizeOffsets(snapshot->vertex_label_posting_offsets);
+		snapshot->vertex_label_postings.Resize(snapshot->vertex_label_ids.size(), compact_vertex_ordinals);
+		auto vertex_label_cursor = snapshot->vertex_label_posting_offsets;
+		for (idx_t vertex = 0; vertex < snapshot->vertex_ids.size(); vertex++) {
+			for (idx_t offset = snapshot->vertex_label_offsets[vertex];
+			     offset < snapshot->vertex_label_offsets[vertex + 1]; offset++) {
+				auto label_id = snapshot->vertex_label_ids[offset];
+				snapshot->vertex_label_postings.Set(vertex_label_cursor[label_id]++, vertex);
+			}
 		}
 	}
 
@@ -314,6 +346,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	                            : "CAST(" + GqlQuoteIdentifier(binding.edge.label_column) + " AS VARCHAR)";
 	auto edge_count = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + QualifiedTable(binding.edge));
 	auto expected_edges = NumericCast<idx_t>(edge_count->GetValue(0, 0).GetValue<uint64_t>());
+	snapshot->edge_count = expected_edges;
 	auto edge_key = "CAST(" + GqlQuoteIdentifier(binding.edge.key_column) + " AS UBIGINT)";
 	auto edge_source = "CAST(" + GqlQuoteIdentifier(binding.edge_source_column) + " AS UBIGINT)";
 	auto edge_target = "CAST(" + GqlQuoteIdentifier(binding.edge_target_column) + " AS UBIGINT)";
@@ -325,17 +358,22 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	// COPY GRAPH owns these tables and generates monotonically unique IDs. Keep
 	// duplicate validation for any future non-managed/table-attachment path,
 	// but do not build an O(E) hash set for the managed fast path.
-	auto validate_edge_ids = binding.edge.schema_name != "gql_data" || binding.edge.key_column != "__gql_edge_id";
+	auto validate_edge_ids =
+	    build_edge_ids && (binding.edge.schema_name != "gql_data" || binding.edge.key_column != "__gql_edge_id");
 	unordered_set<uint64_t> edge_ids;
 	if (validate_edge_ids) {
 		edge_ids.reserve(expected_edges);
 	}
-	snapshot->outgoing_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
-	snapshot->incoming_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
+	if (build_outgoing) {
+		snapshot->outgoing_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
+	}
+	if (build_incoming) {
+		snapshot->incoming_offsets.assign(snapshot->vertex_ids.size() + 1, 0);
+	}
 	auto degree_rows = connection.SendQuery(endpoint_projection);
 	GqlThrowOnError(*degree_rows);
 	idx_t counted_edges = 0;
-	snapshot->edge_ids_match_rowids = StringUtil::CIEquals(binding.edge.ownership, "MANAGED");
+	snapshot->edge_ids_match_rowids = build_edge_ids && StringUtil::CIEquals(binding.edge.ownership, "MANAGED");
 	while (auto chunk = degree_rows->Fetch()) {
 		UnifiedVectorFormat edge_id_data;
 		UnifiedVectorFormat source_data;
@@ -360,8 +398,10 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				                            "must not contain NULL values");
 			}
 			auto edge_id = edge_id_values[edge_index];
-			snapshot->edge_ids_match_rowids =
-			    snapshot->edge_ids_match_rowids && edge_id > 0 && row_id_values[row_id_index] == edge_id - 1;
+			if (build_edge_ids) {
+				snapshot->edge_ids_match_rowids =
+				    snapshot->edge_ids_match_rowids && edge_id > 0 && row_id_values[row_id_index] == edge_id - 1;
+			}
 			idx_t source;
 			idx_t target;
 			if (!GqlTryGetCsrOrdinal(*snapshot, source_values[source_index], source) ||
@@ -369,8 +409,12 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				throw InvalidInputException("Graph contains edge %llu with an invalid endpoint",
 				                            static_cast<unsigned long long>(edge_id));
 			}
-			snapshot->outgoing_offsets[source + 1]++;
-			snapshot->incoming_offsets[target + 1]++;
+			if (build_outgoing) {
+				snapshot->outgoing_offsets[source + 1]++;
+			}
+			if (build_incoming) {
+				snapshot->incoming_offsets[target + 1]++;
+			}
 			counted_edges++;
 		}
 	}
@@ -379,16 +423,32 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	degree_rows.reset();
 
-	FinalizeOffsets(snapshot->outgoing_offsets);
-	FinalizeOffsets(snapshot->incoming_offsets);
+	if (build_outgoing) {
+		FinalizeOffsets(snapshot->outgoing_offsets);
+	}
+	if (build_incoming) {
+		FinalizeOffsets(snapshot->incoming_offsets);
+	}
 	const bool compact_neighbors =
 	    snapshot->vertex_ids.empty() || snapshot->vertex_ids.size() - 1 <= std::numeric_limits<uint32_t>::max();
-	snapshot->outgoing_neighbors.Resize(expected_edges, compact_neighbors);
-	snapshot->outgoing_edge_ids.resize(expected_edges);
-	snapshot->outgoing_label_ids.Reset(expected_edges, true, 0);
-	snapshot->incoming_neighbors.Resize(expected_edges, compact_neighbors);
-	snapshot->incoming_edge_ids.resize(expected_edges);
-	snapshot->incoming_label_ids.Reset(expected_edges, true, 0);
+	if (build_outgoing) {
+		snapshot->outgoing_neighbors.Resize(expected_edges, compact_neighbors);
+		if (build_edge_ids) {
+			snapshot->outgoing_edge_ids.resize(expected_edges);
+		}
+		if (build_edge_labels) {
+			snapshot->outgoing_label_ids.Reset(expected_edges, true, 0);
+		}
+	}
+	if (build_incoming) {
+		snapshot->incoming_neighbors.Resize(expected_edges, compact_neighbors);
+		if (build_edge_ids) {
+			snapshot->incoming_edge_ids.resize(expected_edges);
+		}
+		if (build_edge_labels) {
+			snapshot->incoming_label_ids.Reset(expected_edges, true, 0);
+		}
+	}
 	auto outgoing_cursor = snapshot->outgoing_offsets;
 	auto incoming_cursor = snapshot->incoming_offsets;
 	auto edge_rows = connection.SendQuery(edge_projection);
@@ -425,37 +485,59 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			    !GqlTryGetCsrOrdinal(*snapshot, target_values[target_index], target)) {
 				throw InternalException("GQL CSR endpoints changed within a read transaction");
 			}
-			auto label_index = label_data.sel->get_index(row);
-			auto label = label_data.validity.RowIsValid(label_index) ? label_values[label_index].GetString() : string();
-			if (label.empty() || label.find(';') != string::npos) {
-				throw InvalidInputException("Table-backed CSR requires every edge to have exactly one type");
+			uint32_t label_id = 0;
+			if (build_edge_labels) {
+				auto label_index = label_data.sel->get_index(row);
+				auto label =
+				    label_data.validity.RowIsValid(label_index) ? label_values[label_index].GetString() : string();
+				if (label.empty() || label.find(';') != string::npos) {
+					throw InvalidInputException("Table-backed CSR requires every edge to have exactly one type");
+				}
+				label_id = CsrLabelId(*snapshot, label);
+				if (build_edge_stats && label_id >= snapshot->edge_label_stats.size()) {
+					snapshot->edge_label_stats.resize(label_id + 1);
+				}
+				if (build_edge_stats) {
+					snapshot->edge_label_stats[label_id].edge_count++;
+				}
+				if (!saw_edge_label) {
+					uniform_edge_label_id = label_id;
+					saw_edge_label = true;
+					if (build_outgoing) {
+						snapshot->outgoing_label_ids.Reset(expected_edges, true, label_id);
+					}
+					if (build_incoming) {
+						snapshot->incoming_label_ids.Reset(expected_edges, true, label_id);
+					}
+				} else if (edge_labels_uniform && label_id != uniform_edge_label_id) {
+					edge_labels_uniform = false;
+					if (build_outgoing) {
+						snapshot->outgoing_label_ids.MaterializeUniform();
+					}
+					if (build_incoming) {
+						snapshot->incoming_label_ids.MaterializeUniform();
+					}
+				}
 			}
-			auto label_id = CsrLabelId(*snapshot, label);
-			if (label_id >= snapshot->edge_label_stats.size()) {
-				snapshot->edge_label_stats.resize(label_id + 1);
+			if (build_outgoing) {
+				auto outgoing = outgoing_cursor[source]++;
+				snapshot->outgoing_neighbors.Set(outgoing, target);
+				if (build_edge_ids) {
+					snapshot->outgoing_edge_ids[outgoing] = edge_id;
+				}
+				if (build_edge_labels && !edge_labels_uniform) {
+					snapshot->outgoing_label_ids.Set(outgoing, label_id);
+				}
 			}
-			snapshot->edge_label_stats[label_id].edge_count++;
-			if (!saw_edge_label) {
-				uniform_edge_label_id = label_id;
-				saw_edge_label = true;
-				snapshot->outgoing_label_ids.Reset(expected_edges, true, label_id);
-				snapshot->incoming_label_ids.Reset(expected_edges, true, label_id);
-			} else if (edge_labels_uniform && label_id != uniform_edge_label_id) {
-				edge_labels_uniform = false;
-				snapshot->outgoing_label_ids.MaterializeUniform();
-				snapshot->incoming_label_ids.MaterializeUniform();
-			}
-			auto outgoing = outgoing_cursor[source]++;
-			snapshot->outgoing_neighbors.Set(outgoing, target);
-			snapshot->outgoing_edge_ids[outgoing] = edge_id;
-			if (!edge_labels_uniform) {
-				snapshot->outgoing_label_ids.Set(outgoing, label_id);
-			}
-			auto incoming = incoming_cursor[target]++;
-			snapshot->incoming_neighbors.Set(incoming, source);
-			snapshot->incoming_edge_ids[incoming] = edge_id;
-			if (!edge_labels_uniform) {
-				snapshot->incoming_label_ids.Set(incoming, label_id);
+			if (build_incoming) {
+				auto incoming = incoming_cursor[target]++;
+				snapshot->incoming_neighbors.Set(incoming, source);
+				if (build_edge_ids) {
+					snapshot->incoming_edge_ids[incoming] = edge_id;
+				}
+				if (build_edge_labels && !edge_labels_uniform) {
+					snapshot->incoming_label_ids.Set(incoming, label_id);
+				}
 			}
 			scattered_edges++;
 		}
@@ -488,8 +570,10 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			}
 		}
 	};
-	collect_degree_stats(snapshot->outgoing_offsets, snapshot->outgoing_label_ids, true);
-	collect_degree_stats(snapshot->incoming_offsets, snapshot->incoming_label_ids, false);
+	if (build_edge_stats) {
+		collect_degree_stats(snapshot->outgoing_offsets, snapshot->outgoing_label_ids, true);
+		collect_degree_stats(snapshot->incoming_offsets, snapshot->incoming_label_ids, false);
+	}
 	snapshot->topology_bytes =
 	    snapshot->outgoing_offsets.capacity() * sizeof(uint64_t) + snapshot->outgoing_neighbors.AllocatedBytes() +
 	    snapshot->incoming_offsets.capacity() * sizeof(uint64_t) + snapshot->incoming_neighbors.AllocatedBytes();
@@ -515,8 +599,16 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	return snapshot;
 }
 
+static bool CsrSnapshotIsCurrent(ClientContext &context, const GqlCsrSnapshot &snapshot, const GraphVersion &graph) {
+	return snapshot.graph_id == graph.graph_id && snapshot.graph_version == graph.graph_version &&
+	       snapshot.write_generation == ReadCsrWriteGeneration(context) &&
+	       snapshot.vertex_write_generation == ReadCsrTableWriteGeneration(context, snapshot.vertex_table_key) &&
+	       snapshot.edge_write_generation == ReadCsrTableWriteGeneration(context, snapshot.edge_table_key);
+}
+
 static shared_ptr<GqlCsrSnapshot> GetPreparedTableSnapshot(ClientContext &context, const string &graph_name,
-                                                           GqlCsrCacheState &cache) {
+                                                           GqlCsrCacheState &cache,
+                                                           GqlCsrCapabilities required_capabilities) {
 	auto graph_id = cache.graph_ids_by_name.find(graph_name);
 	if (graph_id == cache.graph_ids_by_name.end()) {
 		throw InvalidInputException("CSR for table-backed graph '%s' has not been built on this "
@@ -526,17 +618,26 @@ static shared_ptr<GqlCsrSnapshot> GetPreparedTableSnapshot(ClientContext &contex
 	Connection connection(*context.db);
 	auto graph = ReadGraphVersion(connection, graph_name);
 	auto entry = cache.snapshots.find(graph_id->second);
-	if (graph.graph_id != graph_id->second || entry == cache.snapshots.end() ||
-	    entry->second->graph_version != graph.graph_version ||
-	    entry->second->write_generation != ReadCsrWriteGeneration(context) ||
-	    entry->second->vertex_write_generation !=
-	        ReadCsrTableWriteGeneration(context, entry->second->vertex_table_key) ||
-	    entry->second->edge_write_generation != ReadCsrTableWriteGeneration(context, entry->second->edge_table_key)) {
+	if (graph.graph_id == graph_id->second && entry != cache.snapshots.end()) {
+		shared_ptr<GqlCsrSnapshot> best;
+		for (const auto &snapshot : entry->second) {
+			if (!CsrHasCapabilities(snapshot->capabilities, required_capabilities) ||
+			    !CsrSnapshotIsCurrent(context, *snapshot, graph)) {
+				continue;
+			}
+			if (!best || snapshot->memory_bytes < best->memory_bytes) {
+				best = snapshot;
+			}
+		}
+		if (best) {
+			return best;
+		}
+	}
+	{
 		throw InvalidInputException("CSR for table-backed graph '%s' has not been built on this "
 		                            "connection; run CALL gql_build_csr('%s') first",
 		                            graph_name, graph_name);
 	}
-	return entry->second;
 }
 
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name) {
@@ -544,7 +645,38 @@ shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const
 		throw NotImplementedException("CSR algorithms are not eligible inside an explicit transaction");
 	}
 	auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(GQL_CSR_STATE_KEY);
-	return GetPreparedTableSnapshot(context, graph_name, *cache);
+	return GetPreparedTableSnapshot(context, graph_name, *cache, GQL_CSR_FULL);
+}
+
+shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context, const string &graph_name,
+                                                          GqlCsrCapabilities capabilities) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("CSR algorithms are not eligible inside an explicit transaction");
+	}
+	capabilities = NormalizeCsrCapabilities(capabilities);
+	auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(GQL_CSR_STATE_KEY);
+	try {
+		return GetPreparedTableSnapshot(context, graph_name, *cache, capabilities);
+	} catch (const InvalidInputException &) {
+		// The graph and its table binding are validated by the builder below. A
+		// missing or stale algorithm projection is rebuilt transparently.
+	}
+	auto snapshot = BuildTableSnapshot(context, graph_name, capabilities);
+	auto &snapshots = cache->snapshots[snapshot->graph_id];
+	snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(),
+	                               [&](const shared_ptr<GqlCsrSnapshot> &entry) {
+		                               const bool stale =
+		                                   entry->graph_version != snapshot->graph_version ||
+		                                   entry->write_generation != snapshot->write_generation ||
+		                                   entry->vertex_write_generation != snapshot->vertex_write_generation ||
+		                                   entry->edge_write_generation != snapshot->edge_write_generation;
+		                               return stale || CsrHasCapabilities(snapshot->capabilities, entry->capabilities);
+	                               }),
+	                snapshots.end());
+	snapshots.push_back(snapshot);
+	cache->graph_ids_by_name[graph_name] = snapshot->graph_id;
+	cache->build_count++;
+	return snapshot;
 }
 
 shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, const string &graph_name) {
@@ -553,7 +685,7 @@ shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, co
 	}
 	auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(GQL_CSR_STATE_KEY);
 	try {
-		return GetPreparedTableSnapshot(context, graph_name, *cache);
+		return GetPreparedTableSnapshot(context, graph_name, *cache, GQL_CSR_FULL);
 	} catch (const InvalidInputException &) {
 		return nullptr;
 	}
@@ -1076,14 +1208,35 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
                                              vector<LogicalType> &return_types, vector<string> &names) {
 	auto result = make_uniq<CsrBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
-	names = {
-	    "graph_name",     "graph_version",  "vertex_count",         "edge_count",          "memory_bytes",
-	    "build_count",    "cached",         "neighbor_width_bytes", "vertex_ids_explicit", "edge_labels_uniform",
-	    "topology_bytes", "identity_bytes", "label_bytes",          "auxiliary_bytes",     "build_auxiliary_bytes"};
+	names = {"graph_name",
+	         "graph_version",
+	         "vertex_count",
+	         "edge_count",
+	         "memory_bytes",
+	         "build_count",
+	         "cached",
+	         "neighbor_width_bytes",
+	         "vertex_ids_explicit",
+	         "edge_labels_uniform",
+	         "topology_bytes",
+	         "identity_bytes",
+	         "label_bytes",
+	         "auxiliary_bytes",
+	         "build_auxiliary_bytes",
+	         "capability_mask",
+	         "has_outgoing",
+	         "has_incoming",
+	         "has_edge_ids",
+	         "has_edge_labels",
+	         "has_vertex_labels",
+	         "has_vertex_label_postings",
+	         "has_edge_stats"};
 	return_types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
 	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT,
 	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::UBIGINT,
-	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
+	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
+	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN};
 	return std::move(result);
 }
 
@@ -1118,8 +1271,8 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 		                            "COPY GRAPH before building CSR",
 		                            data.graph_name);
 	}
-	auto snapshot = BuildTableSnapshot(context, data.graph_name);
-	cache->snapshots[snapshot->graph_id] = snapshot;
+	auto snapshot = BuildTableSnapshot(context, data.graph_name, GQL_CSR_FULL);
+	cache->snapshots[snapshot->graph_id] = {snapshot};
 	cache->graph_ids_by_name[data.graph_name] = snapshot->graph_id;
 	cache->build_count++;
 
@@ -1127,7 +1280,7 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 	output.SetValue(0, 0, Value(data.graph_name));
 	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
 	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size()));
-	output.SetValue(3, 0, Value::UBIGINT(snapshot->outgoing_edge_ids.size()));
+	output.SetValue(3, 0, Value::UBIGINT(snapshot->edge_count));
 	output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
 	output.SetValue(5, 0, Value::UBIGINT(cache->build_count));
 	state.done = true;
@@ -1140,16 +1293,19 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	}
 	auto &data = input.bind_data->Cast<CsrBindData>();
 	auto cache = context.registered_state->GetOrCreate<GqlCsrCacheState>(GQL_CSR_STATE_KEY);
-	auto snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	auto snapshot = GetPreparedTableSnapshot(context, data.graph_name, *cache, 0);
 	output.SetCardinality(1);
 	output.SetValue(0, 0, Value(data.graph_name));
 	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
 	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size()));
-	output.SetValue(3, 0, Value::UBIGINT(snapshot->outgoing_edge_ids.size()));
+	output.SetValue(3, 0, Value::UBIGINT(snapshot->edge_count));
 	output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
 	output.SetValue(5, 0, Value::UBIGINT(cache->build_count));
 	output.SetValue(6, 0, Value(true));
-	output.SetValue(7, 0, Value::UBIGINT(snapshot->outgoing_neighbors.WidthBytes()));
+	output.SetValue(7, 0,
+	                Value::UBIGINT((snapshot->capabilities & GQL_CSR_OUTGOING)
+	                                   ? snapshot->outgoing_neighbors.WidthBytes()
+	                                   : snapshot->incoming_neighbors.WidthBytes()));
 	output.SetValue(8, 0, Value(!snapshot->vertex_ids.IsImplicitDense()));
 	output.SetValue(9, 0, Value(snapshot->outgoing_label_ids.IsUniform()));
 	output.SetValue(10, 0, Value::UBIGINT(snapshot->topology_bytes));
@@ -1157,6 +1313,14 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	output.SetValue(12, 0, Value::UBIGINT(snapshot->label_bytes));
 	output.SetValue(13, 0, Value::UBIGINT(snapshot->auxiliary_bytes));
 	output.SetValue(14, 0, Value::UBIGINT(snapshot->build_auxiliary_bytes));
+	output.SetValue(15, 0, Value::UBIGINT(snapshot->capabilities));
+	output.SetValue(16, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_OUTGOING));
+	output.SetValue(17, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_INCOMING));
+	output.SetValue(18, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_IDS));
+	output.SetValue(19, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_LABELS));
+	output.SetValue(20, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABELS));
+	output.SetValue(21, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS));
+	output.SetValue(22, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_STATS));
 	state.done = true;
 }
 

@@ -1,5 +1,5 @@
 # name: test/sql/gql_csr_algorithms.test
-# description: Explicit CSR build and CALL-based traversal, ranking, components, and triangles
+# description: Algorithm-owned CSR projections plus traversal, ranking, components, and triangles
 # group: [gql]
 
 require duckgql
@@ -41,13 +41,26 @@ COPY GRAPH algo_graph FROM (
 ----
 true	algo_graph	6	6
 
-# Algorithms never build implicitly: construction is an explicit CALL and the
-# resulting immutable snapshot is reused by later calls on this connection.
-statement error
+# Algorithms build and cache the smallest compatible CSR projection. BFS emits
+# parent edge IDs, so its unfiltered default needs outgoing topology and edge
+# identity, but not incoming topology or label arrays.
+query IIIII
 CALL algo.bfs('algo_graph', 1)
 ----
-run CALL gql_build_csr('algo_graph') first
+1	0	NULL	NULL	0
+2	1	1	1	1
+3	1	1	2	2
+4	2	2	3	3
+5	3	4	5	4
 
+query IIIII
+SELECT has_outgoing, has_incoming, has_edge_ids, has_edge_labels, has_vertex_labels
+FROM gql_csr_stats('algo_graph')
+----
+true	false	true	false	false
+
+# Explicit full construction remains available for optimizer, neighbor, and
+# inspection workflows and replaces narrower cached projections.
 statement ok
 CALL gql_build_csr('algo_graph')
 
@@ -744,18 +757,27 @@ CALL algo.bfs('algo_graph', 1, direction := 'sideways')
 ----
 direction must be 'out', 'in', or 'both'
 
-# Conservative graph-version invalidation rejects stale snapshots. Rebuilding
-# is explicit even when a mutation only changed properties.
+# Conservative graph-version invalidation rejects stale snapshots internally.
+# The next algorithm rebuilds its required projection automatically. Unfiltered
+# PageRank needs outgoing topology but no edge identity or label arrays.
 statement ok
 MATCH (n:node) SET n.name = n.name
 
-statement error
-CALL algo.bfs('algo_graph', 1)
+query I
+SELECT count(*) FROM system.algo.pagerank('algo_graph')
 ----
-run CALL gql_build_csr('algo_graph') first
+6
 
-statement ok
-CALL gql_build_csr('algo_graph')
+query IIIII
+SELECT has_outgoing, has_incoming, has_edge_ids, has_edge_labels, has_vertex_labels
+FROM gql_csr_stats('algo_graph')
+----
+true	false	false	false	false
+
+query I
+SELECT count(*) FROM system.algo.bfs('algo_graph', 1)
+----
+5
 
 # Direct SQL writes invalidate snapshots even though they do not pass through
 # GQL mutation lowering or bump graph_version.

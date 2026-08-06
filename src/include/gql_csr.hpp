@@ -10,6 +10,22 @@ namespace duckdb {
 
 class ClientContext;
 
+using GqlCsrCapabilities = uint32_t;
+
+enum GqlCsrCapability : GqlCsrCapabilities {
+	GQL_CSR_OUTGOING = 1U << 0U,
+	GQL_CSR_INCOMING = 1U << 1U,
+	GQL_CSR_EDGE_IDS = 1U << 2U,
+	GQL_CSR_EDGE_LABELS = 1U << 3U,
+	GQL_CSR_VERTEX_LABELS = 1U << 4U,
+	GQL_CSR_VERTEX_LABEL_POSTINGS = 1U << 5U,
+	GQL_CSR_EDGE_STATS = 1U << 6U,
+};
+
+static constexpr GqlCsrCapabilities GQL_CSR_FULL = GQL_CSR_OUTGOING | GQL_CSR_INCOMING | GQL_CSR_EDGE_IDS |
+                                                   GQL_CSR_EDGE_LABELS | GQL_CSR_VERTEX_LABELS |
+                                                   GQL_CSR_VERTEX_LABEL_POSTINGS | GQL_CSR_EDGE_STATS;
+
 class GqlCsrVertexIds {
 public:
 	void reserve(idx_t count) {
@@ -165,6 +181,7 @@ struct GqlCsrEdgeLabelStats {
 };
 
 struct GqlCsrSnapshot {
+	GqlCsrCapabilities capabilities = 0;
 	uint64_t graph_id;
 	uint64_t graph_version;
 	uint64_t write_generation;
@@ -175,6 +192,7 @@ struct GqlCsrSnapshot {
 	bool dense_vertex_ids = false;
 	bool vertex_ids_match_rowids = false;
 	bool edge_ids_match_rowids = false;
+	idx_t edge_count = 0;
 	GqlCsrVertexIds vertex_ids;
 	unordered_map<uint64_t, idx_t> ordinal_by_id;
 	vector<idx_t> vertex_label_offsets;
@@ -203,6 +221,11 @@ struct GqlCsrSnapshot {
 bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
 
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name);
+
+//! Return a current capability-compatible snapshot, building it automatically
+//! when the calling algorithm has not prepared one on this connection yet.
+shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context, const string &graph_name,
+                                                          GqlCsrCapabilities capabilities);
 
 //! Returns a current connection-local snapshot when one is available and
 //! valid. Unlike GqlGetCsrSnapshot, this is a non-throwing optimizer probe.

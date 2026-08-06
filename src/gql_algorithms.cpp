@@ -199,6 +199,27 @@ static CsrDirection ReadDirection(const TableFunctionBindInput &input) {
 	throw BinderException("GQL CSR traversal direction must be 'out', 'in', or 'both'");
 }
 
+static GqlCsrCapabilities AlgorithmCsrCapabilities(CsrDirection direction, const string &edge_label,
+                                                   const string &vertex_label, bool edge_ids = false) {
+	GqlCsrCapabilities capabilities = 0;
+	if (direction != CsrDirection::IN) {
+		capabilities |= GQL_CSR_OUTGOING;
+	}
+	if (direction != CsrDirection::OUT) {
+		capabilities |= GQL_CSR_INCOMING;
+	}
+	if (edge_ids) {
+		capabilities |= GQL_CSR_EDGE_IDS;
+	}
+	if (!edge_label.empty()) {
+		capabilities |= GQL_CSR_EDGE_LABELS;
+	}
+	if (!vertex_label.empty()) {
+		capabilities |= GQL_CSR_VERTEX_LABELS;
+	}
+	return capabilities;
+}
+
 struct TraversalBindData : TableFunctionData {
 	string graph_name;
 	uint64_t start_vertex_id;
@@ -306,7 +327,8 @@ static bool VisitRange(const vector<uint64_t> &offsets, const GqlCsrOrdinals &ne
 		if (filter_label && label_ids[offset] != required_label) {
 			continue;
 		}
-		if (!callback(neighbors[offset], edge_ids[offset])) {
+		auto edge_id = edge_ids.empty() ? 0 : edge_ids[offset];
+		if (!callback(neighbors[offset], edge_id)) {
 			return false;
 		}
 	}
@@ -408,7 +430,8 @@ static unique_ptr<GlobalTableFunctionState> BfsInit(ClientContext &, TableFuncti
 }
 
 static void InitializeBfs(ClientContext &context, const TraversalBindData &data, BfsState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(data.direction, data.edge_label, data.vertex_label, true));
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
 	auto start = RequireProjectedVertex(*state.snapshot, state.vertex_mask, data.start_vertex_id, "start");
@@ -522,7 +545,8 @@ static bool NextDfsNeighbor(const GqlCsrSnapshot &snapshot, CsrDirection directi
 }
 
 static void InitializeDfs(ClientContext &context, const TraversalBindData &data, DfsState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(data.direction, data.edge_label, data.vertex_label, true));
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
 	auto start = RequireProjectedVertex(*state.snapshot, state.vertex_mask, data.start_vertex_id, "start");
@@ -652,7 +676,8 @@ static unique_ptr<GlobalTableFunctionState> PageRankInit(ClientContext &, TableF
 }
 
 static void ComputePageRank(ClientContext &context, const PageRankBindData &data, PageRankState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::OUT, data.edge_label, data.vertex_label));
 	const auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -829,7 +854,8 @@ static idx_t FindComponentRoot(vector<idx_t> &parents, idx_t vertex) {
 }
 
 static void ComputeWcc(ClientContext &context, const GraphAlgorithmBindData &data, ComponentState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::OUT, data.edge_label, data.vertex_label));
 	const auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -897,7 +923,8 @@ struct SccDfsFrame {
 };
 
 static void ComputeScc(ClientContext &context, const GraphAlgorithmBindData &data, ComponentState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::BOTH, data.edge_label, data.vertex_label));
 	const auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -1044,7 +1071,8 @@ static unique_ptr<GlobalTableFunctionState> TriangleCountInit(ClientContext &, T
 
 static void ComputeTriangleCounts(ClientContext &context, const GraphAlgorithmBindData &data,
                                   TriangleCountState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::OUT, data.edge_label, data.vertex_label));
 	const auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -1186,7 +1214,8 @@ static unique_ptr<GlobalTableFunctionState> LccInit(ClientContext &, TableFuncti
 }
 
 static void ComputeLcc(ClientContext &context, const GraphAlgorithmBindData &data, LccState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::OUT, data.edge_label, data.vertex_label));
 	const auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -1662,7 +1691,8 @@ static unique_ptr<GlobalTableFunctionState> LouvainInit(ClientContext &, TableFu
 }
 
 static void ComputeLouvain(ClientContext &context, const LouvainBindData &data, LouvainState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::BOTH, data.edge_label, data.vertex_label));
 	idx_t projected_count;
 	auto vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
 	auto original_graph = BuildLouvainGraph(context, *state.snapshot, vertex_mask, data.edge_label, projected_count,
@@ -1767,7 +1797,8 @@ static unique_ptr<GlobalTableFunctionState> DegreeInit(ClientContext &, TableFun
 }
 
 static void ComputeDegrees(ClientContext &context, const GraphAlgorithmBindData &data, DegreeState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(CsrDirection::BOTH, data.edge_label, data.vertex_label));
 	auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -1870,7 +1901,8 @@ static unique_ptr<GlobalTableFunctionState> ClosenessInit(ClientContext &, Table
 }
 
 static void ComputeCloseness(ClientContext &context, const ClosenessBindData &data, ClosenessState &state) {
-	state.snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	state.snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, data.graph_name, AlgorithmCsrCapabilities(data.direction, data.edge_label, data.vertex_label));
 	auto vertex_count = state.snapshot->vertex_ids.size();
 	idx_t projected_count;
 	state.vertex_mask = BuildVertexMask(*state.snapshot, data.vertex_label, projected_count);
@@ -2338,9 +2370,10 @@ static int64_t ComputeShortestPathLength(ClientContext &context, const Algorithm
 		    static_cast<unsigned long long>(state.targets.size()));
 	}
 
-	auto snapshot = GqlGetCsrSnapshot(context, data.configuration[0].value);
 	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
 	auto edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
+	auto snapshot = GqlGetOrBuildCsrSnapshot(context, data.configuration[0].value,
+	                                         AlgorithmCsrCapabilities(CsrDirection::OUT, edge_label, vertex_label));
 	idx_t projected_count;
 	auto vertex_mask = BuildVertexMask(*snapshot, vertex_label, projected_count);
 	auto source = RequireProjectedVertex(*snapshot, vertex_mask, state.frontier[0], "source");
@@ -2384,13 +2417,16 @@ static int64_t ComputeShortestPathLength(ClientContext &context, const Algorithm
 static void InitializePipelineBfs(ClientContext &context, const AlgorithmCallBindData &data,
                                   AlgorithmCallGlobalState &state) {
 	auto graph_name = data.configuration[0].value;
-	auto snapshot = GqlGetCsrSnapshot(context, graph_name);
+	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
+	auto edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
+	auto snapshot = GqlGetOrBuildCsrSnapshot(
+	    context, graph_name, AlgorithmCsrCapabilities(CsrDirection::OUT, edge_label, vertex_label, true));
 	std::sort(state.frontier.begin(), state.frontier.end());
 	state.frontier.erase(std::unique(state.frontier.begin(), state.frontier.end()), state.frontier.end());
 	auto traversal = make_uniq<TraversalBindData>();
 	traversal->graph_name = graph_name;
-	traversal->vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
-	traversal->edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
+	traversal->vertex_label = vertex_label;
+	traversal->edge_label = edge_label;
 	if (data.configuration.size() > 3) {
 		traversal->has_target = true;
 		traversal->target_vertex_id = NumericCast<uint64_t>(std::stoull(data.configuration[3].value));
@@ -2421,10 +2457,11 @@ static void InitializePipelineDfs(ClientContext &context, const AlgorithmCallBin
                                   AlgorithmCallGlobalState &state) {
 	auto graph_name = data.configuration[0].value;
 	auto dfs = make_uniq<PipelineDfsState>();
-	dfs->snapshot = GqlGetCsrSnapshot(context, graph_name);
+	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
+	dfs->snapshot = GqlGetOrBuildCsrSnapshot(context, graph_name,
+	                                         AlgorithmCsrCapabilities(CsrDirection::OUT, string(), vertex_label, true));
 	idx_t projected_count;
-	dfs->vertex_mask = BuildVertexMask(
-	    *dfs->snapshot, data.configuration.size() > 1 ? data.configuration[1].value : string(), projected_count);
+	dfs->vertex_mask = BuildVertexMask(*dfs->snapshot, vertex_label, projected_count);
 	std::sort(state.frontier.begin(), state.frontier.end());
 	state.frontier.erase(std::unique(state.frontier.begin(), state.frontier.end()), state.frontier.end());
 	dfs->visited.resize(dfs->snapshot->vertex_ids.size(), false);

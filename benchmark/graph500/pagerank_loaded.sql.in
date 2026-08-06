@@ -1,0 +1,33 @@
+.timer on
+.print phase=load_extension
+LOAD '__DUCKGQL_EXTENSION__';
+
+.print phase=set_memory_budget
+SET memory_limit = '__MEMORY_LIMIT__';
+SELECT current_setting('memory_limit') AS memory_limit;
+
+.print phase=pagerank_cold
+SELECT max(iterations) AS iterations,
+       bool_and(converged) AS converged,
+       sum(rank) AS rank_sum
+FROM system.algo.pagerank(
+    'graph500',
+    damping := 0.85,
+    max_iterations := 100,
+    tolerance := 1e-8
+);
+
+.print phase=csr_stats
+SELECT vertex_count, edge_count, memory_bytes
+FROM gql_csr_stats('graph500');
+
+.print phase=pagerank
+SELECT max(iterations) AS iterations,
+       bool_and(converged) AS converged,
+       sum(rank) AS rank_sum
+FROM system.algo.pagerank(
+    'graph500',
+    damping := 0.85,
+    max_iterations := 100,
+    tolerance := 1e-8
+);
