@@ -35,10 +35,15 @@ RETURN
 ----
 <REGEX>:.*GQL parser error at line 2, column 0.*
 
-statement error
+query IT
 CREATE PROPERTY GRAPH property_spelling ANY
 ----
-<REGEX>:.*GQL feature not implemented: PROPERTY GRAPH spelling.*
+true	property_spelling
+
+query IT
+DROP PROPERTY GRAPH property_spelling
+----
+true	property_spelling
 
 statement error
 MATCH (n) RETURN n
@@ -73,8 +78,7 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
-# Delimited names are rejected consistently until their canonicalization is
-# supported throughout storage, matching, and projection.
+# Delimited names remain rejected outside the supported RETURN-alias context.
 statement error
 CREATE GRAPH `Mixed Graph` ANY
 ----
@@ -93,7 +97,7 @@ MATCH (n) RETURN n.`First Name`
 statement error
 MATCH (n) RETURN n AS `Node Alias`
 ----
-<REGEX>:.*GQL feature not implemented: delimited RETURN aliases.*
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
 statement error
 INSERT (n:`Person Label`)

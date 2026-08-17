@@ -58,6 +58,55 @@ CREATE GRAPH IF NOT EXISTS social ANY
 true	social
 
 query IT
+CREATE PROPERTY GRAPH alternate ANY
+----
+true	alternate
+
+query IT
+CREATE PROPERTY GRAPH IF NOT EXISTS alternate ANY
+----
+true	alternate
+
+query IT
+SESSION SET GRAPH social
+----
+true	social
+
+query IT
+SESSION RESET PROPERTY GRAPH
+----
+true	social
+
+statement error
+MATCH (n) RETURN n
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
+query IT
+SESSION SET PROPERTY GRAPH alternate
+----
+true	alternate
+
+query IT
+SESSION RESET GRAPH
+----
+true	alternate
+
+statement error
+MATCH (n) RETURN n
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
+
+# Reset is idempotent and does not modify either graph.
+statement ok
+SESSION RESET PROPERTY GRAPH
+
+query I
+SELECT count(*) FROM gql_graphs()
+----
+2
+
+query IT
 SESSION SET GRAPH social
 ----
 true	social
@@ -66,6 +115,21 @@ statement error
 SESSION SET GRAPH missing
 ----
 Graph 'missing' does not exist
+
+statement error
+SESSION SET PROPERTY GRAPH missing
+----
+Graph 'missing' does not exist
+
+query IT
+DROP PROPERTY GRAPH alternate
+----
+true	alternate
+
+query IT
+DROP PROPERTY GRAPH IF EXISTS alternate
+----
+true	alternate
 
 statement ok
 BEGIN

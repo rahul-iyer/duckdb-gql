@@ -1,5 +1,6 @@
 #include "gql_transformer.hpp"
 
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
 
 #include <algorithm>
@@ -123,36 +124,37 @@ shared_ptr<GqlStatement> GqlTransformer::Transform(GQLParser::GqlProgramContext 
 			return unsupported("INSERT RETURN with multiple result clauses or ordering");
 		}
 		auto body = return_statements[0]->returnStatementBody();
-		if (!body || body->ASTERISK() || body->setQuantifier() || body->groupByClause() || !body->returnItemList() ||
-		    body->returnItemList()->returnItem().size() != 1) {
-			return unsupported("INSERT RETURN form other than one node variable");
+		if (!body || body->ASTERISK() || body->setQuantifier() || body->groupByClause() || !body->returnItemList()) {
+			return unsupported("INSERT RETURN form other than directly inserted node variables");
 		}
-		GqlProjection projection;
-		if (!TransformProjection(body->returnItemList()->returnItem()[0], projection) || !projection.expression ||
-		    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE) {
-			return unsupported("INSERT RETURN expression other than a node variable");
-		}
-		idx_t vertex_index = DConstants::INVALID_INDEX;
-		for (idx_t index = 0; index < insert->vertices.size(); index++) {
-			if (insert->vertices[index].variable.value != projection.expression->variable.value) {
-				continue;
+		for (auto item : body->returnItemList()->returnItem()) {
+			GqlProjection projection;
+			if (!TransformProjection(item, projection) || !projection.expression ||
+			    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE) {
+				return unsupported("INSERT RETURN expression other than a node variable");
 			}
-			if (vertex_index != DConstants::INVALID_INDEX) {
-				return unsupported("ambiguous INSERT RETURN node variable");
-			}
-			vertex_index = index;
-		}
-		if (vertex_index == DConstants::INVALID_INDEX) {
-			for (const auto &edge : insert->edges) {
-				if (edge.variable.value == projection.expression->variable.value) {
-					return unsupported("INSERT RETURN edge values");
+			auto &variable = projection.expression->variable.value;
+			idx_t vertex_index = DConstants::INVALID_INDEX;
+			for (idx_t index = 0; index < insert->vertices.size(); index++) {
+				if (insert->vertices[index].variable.value != variable) {
+					continue;
 				}
+				if (vertex_index != DConstants::INVALID_INDEX) {
+					throw BinderException("GQL INSERT RETURN node variable '%s' is ambiguous", variable);
+				}
+				vertex_index = index;
 			}
-			return unsupported("INSERT RETURN unknown node variable");
+			if (vertex_index == DConstants::INVALID_INDEX) {
+				for (const auto &edge : insert->edges) {
+					if (edge.variable.value == variable) {
+						return unsupported("INSERT RETURN edge values");
+					}
+				}
+				throw BinderException("GQL INSERT RETURN variable '%s' is not a directly inserted node", variable);
+			}
+			insert->return_projections.push_back(
+			    {vertex_index, projection.alias.IsEmpty() ? variable : projection.alias.value});
 		}
-		insert->return_vertex_index = vertex_index;
-		insert->return_name =
-		    projection.alias.IsEmpty() ? projection.expression->variable.value : projection.alias.value;
 	}
 	if (!statement) {
 		TransformMatch(root);
@@ -164,10 +166,6 @@ shared_ptr<GqlStatement> GqlTransformer::Transform(GQLParser::GqlProgramContext 
 }
 
 std::any GqlTransformer::visitCreateGraphStatement(GQLParser::CreateGraphStatementContext *context) {
-	if (context->PROPERTY()) {
-		Unsupported(*context, "PROPERTY GRAPH spelling");
-		return {};
-	}
 	if (context->OR() || context->REPLACE()) {
 		Unsupported(*context, "CREATE OR REPLACE GRAPH");
 		return {};
@@ -429,10 +427,6 @@ bool GqlTransformer::TransformGraphTypeProperties(GQLParser::PropertyTypesSpecif
 }
 
 std::any GqlTransformer::visitDropGraphStatement(GQLParser::DropGraphStatementContext *context) {
-	if (context->PROPERTY()) {
-		Unsupported(*context, "PROPERTY GRAPH spelling");
-		return {};
-	}
 	auto parent_and_name = context->catalogGraphParentAndName();
 	if (!parent_and_name || parent_and_name->catalogObjectParentReference()) {
 		Unsupported(*context, "qualified graph names");
@@ -449,16 +443,22 @@ std::any GqlTransformer::visitDropGraphStatement(GQLParser::DropGraphStatementCo
 }
 
 std::any GqlTransformer::visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *context) {
-	if (context->PROPERTY()) {
-		Unsupported(*context, "PROPERTY GRAPH spelling");
-		return {};
-	}
 	auto expression = context->graphExpression();
 	if (!expression || !IsRegularIdentifier(expression->getText())) {
 		Unsupported(*context, "non-simple graph expressions");
 		return {};
 	}
 	statement = make_shared_ptr<GqlSessionSetGraphStatement>(SourceRange(*context), TransformIdentifier(*expression));
+	return {};
+}
+
+std::any GqlTransformer::visitSessionResetCommand(GQLParser::SessionResetCommandContext *context) {
+	auto arguments = context->sessionResetArguments();
+	if (!arguments || !arguments->GRAPH()) {
+		Unsupported(*context, "SESSION RESET variant other than [PROPERTY] GRAPH");
+		return {};
+	}
+	statement = make_shared_ptr<GqlSessionResetGraphStatement>(SourceRange(*context));
 	return {};
 }
 
@@ -478,46 +478,61 @@ shared_ptr<GqlInsertStatement> GqlTransformer::TransformInsert(GQLParser::Insert
 		return nullptr;
 	}
 	auto paths = pattern->insertPathPatternList()->insertPathPattern();
-	if (paths.size() != 1) {
-		Unsupported(context, "multiple INSERT paths");
+	if (paths.empty()) {
+		Unsupported(context, "empty INSERT path list");
 		return nullptr;
 	}
-	auto nodes = paths[0]->insertNodePattern();
-	auto edge_patterns = paths[0]->insertEdgePattern();
-	if (nodes.empty() || edge_patterns.size() + 1 != nodes.size()) {
-		Unsupported(context, "invalid INSERT path topology");
+	if (paths.size() > 1 && allow_expressions) {
+		Unsupported(context, "multiple INSERT paths in a MATCH pipeline");
 		return nullptr;
+	}
+	if (paths.size() > 1) {
+		for (auto path : paths) {
+			if (path->insertNodePattern().size() != 1 || !path->insertEdgePattern().empty()) {
+				Unsupported(context, "multiple INSERT paths containing edges");
+				return nullptr;
+			}
+		}
 	}
 
 	auto insert = make_shared_ptr<GqlInsertStatement>(SourceRange(context));
-	for (auto node : nodes) {
-		GqlInsertElement element;
-		element.source = SourceRange(*node);
-		if (!TransformInsertElement(node->insertElementPatternFiller(), element, allow_expressions)) {
+	for (auto path : paths) {
+		auto nodes = path->insertNodePattern();
+		auto edge_patterns = path->insertEdgePattern();
+		if (nodes.empty() || edge_patterns.size() + 1 != nodes.size()) {
+			Unsupported(context, "invalid INSERT path topology");
 			return nullptr;
 		}
-		insert->vertices.push_back(std::move(element));
-	}
-	for (idx_t index = 0; index < edge_patterns.size(); index++) {
-		GqlInsertEdge edge;
-		edge.source = SourceRange(*edge_patterns[index]);
-		GQLParser::InsertElementPatternFillerContext *filler = nullptr;
-		if (auto pointing_right = edge_patterns[index]->insertEdgePointingRight()) {
-			edge.source_vertex = index;
-			edge.target_vertex = index + 1;
-			filler = pointing_right->insertElementPatternFiller();
-		} else if (auto pointing_left = edge_patterns[index]->insertEdgePointingLeft()) {
-			edge.source_vertex = index + 1;
-			edge.target_vertex = index;
-			filler = pointing_left->insertElementPatternFiller();
-		} else {
-			Unsupported(context, "undirected edge INSERT patterns");
-			return nullptr;
+		auto vertex_offset = insert->vertices.size();
+		for (auto node : nodes) {
+			GqlInsertElement element;
+			element.source = SourceRange(*node);
+			if (!TransformInsertElement(node->insertElementPatternFiller(), element, allow_expressions)) {
+				return nullptr;
+			}
+			insert->vertices.push_back(std::move(element));
 		}
-		if (!TransformInsertElement(filler, edge, allow_expressions)) {
-			return nullptr;
+		for (idx_t index = 0; index < edge_patterns.size(); index++) {
+			GqlInsertEdge edge;
+			edge.source = SourceRange(*edge_patterns[index]);
+			GQLParser::InsertElementPatternFillerContext *filler = nullptr;
+			if (auto pointing_right = edge_patterns[index]->insertEdgePointingRight()) {
+				edge.source_vertex = vertex_offset + index;
+				edge.target_vertex = vertex_offset + index + 1;
+				filler = pointing_right->insertElementPatternFiller();
+			} else if (auto pointing_left = edge_patterns[index]->insertEdgePointingLeft()) {
+				edge.source_vertex = vertex_offset + index + 1;
+				edge.target_vertex = vertex_offset + index;
+				filler = pointing_left->insertElementPatternFiller();
+			} else {
+				Unsupported(context, "undirected edge INSERT patterns");
+				return nullptr;
+			}
+			if (!TransformInsertElement(filler, edge, allow_expressions)) {
+				return nullptr;
+			}
+			insert->edges.push_back(std::move(edge));
 		}
-		insert->edges.push_back(std::move(edge));
 	}
 	return insert;
 }
@@ -1501,8 +1516,7 @@ bool GqlTransformer::TransformProjection(GQLParser::ReturnItemContext *item, Gql
 	}
 	result.source = SourceRange(*item);
 	if (auto alias = item->returnItemAlias()) {
-		if (!IsRegularIdentifier(alias->identifier()->getText())) {
-			Unsupported(*alias, "delimited RETURN aliases");
+		if (!alias->identifier()) {
 			return false;
 		}
 		result.alias = TransformIdentifier(*alias->identifier());
@@ -2200,7 +2214,7 @@ GqlIdentifier GqlTransformer::TransformIdentifier(antlr4::ParserRuleContext &con
 	GqlIdentifier result;
 	auto text = context.getText();
 	result.delimited = !text.empty() && (text[0] == '`' || text[0] == '"');
-	result.value = StringUtil::Lower(result.delimited ? UnquoteString(text) : text);
+	result.value = result.delimited ? UnquoteString(text) : StringUtil::Lower(text);
 	result.source = SourceRange(context);
 	return result;
 }

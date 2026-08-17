@@ -825,6 +825,13 @@ static unique_ptr<FunctionData> SetGraphBind(ClientContext &, TableFunctionBindI
 	return make_uniq<CommandBindData>(input.inputs[0].GetValue<string>(), false);
 }
 
+static unique_ptr<FunctionData> ResetGraphBind(ClientContext &, TableFunctionBindInput &,
+                                               vector<LogicalType> &return_types, vector<string> &names) {
+	names = {"success", "graph_name"};
+	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
+	return nullptr;
+}
+
 static unique_ptr<FunctionData> PropertyIndexBind(ClientContext &, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<string> &names) {
 	if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
@@ -1064,6 +1071,17 @@ static void SetGraph(ClientContext &context, TableFunctionInput &input, DataChun
 	auto gql_state = context.registered_state->GetOrCreate<GqlClientState>(GQL_STATE_KEY);
 	gql_state->graph_name = data.graph_name;
 	EmitCommandResult(output, state, data.graph_name);
+}
+
+static void ResetGraph(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<SingleRowState>();
+	if (state.done) {
+		return;
+	}
+	auto gql_state = context.registered_state->GetOrCreate<GqlClientState>(GQL_STATE_KEY);
+	auto previous_graph = std::move(gql_state->graph_name);
+	gql_state->graph_name.clear();
+	EmitCommandResult(output, state, previous_graph);
 }
 
 struct PropertyIndexTarget {
@@ -1391,6 +1409,13 @@ TableFunction GqlDropGraphFunction() {
 TableFunction GqlSetGraphFunction() {
 	TableFunction function("gql_set_graph", {LogicalType::VARCHAR}, SetGraph);
 	function.bind = SetGraphBind;
+	function.init_global = SingleRowInit;
+	return function;
+}
+
+TableFunction GqlResetGraphFunction() {
+	TableFunction function("gql_reset_graph", {}, ResetGraph);
+	function.bind = ResetGraphBind;
 	function.init_global = SingleRowInit;
 	return function;
 }

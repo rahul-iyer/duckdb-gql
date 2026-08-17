@@ -252,6 +252,8 @@ static bool StartsWithGqlCommand(const string &query) {
 	       StartsWithGqlKeywords(query, {"DROP", "PROPERTY", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "SET", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "SET", "PROPERTY", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "PROPERTY", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) || StartsWithMergePattern(query) ||
 	       StartsWithGqlKeywords(query, {"MATCH"}) || StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) ||
 	       StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') || StartsWithAlgorithmCall(query);
@@ -2096,6 +2098,9 @@ ParserExtensionPlanResult GqlPlan(ParserExtensionInfo *, ClientContext &,
 		result.parameters.emplace_back(set_graph.graph_name.value);
 		return result;
 	}
+	case GqlStatementType::SESSION_RESET_GRAPH:
+		result.function = GqlResetGraphFunction();
+		return result;
 	case GqlStatementType::INSERT:
 		throw NotImplementedException("GQL INSERT on native graph tables is not implemented yet");
 	case GqlStatementType::MERGE:

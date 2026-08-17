@@ -141,6 +141,16 @@ RETURN a.name AS source_name,
        b.name AS target_name;
 ```
 
+Graph lifecycle and session commands also accept the standard optional
+`PROPERTY` keyword, for example `CREATE PROPERTY GRAPH`,
+`DROP PROPERTY GRAPH`, and `SESSION SET PROPERTY GRAPH`. Clear the selected
+graph without changing its data or catalog entry with `SESSION RESET GRAPH` or
+`SESSION RESET PROPERTY GRAPH`.
+
+`RETURN` aliases may use backtick or double-quote delimiters when the output
+name contains spaces or escaped delimiters, for example
+`` RETURN a.name AS `Person Name` ``.
+
 An explicit inline typed schema can instead be persisted with the graph:
 
 ```sql
@@ -168,11 +178,11 @@ declared labels/edge types, allowed properties, and per-type `NOT NULL`
 properties. Properties shared by multiple node or edge types must map to the
 same DuckDB physical type.
 
-`INSERT RETURN` currently returns one directly inserted node variable. The
+`INSERT RETURN` can return one or more directly inserted node variables. Each
 result has the same node struct representation as `MATCH`, including its
-generated `vertex_id`, labels, and mapped properties. Edge values, multiple
-return items, expressions, ordering, and pagination are not yet supported on
-standalone `INSERT RETURN`.
+generated `vertex_id`, labels, and mapped properties. Result columns preserve
+the `RETURN` list order. Edge values, expressions, ordering, and pagination are
+not yet supported on standalone `INSERT RETURN`.
 
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing

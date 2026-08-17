@@ -11,6 +11,7 @@ void GqlEnsureStorage(Connection &connection);
 TableFunction GqlCreateGraphFunction();
 TableFunction GqlDropGraphFunction();
 TableFunction GqlSetGraphFunction();
+TableFunction GqlResetGraphFunction();
 TableFunction GqlGraphsFunction();
 TableFunction GqlCreatePropertyIndexFunction();
 TableFunction GqlDropPropertyIndexFunction();

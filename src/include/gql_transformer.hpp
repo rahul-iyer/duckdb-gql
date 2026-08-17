@@ -23,6 +23,7 @@ private:
 	std::any visitCreateGraphStatement(GQLParser::CreateGraphStatementContext *context) override;
 	std::any visitDropGraphStatement(GQLParser::DropGraphStatementContext *context) override;
 	std::any visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *context) override;
+	std::any visitSessionResetCommand(GQLParser::SessionResetCommandContext *context) override;
 	std::any visitInsertStatement(GQLParser::InsertStatementContext *context) override;
 
 	shared_ptr<GqlInsertStatement> TransformInsert(GQLParser::InsertStatementContext &context, bool allow_expressions);

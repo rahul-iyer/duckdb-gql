@@ -41,6 +41,32 @@ RETURN DISTINCT person.name AS name
 Ada
 Grace
 
+# RETURN aliases accept both delimited identifier forms, preserve spaces and
+# unescape doubled delimiters.
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN person.name AS `Person Name`
+----
+Ada
+
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN person.name AS "Display Name"
+----
+Ada
+
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN person.name AS `Person ``Name`
+----
+Ada
+
+query T
+MATCH (person:Person) WHERE person.age = 42
+RETURN person.name AS "Display ""Name"
+----
+Ada
+
 query T
 MATCH (person:Person) WHERE person.age = 42
 RETURN person

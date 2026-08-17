@@ -221,6 +221,7 @@ enum class GqlStatementType : uint8_t {
 	COPY_GRAPH,
 	DROP_GRAPH,
 	SESSION_SET_GRAPH,
+	SESSION_RESET_GRAPH,
 	INSERT,
 	MERGE,
 	CALL,
@@ -348,6 +349,18 @@ public:
 	GqlIdentifier graph_name;
 };
 
+class GqlSessionResetGraphStatement final : public GqlStatement {
+public:
+	explicit GqlSessionResetGraphStatement(GqlSourceRange source_p)
+	    : GqlStatement(GqlStatementType::SESSION_RESET_GRAPH, std::move(source_p)) {
+	}
+};
+
+struct GqlInsertResultProjection {
+	idx_t vertex_index = DConstants::INVALID_INDEX;
+	string name;
+};
+
 class GqlInsertStatement final : public GqlStatement {
 public:
 	explicit GqlInsertStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::INSERT, std::move(source_p)) {
@@ -355,8 +368,7 @@ public:
 
 	vector<GqlInsertElement> vertices;
 	vector<GqlInsertEdge> edges;
-	idx_t return_vertex_index = DConstants::INVALID_INDEX;
-	string return_name;
+	vector<GqlInsertResultProjection> return_projections;
 };
 
 // MERGE is a project-owned Cypher compatibility extension. It is deliberately

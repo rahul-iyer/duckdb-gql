@@ -73,9 +73,9 @@ RETURN source.name, target.name, relationship.since
 ----
 Alice	Bob	2020
 
-# INSERT RETURN exposes the newly created variable as the same node struct used
-# by MATCH. A path can return any one directly inserted node, including the
-# first node whose generated ID precedes the sequence's current value.
+# INSERT RETURN exposes newly created variables as the same node structs used
+# by MATCH. Result columns follow RETURN order, including for comma-separated
+# node paths and for a node whose generated ID precedes the current sequence.
 query T
 INSERT (carol:Person {id: 3, name: 'Carol'})
 RETURN carol
@@ -90,21 +90,71 @@ RETURN dave AS created
 ----
 {'vertex_id': 4, '__gql_labels': person, 'id': 4, 'name': Dave}
 
-# Returning a node does not take ownership of a caller-controlled transaction.
+query TT
+INSERT (frances:Person {id: 6, name: 'Frances'}),
+       (george:Person {id: 7, name: 'George'})
+RETURN george AS `Second Node`, frances AS "First Node"
+----
+{'vertex_id': 7, '__gql_labels': person, 'id': 7, 'name': George}	{'vertex_id': 6, '__gql_labels': person, 'id': 6, 'name': Frances}
+
+query TTT
+INSERT (henrietta:Person {id: 8, name: 'Henrietta'}),
+       (ida:Person {id: 9, name: 'Ida'}),
+       (jean:Person {id: 10, name: 'Jean'})
+RETURN henrietta, ida, jean
+----
+{'vertex_id': 8, '__gql_labels': person, 'id': 8, 'name': Henrietta}	{'vertex_id': 9, '__gql_labels': person, 'id': 9, 'name': Ida}	{'vertex_id': 10, '__gql_labels': person, 'id': 10, 'name': Jean}
+
+query TT
+INSERT (katherine:Person {id: 11, name: 'Katherine'})
+       -[:KNOWS {since: 2022}]->
+       (lois:Person {id: 12, name: 'Lois'})
+RETURN lois, katherine
+----
+{'vertex_id': 12, '__gql_labels': person, 'id': 12, 'name': Lois}	{'vertex_id': 11, '__gql_labels': person, 'id': 11, 'name': Katherine}
+
+query TT
+INSERT (repeated:Person {id: 13, name: 'Repeated'})
+RETURN repeated AS first_copy, repeated AS second_copy
+----
+{'vertex_id': 13, '__gql_labels': person, 'id': 13, 'name': Repeated}	{'vertex_id': 13, '__gql_labels': person, 'id': 13, 'name': Repeated}
+
+# Returning multiple nodes does not take ownership of a caller-controlled
+# transaction.
 statement ok
 BEGIN TRANSACTION
 
-query T
-INSERT (temporary:Person {id: 6, name: 'Temporary'})
-RETURN temporary
+query TT
+INSERT (temporary:Person {id: 14, name: 'Temporary'}),
+       (temporary_two:Person {id: 15, name: 'Temporary Two'})
+RETURN temporary, temporary_two
 ----
-{'vertex_id': 6, '__gql_labels': person, 'id': 6, 'name': Temporary}
+{'vertex_id': 14, '__gql_labels': person, 'id': 14, 'name': Temporary}	{'vertex_id': 15, '__gql_labels': person, 'id': 15, 'name': Temporary Two}
 
 statement ok
 ROLLBACK
 
 query I
-MATCH (person:Person) WHERE person.id = 6
+MATCH (person:Person) WHERE person.id = 14 OR person.id = 15
+RETURN count(*)
+----
+0
+
+# Invalid or anonymous result references fail before any graph write.
+statement error
+INSERT (known:Person {id: 16, name: 'Known'})
+RETURN missing
+----
+<REGEX>:.*GQL INSERT RETURN variable 'missing' is not a directly inserted node.*
+
+statement error
+INSERT (:Person {id: 16, name: 'Anonymous'})
+RETURN unnamed
+----
+<REGEX>:.*GQL INSERT RETURN variable 'unnamed' is not a directly inserted node.*
+
+query I
+MATCH (person:Person) WHERE person.id = 16
 RETURN count(*)
 ----
 0
