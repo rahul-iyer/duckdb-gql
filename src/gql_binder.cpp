@@ -81,6 +81,8 @@ static GqlType LiteralType(const GqlLiteral &literal) {
 		return {GqlTypeId::DOUBLE, false};
 	case GqlLiteralType::STRING:
 		return {GqlTypeId::STRING, false};
+	case GqlLiteralType::BYTE_STRING:
+		return {GqlTypeId::BYTE_STRING, false};
 	}
 	throw InternalException("Unknown GQL literal type");
 }
@@ -320,6 +322,22 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			if (result->arguments[0]->result_type.id != GqlTypeId::STRING &&
 			    result->arguments[0]->result_type.id != GqlTypeId::PROPERTY_VALUE) {
 				throw BinderException("GQL function '%s' requires a string argument", expression.function_name);
+			}
+			result->result_type = {GqlTypeId::INTEGER, result->arguments[0]->result_type.nullable};
+			return result;
+		}
+		if (name == "octet_length") {
+			if (result->arguments.size() != 1 || (result->arguments[0]->result_type.id != GqlTypeId::BYTE_STRING &&
+			                                      result->arguments[0]->result_type.id != GqlTypeId::PROPERTY_VALUE &&
+			                                      result->arguments[0]->result_type.id != GqlTypeId::NULL_VALUE)) {
+				throw BinderException("GQL function '%s' requires a byte-string argument", expression.function_name);
+			}
+			result->result_type = {GqlTypeId::INTEGER, result->arguments[0]->result_type.nullable};
+			return result;
+		}
+		if (name == "path_length") {
+			if (result->arguments.size() != 1 || result->arguments[0]->result_type.id != GqlTypeId::PATH) {
+				throw BinderException("GQL function '%s' requires a path argument", expression.function_name);
 			}
 			result->result_type = {GqlTypeId::INTEGER, result->arguments[0]->result_type.nullable};
 			return result;

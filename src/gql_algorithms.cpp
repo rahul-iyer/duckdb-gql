@@ -2268,6 +2268,8 @@ static Value AlgorithmLiteralValue(GqlLiteralType type, const string &text) {
 		return Value::DOUBLE(std::stod(text));
 	case GqlLiteralType::STRING:
 		return Value(text);
+	case GqlLiteralType::BYTE_STRING:
+		return GqlByteStringValue(text);
 	}
 	throw InternalException("Unknown GQL algorithm argument type");
 }

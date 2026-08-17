@@ -486,15 +486,6 @@ shared_ptr<GqlInsertStatement> GqlTransformer::TransformInsert(GQLParser::Insert
 		Unsupported(context, "multiple INSERT paths in a MATCH pipeline");
 		return nullptr;
 	}
-	if (paths.size() > 1) {
-		for (auto path : paths) {
-			if (path->insertNodePattern().size() != 1 || !path->insertEdgePattern().empty()) {
-				Unsupported(context, "multiple INSERT paths containing edges");
-				return nullptr;
-			}
-		}
-	}
-
 	auto insert = make_shared_ptr<GqlInsertStatement>(SourceRange(context));
 	for (auto path : paths) {
 		auto nodes = path->insertNodePattern();
@@ -1017,14 +1008,24 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		clause.source = SourceRange(*let);
 		clause.let_begin = match->let_bindings.size();
 		for (auto definition : let->letVariableDefinitionList()->letVariableDefinition()) {
-			if (definition->valueVariableDefinition() || !definition->bindingVariable() ||
-			    !definition->valueExpression() || !IsRegularIdentifier(definition->bindingVariable()->getText())) {
+			GQLParser::BindingVariableContext *variable = definition->bindingVariable();
+			GQLParser::ValueExpressionContext *value = definition->valueExpression();
+			if (auto value_definition = definition->valueVariableDefinition()) {
+				auto initializer = value_definition->optTypedValueInitializer();
+				if (!initializer || initializer->typed() || initializer->valueType() ||
+				    !initializer->valueInitializer()) {
+					return fail();
+				}
+				variable = value_definition->bindingVariable();
+				value = initializer->valueInitializer()->valueExpression();
+			}
+			if (!variable || !value || !IsRegularIdentifier(variable->getText())) {
 				return fail();
 			}
 			GqlLetBinding binding;
-			binding.variable = TransformIdentifier(*definition->bindingVariable());
+			binding.variable = TransformIdentifier(*variable);
 			binding.source = SourceRange(*definition);
-			if (!TransformExpression(*definition->valueExpression(), binding.expression)) {
+			if (!TransformExpression(*value, binding.expression)) {
 				return fail();
 			}
 			match->let_bindings.push_back(std::move(binding));
@@ -1921,16 +1922,31 @@ bool GqlTransformer::TransformNumericFunction(GQLParser::NumericValueFunctionCon
 		return make_function("ceil", *ceiling->numericValueExpression());
 	}
 	if (auto length = context.lengthExpression()) {
-		auto character = length->charLengthExpression();
-		if (!character || !character->characterStringValueExpression()) {
-			return false;
-		}
 		auto expression = make_shared_ptr<GqlExpression>();
 		expression->type = GqlExpressionType::FUNCTION;
-		expression->function_name = "char_length";
 		expression->source = SourceRange(context);
+		GQLParser::ValueExpressionContext *argument = nullptr;
+		if (auto character = length->charLengthExpression()) {
+			expression->function_name = "char_length";
+			if (character->characterStringValueExpression()) {
+				argument = character->characterStringValueExpression()->valueExpression();
+			}
+		} else if (auto bytes = length->byteLengthExpression()) {
+			expression->function_name = "octet_length";
+			if (bytes->byteStringValueExpression()) {
+				argument = bytes->byteStringValueExpression()->valueExpression();
+			}
+		} else if (auto path = length->pathLengthExpression()) {
+			expression->function_name = "path_length";
+			if (path->pathValueExpression()) {
+				argument = path->pathValueExpression()->valueExpression();
+			}
+		}
+		if (!argument) {
+			return false;
+		}
 		shared_ptr<GqlExpression> child;
-		if (!TransformExpression(*character->characterStringValueExpression()->valueExpression(), child)) {
+		if (!TransformExpression(*argument, child)) {
 			return false;
 		}
 		expression->arguments.push_back(std::move(child));
@@ -2050,6 +2066,24 @@ bool GqlTransformer::TransformUnsignedLiteral(GQLParser::UnsignedLiteralContext 
 	if (auto string_literal = general->characterStringLiteral()) {
 		result.type = GqlLiteralType::STRING;
 		result.value = UnquoteString(string_literal->getText());
+		return true;
+	}
+	if (general->BYTE_STRING_LITERAL()) {
+		auto text = general->BYTE_STRING_LITERAL()->getText();
+		if (text.size() < 3 || text[1] != '\'' || text.back() != '\'') {
+			return false;
+		}
+		string hexadecimal;
+		for (idx_t index = 2; index + 1 < text.size(); index++) {
+			if (!std::isspace(static_cast<unsigned char>(text[index]))) {
+				hexadecimal.push_back(text[index]);
+			}
+		}
+		if (hexadecimal.size() % 2 != 0) {
+			return false;
+		}
+		result.type = GqlLiteralType::BYTE_STRING;
+		result.value = std::move(hexadecimal);
 		return true;
 	}
 	if (general->nullLiteral()) {

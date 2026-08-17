@@ -913,6 +913,8 @@ static Value MergeLiteralValue(const GqlLiteral &literal) {
 		return Value::DOUBLE(std::stod(literal.value));
 	case GqlLiteralType::STRING:
 		return Value(literal.value);
+	case GqlLiteralType::BYTE_STRING:
+		return GqlByteStringValue(literal.value);
 	case GqlLiteralType::NULL_VALUE:
 		throw BinderException("NULL properties are not supported in MERGE patterns");
 	}

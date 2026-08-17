@@ -22,13 +22,16 @@ enum class GqlTypeId : uint8_t {
 	NODE,
 	EDGE,
 	PATH,
-	PROPERTY_VALUE
+	PROPERTY_VALUE,
+	BYTE_STRING
 };
 
 struct GqlType {
 	GqlTypeId id = GqlTypeId::UNKNOWN;
 	bool nullable = true;
 };
+
+Value GqlByteStringValue(const string &hexadecimal);
 
 struct GqlBinding {
 	enum class Source : uint8_t { GRAPH, PROCEDURE };

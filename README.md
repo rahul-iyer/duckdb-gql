@@ -184,6 +184,26 @@ generated `vertex_id`, labels, and mapped properties. Result columns preserve
 the `RETURN` list order. Edge values, expressions, ordering, and pagination are
 not yet supported on standalone `INSERT RETURN`.
 
+Standalone `INSERT` also accepts multiple comma-separated directed paths in a
+single mutation, including paths containing edges:
+
+```sql
+INSERT (a:Person {id: 3, name: 'A'})-[:KNOWS]->(b:Person {id: 4, name: 'B'}),
+       (c:Person {id: 5, name: 'C'})-[:KNOWS]->(d:Person {id: 6, name: 'D'})
+RETURN a, d;
+```
+
+`LET` accepts both `LET x = expression` and the equivalent untyped
+`LET VALUE x = expression` form. `BYTE_LENGTH` and `OCTET_LENGTH` return the
+number of bytes in a byte string such as `X'00 FF'`. `PATH_LENGTH` returns the
+number of edges in an already-bound named fixed path:
+
+```sql
+MATCH p = (a:Person)-[:KNOWS]->(b:Person)
+LET VALUE source_name = a.name
+RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
+```
+
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing
 edge endpoints. Trusted inputs can skip those validation scans:

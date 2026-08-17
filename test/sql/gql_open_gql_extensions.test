@@ -1,0 +1,218 @@
+# name: test/sql/gql_open_gql_extensions.test
+# description: Multiple INSERT paths, VALUE-form LET bindings, and OpenGQL length functions
+# group: [gql]
+
+require duckgql
+
+statement ok
+CREATE GRAPH path_insert_features TYPED {
+    (Node :Node {id INT64 NOT NULL, name STRING}),
+    (Node)-[:LINK]->(Node)
+}
+
+statement ok
+SESSION SET GRAPH path_insert_features
+
+# Two independent directed paths share one mutation envelope. INSERT RETURN
+# can project nodes from either path and preserves projection order.
+query TT
+INSERT (node_one:Node {id: 1, name: 'First'})-[:LINK]->(node_two:Node {id: 2, name: 'Second'}),
+       (node_three:Node {id: 3, name: 'Third'})-[:LINK]->(node_four:Node {id: 4, name: 'Fourth'})
+RETURN node_four, node_one
+----
+{'vertex_id': 4, '__gql_labels': node, 'id': 4, 'name': Fourth}	{'vertex_id': 1, '__gql_labels': node, 'id': 1, 'name': First}
+
+# Paths of different lengths keep edge endpoint indices local to each path.
+statement ok
+INSERT (five:Node {id: 5, name: 'Five'})-[:LINK]->(six:Node {id: 6, name: 'Six'})-[:LINK]->
+       (seven:Node {id: 7, name: 'Seven'}),
+       (eight:Node {id: 8, name: 'Eight'})-[:LINK]->(nine:Node {id: 9, name: 'Nine'})
+
+query II
+MATCH (source:Node)-[:LINK]->(target:Node)
+RETURN source.id, target.id
+ORDER BY source.id
+----
+1	2
+3	4
+5	6
+6	7
+8	9
+
+# A caller-controlled transaction owns rollback for the complete multi-path
+# insert, including every vertex and edge.
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT (:Node {id: 10, name: 'Ten'})-[:LINK]->(:Node {id: 11, name: 'Eleven'}),
+       (:Node {id: 12, name: 'Twelve'})-[:LINK]->(:Node {id: 13, name: 'Thirteen'})
+
+query I
+MATCH (node:Node) WHERE node.id >= 10
+RETURN count(*)
+----
+4
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (node:Node) WHERE node.id >= 10
+RETURN count(*)
+----
+0
+
+# Left- and right-pointing paths after a path boundary retain independent
+# source and target indices.
+statement ok
+INSERT (left_target:Node {id: 14, name: 'Left target'})<-[:LINK]-(left_source:Node {id: 15, name: 'Left source'}),
+       (right_source:Node {id: 16, name: 'Right source'})-[:LINK]->
+       (right_target:Node {id: 17, name: 'Right target'})
+
+query II
+MATCH (source:Node)-[:LINK]->(target:Node)
+WHERE source.id >= 14
+RETURN source.id, target.id
+ORDER BY source.id
+----
+15	14
+16	17
+
+# A conversion failure in a later path rolls back writes from every preceding
+# path in the same autocommit statement.
+statement error
+INSERT (:Node {id: 18, name: 'Atomic one'})-[:LINK]->(:Node {id: 19, name: 'Atomic two'}),
+       (:Node {id: 20, name: 'Atomic three'})-[:LINK]->(:Node {id: 'invalid', name: 'Atomic failure'})
+----
+<REGEX>:.*Could not convert string.*
+
+query I
+MATCH (node:Node) WHERE node.id >= 18
+RETURN count(*)
+----
+0
+
+# VALUE-form definitions normalize to the existing LET representation. They
+# support properties, scalar expressions, multiple definitions, mixed forms,
+# ordered references, and record field selection.
+query IT
+MATCH (node:Node) WHERE node.id = 1
+LET VALUE result = node.id + 4, VALUE copied_name = node.name
+RETURN result, copied_name
+----
+5	First
+
+query III
+MATCH (node:Node) WHERE node.id = 1
+LET VALUE base_value = node.id, incremented = base_value + 1, VALUE final_value = incremented + 1
+RETURN base_value, incremented, final_value
+----
+1	2	3
+
+query TI
+MATCH (node:Node) WHERE node.id = 1
+LET VALUE record_value = {name: node.name, next_id: node.id + 1}
+RETURN record_value.name, record_value.next_id
+----
+First	2
+
+statement error
+MATCH (node:Node) WHERE node.id = 1
+LET VALUE duplicate = node.id, VALUE duplicate = node.id + 1
+RETURN duplicate
+----
+<REGEX>:.*GQL LET variable 'duplicate' is already defined.*
+
+statement error
+MATCH (node:Node) WHERE node.id = 1
+LET VALUE invalid_reference = missing_variable
+RETURN invalid_reference
+----
+<REGEX>:.*GQL binding variable 'missing_variable' is not defined.*
+
+# PATH_LENGTH uses the bound fixed-path elements and returns the number of
+# edges without repeating traversal.
+query I
+MATCH path_value = (source:Node)-[:LINK]->(target:Node)
+WHERE source.id = 1
+RETURN PATH_LENGTH(path_value) AS hops
+----
+1
+
+query I
+MATCH path_value = (source:Node)-[:LINK]->(middle:Node)-[:LINK]->(target:Node)
+WHERE source.id = 5
+RETURN PATH_LENGTH(path_value) AS hops
+----
+2
+
+query I
+MATCH path_value = (node:Node) WHERE node.id = 1
+RETURN PATH_LENGTH(path_value) AS hops
+----
+0
+
+query I
+OPTIONAL MATCH path_value = (:Missing)-[:LINK]->(:Node)
+RETURN PATH_LENGTH(path_value) AS hops
+----
+NULL
+
+statement error
+MATCH (node:Node) WHERE node.id = 1
+RETURN PATH_LENGTH(node)
+----
+<REGEX>:.*GQL function 'path_length' requires a path argument.*
+
+statement ok
+CREATE GRAPH byte_length_features TYPED {
+    (BlobNode :BlobNode {id INT64 NOT NULL, payload BYTES})
+}
+
+statement ok
+SESSION SET GRAPH byte_length_features
+
+statement ok
+INSERT (:BlobNode {id: 1, payload: X''}),
+       (:BlobNode {id: 2, payload: X'00 FF 41'}),
+       (:BlobNode {id: 3})
+
+# Both byte-length spellings lower to the same operation. Empty, non-empty,
+# nullable, and literal inputs retain byte rather than character semantics.
+query III
+MATCH (node:BlobNode)
+RETURN node.id, BYTE_LENGTH(node.payload), OCTET_LENGTH(node.payload)
+ORDER BY node.id
+----
+1	0	0
+2	3	3
+3	NULL	NULL
+
+query IIII
+MATCH (node:BlobNode) WHERE node.id = 1
+RETURN BYTE_LENGTH(X'') AS empty_bytes,
+       BYTE_LENGTH(X'00') AS zero_byte,
+       OCTET_LENGTH(X'00 FF 41') AS three_bytes,
+       BYTE_LENGTH(NULL) AS nullable_bytes
+----
+0	1	3	NULL
+
+# Character length remains separate from byte-string length.
+query I
+MATCH (node:BlobNode) WHERE node.id = 1
+RETURN CHAR_LENGTH('duck')
+----
+4
+
+statement error
+MATCH (node:BlobNode) WHERE node.id = 1
+RETURN BYTE_LENGTH('not bytes')
+----
+<REGEX>:.*GQL function 'octet_length' requires a byte-string argument.*
+
+statement error
+MATCH (node:BlobNode) WHERE node.id = 1
+RETURN OCTET_LENGTH(node.id)
+----
+<REGEX>:.*octet_length.*BIGINT.*

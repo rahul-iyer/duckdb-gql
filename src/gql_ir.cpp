@@ -5,6 +5,30 @@
 
 namespace duckdb {
 
+Value GqlByteStringValue(const string &hexadecimal) {
+	if (hexadecimal.size() % 2 != 0) {
+		throw InternalException("Invalid GQL byte-string literal encoding");
+	}
+	auto hex_value = [](char character) -> uint8_t {
+		if (character >= '0' && character <= '9') {
+			return NumericCast<uint8_t>(character - '0');
+		}
+		if (character >= 'a' && character <= 'f') {
+			return NumericCast<uint8_t>(character - 'a' + 10);
+		}
+		if (character >= 'A' && character <= 'F') {
+			return NumericCast<uint8_t>(character - 'A' + 10);
+		}
+		throw InternalException("Invalid GQL byte-string literal encoding");
+	};
+	string bytes;
+	bytes.reserve(hexadecimal.size() / 2);
+	for (idx_t index = 0; index < hexadecimal.size(); index += 2) {
+		bytes.push_back(static_cast<char>((hex_value(hexadecimal[index]) << 4) | hex_value(hexadecimal[index + 1])));
+	}
+	return Value::BLOB_RAW(bytes);
+}
+
 static LogicalType PropertyValueType() {
 	return LogicalType::UNION({{"bool_value", LogicalType::BOOLEAN},
 	                           {"int_value", LogicalType::BIGINT},
@@ -36,6 +60,8 @@ LogicalType GqlDuckType(const GqlType &type) {
 		return LogicalType::DOUBLE;
 	case GqlTypeId::STRING:
 		return LogicalType::VARCHAR;
+	case GqlTypeId::BYTE_STRING:
+		return LogicalType::BLOB;
 	case GqlTypeId::PROPERTY_VALUE:
 		return PropertyValueType();
 	case GqlTypeId::UNKNOWN:

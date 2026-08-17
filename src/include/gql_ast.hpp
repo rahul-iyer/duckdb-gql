@@ -24,7 +24,7 @@ struct GqlIdentifier {
 	}
 };
 
-enum class GqlLiteralType : uint8_t { NULL_VALUE, BOOLEAN, INTEGER, DECIMAL, DOUBLE, STRING };
+enum class GqlLiteralType : uint8_t { NULL_VALUE, BOOLEAN, INTEGER, DECIMAL, DOUBLE, STRING, BYTE_STRING };
 
 struct GqlLiteral {
 	GqlLiteralType type = GqlLiteralType::STRING;

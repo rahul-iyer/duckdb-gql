@@ -544,6 +544,8 @@ static Value LiteralValue(GqlLiteralType type, const string &text) {
 		return Value::DOUBLE(std::stod(text));
 	case GqlLiteralType::STRING:
 		return Value(text);
+	case GqlLiteralType::BYTE_STRING:
+		return GqlByteStringValue(text);
 	}
 	throw InternalException("Unknown GQL literal program type");
 }
@@ -706,8 +708,15 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 	auto expression_type = static_cast<GqlExpressionType>(program.node_types[node]);
 	auto operation = program.operators[node];
 	switch (expression_type) {
-	case GqlExpressionType::LITERAL:
-		return Constant(LiteralValue(static_cast<GqlLiteralType>(operation), program.values[node]));
+	case GqlExpressionType::LITERAL: {
+		auto value = LiteralValue(static_cast<GqlLiteralType>(operation), program.values[node]);
+		auto is_null = value.IsNull();
+		auto result = Constant(std::move(value));
+		if (is_null && desired_type == GqlTypeId::BYTE_STRING) {
+			return make_uniq<CastExpression>(LogicalType::BLOB, std::move(result));
+		}
+		return result;
+	}
 	case GqlExpressionType::LIST_CONSTRUCTOR:
 	case GqlExpressionType::RECORD_CONSTRUCTOR:
 		throw InternalException("GQL collection constructor reached relational expression lowering");
@@ -734,13 +743,64 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		return LowerExpression(program, cursor, property_aliases, identities);
 	case GqlExpressionType::FUNCTION: {
 		auto name = program.values[node];
+		if (name == "path_length") {
+			if (program.child_counts[node] != 1 || cursor >= program.node_types.size() ||
+			    static_cast<GqlExpressionType>(program.node_types[cursor]) != GqlExpressionType::FUNCTION ||
+			    program.values[cursor] != "__gql_path") {
+				throw InternalException("GQL PATH_LENGTH requires a bound fixed path");
+			}
+			auto path_root = cursor;
+			auto path_cursor = path_root + 1;
+			idx_t edge_count = 0;
+			vector<unique_ptr<ParsedExpression>> missing_elements;
+			for (idx_t child = 0; child < program.child_counts[path_root]; child++) {
+				if (path_cursor >= program.node_types.size() || program.child_counts[path_cursor] != 0 ||
+				    static_cast<GqlExpressionType>(program.node_types[path_cursor]) !=
+				        GqlExpressionType::VARIABLE_REFERENCE) {
+					throw InternalException("GQL fixed path contains an invalid element");
+				}
+				auto binding_index = NumericCast<idx_t>(program.binding_indices[path_cursor]);
+				if (binding_index >= identities.size()) {
+					throw InternalException("GQL fixed path binding is missing");
+				}
+				auto element_type = static_cast<GqlTypeId>(program.result_types[path_cursor]);
+				if (element_type == GqlTypeId::EDGE) {
+					edge_count++;
+				} else if (element_type != GqlTypeId::NODE) {
+					throw InternalException("GQL fixed path contains a non-element value");
+				}
+				missing_elements.push_back(make_uniq<OperatorExpression>(
+				    ExpressionType::OPERATOR_IS_NULL,
+				    Column(identities[binding_index].table_alias, identities[binding_index].column_name)));
+				path_cursor++;
+			}
+			cursor = ExpressionEnd(program, path_root);
+			if (missing_elements.empty()) {
+				throw InternalException("GQL fixed path has no elements");
+			}
+			unique_ptr<ParsedExpression> missing;
+			if (missing_elements.size() == 1) {
+				missing = std::move(missing_elements[0]);
+			} else {
+				missing = make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_OR, std::move(missing_elements));
+			}
+			auto result = make_uniq<CaseExpression>();
+			CaseCheck missing_path;
+			missing_path.when_expr = std::move(missing);
+			missing_path.then_expr = Constant(Value());
+			result->case_checks.push_back(std::move(missing_path));
+			result->else_expr = Constant(Value::BIGINT(NumericCast<int64_t>(edge_count)));
+			return std::move(result);
+		}
 		auto lowered_name = name == "count" && program.child_counts[node] == 0 ? "count_star" : name;
 		vector<unique_ptr<ParsedExpression>> arguments;
 		for (idx_t child = 0; child < program.child_counts[node]; child++) {
 			auto desired = GqlTypeId::UNKNOWN;
-			if (name == "lower" || name == "upper" || name == "trim" || name == "ltrim" || name == "rtrim" ||
-			    name == "left" || name == "right" || name == "char_length" || name == "length" ||
-			    name == "nfc_normalize") {
+			if (name == "octet_length") {
+				desired = GqlTypeId::BYTE_STRING;
+			} else if (name == "lower" || name == "upper" || name == "trim" || name == "ltrim" || name == "rtrim" ||
+			           name == "left" || name == "right" || name == "char_length" || name == "length" ||
+			           name == "nfc_normalize") {
 				desired = child == 0 ? GqlTypeId::STRING : GqlTypeId::INTEGER;
 			}
 			arguments.push_back(LowerExpression(program, cursor, property_aliases, identities, desired));
