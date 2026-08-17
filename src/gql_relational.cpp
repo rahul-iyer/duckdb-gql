@@ -713,7 +713,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		auto is_null = value.IsNull();
 		auto result = Constant(std::move(value));
 		if (is_null && desired_type == GqlTypeId::BYTE_STRING) {
-			return make_uniq<CastExpression>(LogicalType::BLOB, std::move(result));
+			return make_uniq<CastExpression>(LogicalType(LogicalTypeId::BLOB), std::move(result));
 		}
 		return result;
 	}

@@ -59,9 +59,9 @@ LogicalType GqlDuckType(const GqlType &type) {
 	case GqlTypeId::DOUBLE:
 		return LogicalType::DOUBLE;
 	case GqlTypeId::STRING:
-		return LogicalType::VARCHAR;
+		return LogicalType(LogicalTypeId::VARCHAR);
 	case GqlTypeId::BYTE_STRING:
-		return LogicalType::BLOB;
+		return LogicalType(LogicalTypeId::BLOB);
 	case GqlTypeId::PROPERTY_VALUE:
 		return PropertyValueType();
 	case GqlTypeId::UNKNOWN:
