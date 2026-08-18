@@ -1912,6 +1912,12 @@ bool GqlTransformer::TransformNumericFunction(GQLParser::NumericValueFunctionCon
 		result = std::move(expression);
 		return true;
 	}
+	if (auto logarithm = context.naturalLogarithm()) {
+		return make_function("ln", *logarithm->numericValueExpression());
+	}
+	if (auto exponential = context.exponentialFunction()) {
+		return make_function("exp", *exponential->numericValueExpression());
+	}
 	if (auto square_root = context.squareRoot()) {
 		return make_function("sqrt", *square_root->numericValueExpression());
 	}

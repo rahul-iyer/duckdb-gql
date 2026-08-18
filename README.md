@@ -204,6 +204,10 @@ LET VALUE source_name = a.name
 RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
 ```
 
+`EXP` returns *e* raised to a numeric argument, while `LN` returns its natural
+logarithm. Both functions use DuckDB's floating-point and domain behavior and
+preserve `NULL` inputs.
+
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing
 edge endpoints. Trusted inputs can skip those validation scans:

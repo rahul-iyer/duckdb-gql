@@ -1,0 +1,103 @@
+# name: test/sql/gql_exp_ln_functions.test
+# description: OpenGQL exponential and natural-logarithm numeric functions
+# group: [sql]
+
+require duckgql
+
+statement ok
+CREATE GRAPH numeric_function_features TYPED {
+    (Sample :Sample {
+        id INT64 NOT NULL,
+        integer_value INT64,
+        double_value DOUBLE,
+        text_value STRING
+    })
+}
+
+statement ok
+SESSION SET GRAPH numeric_function_features
+
+statement ok
+INSERT (:Sample {
+           id: 1,
+           integer_value: 1,
+           double_value: 2.718281828459045,
+           text_value: 'not numeric'
+       }),
+       (:Sample {id: 2})
+
+# Integer and decimal literals follow DuckDB's exponential semantics.
+query II
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN EXP(0) = 1.0,
+       ABS(EXP(1.0) - 2.718281828459045) < 0.000000000001
+----
+true	true
+
+# Decimal arguments follow DuckDB's natural-logarithm semantics.
+query II
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN LN(1.0) = 0.0,
+       ABS(LN(2.718281828459045) - 1.0) < 0.000000000001
+----
+true	true
+
+# Approximate numeric literals and nested functions use the generic numeric
+# expression path.
+query I
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN ABS(LN(EXP(1E0)) - 1.0) < 0.000000000001
+----
+true
+
+# Typed integer and double properties are accepted as numeric inputs.
+query II
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN ABS(EXP(sample.integer_value) - 2.718281828459045) < 0.000000000001,
+       ABS(LN(sample.double_value) - 1.0) < 0.000000000001
+----
+true	true
+
+# The result is nullable DOUBLE for nullable numeric properties.
+query RR
+MATCH (sample:Sample) WHERE sample.id = 2
+RETURN EXP(sample.integer_value), LN(sample.double_value)
+----
+NULL	NULL
+
+# Concrete non-numeric literals fail during GQL type binding.
+statement error
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN EXP('not numeric')
+----
+<REGEX>:.*GQL function 'exp' requires one numeric argument.*
+
+statement error
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN LN('not numeric')
+----
+<REGEX>:.*GQL function 'ln' requires one numeric argument.*
+
+# Mapped non-numeric properties are rejected by DuckDB's scalar binder.
+statement error
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN EXP(sample.text_value)
+----
+<REGEX>:.*exp.*VARCHAR.*
+
+statement error
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN LN(sample.text_value)
+----
+<REGEX>:.*ln.*VARCHAR.*
+
+# Existing numeric functions retain their previous behavior.
+query IIIII
+MATCH (sample:Sample) WHERE sample.id = 1
+RETURN ABS(-2) = 2,
+       MOD(7, 3) = 1,
+       SQRT(9.0) = 3.0,
+       FLOOR(2.9) = 2,
+       CEIL(2.1) = 3
+----
+true	true	true	true	true

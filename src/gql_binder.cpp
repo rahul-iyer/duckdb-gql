@@ -342,6 +342,13 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			result->result_type = {GqlTypeId::INTEGER, result->arguments[0]->result_type.nullable};
 			return result;
 		}
+		if (name == "exp" || name == "ln") {
+			if (result->arguments.size() != 1 || !IsNumeric(result->arguments[0]->result_type.id)) {
+				throw BinderException("GQL function '%s' requires one numeric argument", expression.function_name);
+			}
+			result->result_type = {GqlTypeId::DOUBLE, result->arguments[0]->result_type.nullable};
+			return result;
+		}
 		if (name == "abs" || name == "ceil" || name == "floor" || name == "sqrt" || name == "mod") {
 			if (!IsNumeric(result->arguments[0]->result_type.id)) {
 				throw BinderException("GQL function '%s' requires numeric arguments", expression.function_name);
