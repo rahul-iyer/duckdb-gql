@@ -208,6 +208,10 @@ RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
 logarithm. Both functions use DuckDB's floating-point and domain behavior and
 preserve `NULL` inputs.
 
+Labels and property names in `MATCH` and `INSERT` may use double-quoted or
+backtick-delimited identifiers. Property references use the same forms, so names
+such as `person."First Name"` retain their existing identifier spelling.
+
 `COPY GRAPH` accepts `.csv`, `.csv.gz`, `.csv.zst`, and `.parquet`. Validation
 is enabled by default and rejects missing or duplicate vertex IDs and missing
 edge endpoints. Trusted inputs can skip those validation scans:

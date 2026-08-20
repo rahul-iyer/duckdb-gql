@@ -1,0 +1,83 @@
+# name: test/sql/gql_delimited_labels_properties.test
+# description: Delimited labels and property names in MATCH and INSERT
+# group: [sql]
+
+require duckgql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('seed', 'Seed', NULL, NULL, NULL, NULL)
+    ) nodes("external_id:ID(People)", ":LABEL", "First Name:string",
+            "regular_name:string", "Display ""Name"":string", "Tick`Property:string")
+) TO '__TEST_DIR__/gql_delimited_identifier_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('seed', 'seed', 'SEED_EDGE', NULL)
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE", "Since Year:int")
+) TO '__TEST_DIR__/gql_delimited_identifier_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH delimited_identifier_features ANY
+
+statement ok
+COPY GRAPH delimited_identifier_features FROM (
+    VERTICES '__TEST_DIR__/gql_delimited_identifier_nodes.csv',
+    EDGES '__TEST_DIR__/gql_delimited_identifier_edges.csv'
+) FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH delimited_identifier_features
+
+# INSERT accepts both delimiter forms for vertex and edge labels and property
+# names. Regular names continue through the same statement unchanged.
+statement ok
+INSERT (ada:"Research Person" {external_id: 'ada', "First Name": 'Ada', regular_name: 'quoted'})
+       -[collaboration:"Works With" {"Since Year": 2024}]->
+       (grace:`Research Person` {external_id: 'grace', `First Name`: 'Grace', regular_name: 'backticked'}),
+       (ordinary:RegularLabel {external_id: 'ordinary', regular_name: 'ordinary'})
+
+# A double-quoted label matches values inserted with either delimiter form, and
+# a double-quoted property reference reads both corresponding properties.
+query TT rowsort
+MATCH (person:"Research Person")
+RETURN person."First Name", person.regular_name
+----
+Ada	quoted
+Grace	backticked
+
+# Backtick-delimited references normalize to the same identifier values.
+query TT rowsort
+MATCH (person:`Research Person`)
+RETURN person.`First Name`, person.regular_name
+----
+Ada	quoted
+Grace	backticked
+
+# Delimited edge labels and properties use the same transformer paths.
+query TTI
+MATCH (source:"Research Person")-[relationship:`Works With`]->(target:`Research Person`)
+RETURN source."First Name", target.`First Name`, relationship."Since Year"
+----
+Ada	Grace	2024
+
+# Existing regular labels and properties retain their behavior.
+query T
+MATCH (person:RegularLabel)
+RETURN person.regular_name
+----
+ordinary
+
+# Doubled delimiter characters are unquoted consistently for labels and
+# property names before storage and lookup.
+statement ok
+INSERT (quoted:"Quoted ""Label""" {external_id: 'quoted', "Display ""Name""": 'double quote'}),
+       (backticked:`Tick``Label` {external_id: 'backticked', `Tick``Property`: 'backtick'})
+
+query TT
+MATCH (quoted:"Quoted ""Label"""), (backticked:`Tick``Label`)
+RETURN quoted."Display ""Name""", backticked.`Tick``Property`
+----
+double quote	backtick

@@ -547,10 +547,6 @@ bool GqlTransformer::TransformInsertElement(GQLParser::InsertElementPatternFille
 	}
 	if (auto labels = specification->labelSetSpecification()) {
 		for (auto label : labels->labelName()) {
-			if (!IsRegularIdentifier(label->getText())) {
-				Unsupported(*label, "delimited labels in INSERT");
-				return false;
-			}
 			element.labels.push_back(TransformIdentifier(*label));
 		}
 	}
@@ -559,10 +555,6 @@ bool GqlTransformer::TransformInsertElement(GQLParser::InsertElementPatternFille
 		return true;
 	}
 	for (auto property : property_specification->propertyKeyValuePairList()->propertyKeyValuePair()) {
-		if (!IsRegularIdentifier(property->propertyName()->getText())) {
-			Unsupported(*property, "delimited property names in INSERT");
-			return false;
-		}
 		GqlPropertyAssignment assignment;
 		assignment.source = SourceRange(*property);
 		assignment.name = TransformIdentifier(*property->propertyName());
@@ -1489,10 +1481,6 @@ bool GqlTransformer::TransformMatchElement(GQLParser::ElementPatternFillerContex
 bool GqlTransformer::TransformLabelExpression(GQLParser::LabelExpressionContext &context,
                                               vector<GqlIdentifier> &labels) {
 	if (auto name = dynamic_cast<GQLParser::LabelExpressionNameContext *>(&context)) {
-		if (!IsRegularIdentifier(name->labelName()->getText())) {
-			Unsupported(*name, "delimited labels in MATCH");
-			return false;
-		}
 		labels.push_back(TransformIdentifier(*name->labelName()));
 		return true;
 	}
@@ -1721,10 +1709,6 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 		return true;
 	}
 	if (context.propertyName() && context.valueExpressionPrimary()) {
-		if (!IsRegularIdentifier(context.propertyName()->getText())) {
-			Unsupported(context, "delimited property references");
-			return false;
-		}
 		if (!TransformExpressionPrimary(*context.valueExpressionPrimary(), expression->left)) {
 			return false;
 		}

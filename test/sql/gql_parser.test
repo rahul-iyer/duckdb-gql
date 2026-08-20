@@ -1,6 +1,6 @@
 # name: test/sql/gql_parser.test
 # description: GQL parser validation, SQL coexistence, normalization, and feature boundaries
-# group: [gql]
+# group: [sql]
 
 require duckgql
 
@@ -78,7 +78,8 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
-# Delimited names remain rejected outside the supported RETURN-alias context.
+# Delimited graph names remain rejected. Supported delimited labels, property
+# names, and RETURN aliases proceed far enough to require a selected graph.
 statement error
 CREATE GRAPH `Mixed Graph` ANY
 ----
@@ -87,12 +88,12 @@ CREATE GRAPH `Mixed Graph` ANY
 statement error
 MATCH (n:`Person Label`) RETURN n
 ----
-<REGEX>:.*GQL feature not implemented: delimited labels in MATCH.*
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
 statement error
 MATCH (n) RETURN n.`First Name`
 ----
-<REGEX>:.*GQL feature not implemented: delimited property references.*
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
 statement error
 MATCH (n) RETURN n AS `Node Alias`
@@ -102,7 +103,12 @@ MATCH (n) RETURN n AS `Node Alias`
 statement error
 INSERT (n:`Person Label`)
 ----
-<REGEX>:.*GQL feature not implemented: delimited labels in INSERT.*
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before mutation.*
+
+statement error
+INSERT (:Person {`First Name`: 'Ada'})
+----
+<REGEX>:.*No graph selected; use SESSION SET GRAPH before mutation.*
 
 # Parser overrides receive the complete query string. Split mixed batches before
 # lowering so a lifecycle statement cannot force a following MATCH down the
