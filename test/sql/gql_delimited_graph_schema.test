@@ -1,0 +1,106 @@
+# name: test/sql/gql_delimited_graph_schema.test
+# description: Delimited graph names and inline typed graph identifiers
+# group: [sql]
+
+require duckgql
+
+# Lifecycle and selection commands accept either delimiter form for the same
+# graph name and preserve the unquoted spelling.
+query IT
+CREATE PROPERTY GRAPH "Research Graph" ANY
+----
+true	Research Graph
+
+query IT
+SESSION SET PROPERTY GRAPH `Research Graph`
+----
+true	Research Graph
+
+query T
+SELECT graph_name FROM gql_graphs()
+----
+Research Graph
+
+query IT
+DROP GRAPH "Research Graph"
+----
+true	Research Graph
+
+# Doubled delimiter characters are unquoted consistently.
+query IT
+CREATE GRAPH `Tick``Graph` ANY
+----
+true	Tick`Graph
+
+query IT
+SESSION SET GRAPH "Tick`Graph"
+----
+true	Tick`Graph
+
+query IT
+DROP PROPERTY GRAPH `Tick``Graph`
+----
+true	Tick`Graph
+
+# Inline typed definitions accept delimited type names, labels, and properties.
+# Aliases remain regular identifiers as required by the grammar.
+query IT
+CREATE GRAPH "Typed Research Graph" TYPED {
+    NODE TYPE "Research Node" (person :"Research Person"&`Reviewed Person`
+                                      {"display name" STRING, `external id` INT64 NOT NULL}),
+    DIRECTED EDGE TYPE `Research Edge`
+        (person)-[:"Works With" {`since year` INT32}]->(person)
+}
+----
+true	Typed Research Graph
+
+query ITTT
+SELECT e.element_ordinal, e.element_kind, e.type_name, e.local_alias
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'Typed Research Graph'
+ORDER BY e.element_ordinal
+----
+0	NODE	Research Node	person
+1	EDGE	Research Edge	NULL
+
+query TT rowsort
+SELECT e.type_name, l.label_name
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graph_schema_labels l USING (schema_element_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'Typed Research Graph'
+----
+Research Edge	Works With
+Research Node	Research Person
+Research Node	Reviewed Person
+
+query TTIT
+SELECT e.type_name, p.property_name, p.nullable, p.gql_type
+FROM gql_internal.graph_schema_elements e
+JOIN gql_internal.graph_schema_properties p USING (schema_element_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'Typed Research Graph'
+ORDER BY e.element_ordinal, p.property_ordinal
+----
+Research Node	display name	true	STRING
+Research Node	external id	false	INT64
+Research Edge	since year	true	INT32
+
+query IT
+SESSION SET GRAPH "Typed Research Graph"
+----
+true	Typed Research Graph
+
+query IT
+DROP GRAPH `Typed Research Graph`
+----
+true	Typed Research Graph
+
+# A local node alias is still a regular identifier in the grammar.
+statement error
+CREATE GRAPH invalid_delimited_alias TYPED {
+    NODE TYPE "Node Type" ("node alias" :"Node Label")
+}
+----
+<REGEX>:.*GQL parser error.*

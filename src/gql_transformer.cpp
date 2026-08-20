@@ -180,8 +180,8 @@ std::any GqlTransformer::visitCreateGraphStatement(GQLParser::CreateGraphStateme
 		return {};
 	}
 	auto graph_name = parent_and_name->graphName();
-	if (!graph_name || graph_name->delimitedGraphName()) {
-		Unsupported(*context, "delimited graph names");
+	if (!graph_name) {
+		Unsupported(*context, "graph names");
 		return {};
 	}
 	GqlGraphSchemaDefinition schema;
@@ -244,9 +244,6 @@ bool GqlTransformer::TransformNodeType(GQLParser::NodeTypeSpecificationContext &
 	}
 	result.kind = GqlPatternElementType::VERTEX;
 	if (auto name = pattern->nodeTypeName()) {
-		if (!IsRegularIdentifier(name->getText())) {
-			return false;
-		}
 		result.type_name = TransformIdentifier(*name);
 	}
 	if (auto alias = pattern->localNodeTypeAlias()) {
@@ -279,9 +276,6 @@ bool GqlTransformer::TransformEdgeType(GQLParser::EdgeTypeSpecificationContext &
 	}
 	result.kind = GqlPatternElementType::EDGE;
 	if (auto name = pattern->edgeTypeName()) {
-		if (!IsRegularIdentifier(name->getText())) {
-			return false;
-		}
 		result.type_name = TransformIdentifier(*name);
 	}
 
@@ -382,9 +376,6 @@ bool GqlTransformer::TransformGraphTypeLabels(GQLParser::LabelSetPhraseContext *
 		return true;
 	}
 	if (auto label = phrase->labelName()) {
-		if (!IsRegularIdentifier(label->getText())) {
-			return false;
-		}
 		result.push_back(TransformIdentifier(*label));
 		return true;
 	}
@@ -393,9 +384,6 @@ bool GqlTransformer::TransformGraphTypeLabels(GQLParser::LabelSetPhraseContext *
 		return false;
 	}
 	for (auto label : specification->labelName()) {
-		if (!IsRegularIdentifier(label->getText())) {
-			return false;
-		}
 		result.push_back(TransformIdentifier(*label));
 	}
 	return !result.empty();
@@ -408,7 +396,7 @@ bool GqlTransformer::TransformGraphTypeProperties(GQLParser::PropertyTypesSpecif
 	}
 	for (auto property : specification->propertyTypeList()->propertyType()) {
 		if (!property->propertyName() || !property->propertyValueType() ||
-		    !property->propertyValueType()->valueType() || !IsRegularIdentifier(property->propertyName()->getText())) {
+		    !property->propertyValueType()->valueType()) {
 			return false;
 		}
 		GqlGraphPropertyDefinition definition;
@@ -433,8 +421,8 @@ std::any GqlTransformer::visitDropGraphStatement(GQLParser::DropGraphStatementCo
 		return {};
 	}
 	auto graph_name = parent_and_name->graphName();
-	if (!graph_name || graph_name->delimitedGraphName()) {
-		Unsupported(*context, "delimited graph names");
+	if (!graph_name) {
+		Unsupported(*context, "graph names");
 		return {};
 	}
 	statement = make_shared_ptr<GqlDropGraphStatement>(SourceRange(*context), TransformIdentifier(*graph_name),
@@ -444,11 +432,15 @@ std::any GqlTransformer::visitDropGraphStatement(GQLParser::DropGraphStatementCo
 
 std::any GqlTransformer::visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *context) {
 	auto expression = context->graphExpression();
-	if (!expression || !IsRegularIdentifier(expression->getText())) {
+	auto graph_reference = expression ? expression->graphReference() : nullptr;
+	auto delimited_name = graph_reference ? graph_reference->delimitedGraphName() : nullptr;
+	if (!expression || (!IsRegularIdentifier(expression->getText()) && !delimited_name)) {
 		Unsupported(*context, "non-simple graph expressions");
 		return {};
 	}
-	statement = make_shared_ptr<GqlSessionSetGraphStatement>(SourceRange(*context), TransformIdentifier(*expression));
+	auto &name = delimited_name ? static_cast<antlr4::ParserRuleContext &>(*delimited_name)
+	                            : static_cast<antlr4::ParserRuleContext &>(*expression);
+	statement = make_shared_ptr<GqlSessionSetGraphStatement>(SourceRange(*context), TransformIdentifier(name));
 	return {};
 }
 
@@ -1371,8 +1363,7 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 					match.mutations.push_back(std::move(mutation));
 				}
 			} else if (auto label = item->setLabelItem()) {
-				if (!IsRegularIdentifier(label->bindingVariableReference()->getText()) ||
-				    !IsRegularIdentifier(label->labelName()->getText())) {
+				if (!IsRegularIdentifier(label->bindingVariableReference()->getText())) {
 					return fail(*label, "delimited SET label targets");
 				}
 				auto variable = TransformIdentifier(*label->bindingVariableReference());
@@ -1406,8 +1397,7 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 				mutation.variable = TransformIdentifier(*property->bindingVariableReference());
 				mutation.name = TransformIdentifier(*property->propertyName());
 			} else if (auto label = item->removeLabelItem()) {
-				if (!IsRegularIdentifier(label->bindingVariableReference()->getText()) ||
-				    !IsRegularIdentifier(label->labelName()->getText())) {
+				if (!IsRegularIdentifier(label->bindingVariableReference()->getText())) {
 					return fail(*label, "delimited REMOVE label targets");
 				}
 				auto variable = TransformIdentifier(*label->bindingVariableReference());

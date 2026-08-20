@@ -78,13 +78,24 @@ MATCH (n) RETURN n
 ----
 <REGEX>:.*No graph selected; use SESSION SET GRAPH before MATCH.*
 
-# Delimited graph names remain rejected. Supported delimited labels, property
-# names, and RETURN aliases proceed far enough to require a selected graph.
-statement error
+# Delimited graph names use the same lifecycle path as regular graph names.
+query IT
 CREATE GRAPH `Mixed Graph` ANY
 ----
-<REGEX>:.*GQL feature not implemented: delimited graph names.*
+true	Mixed Graph
 
+query IT
+SESSION SET GRAPH "Mixed Graph"
+----
+true	Mixed Graph
+
+query IT
+DROP GRAPH `Mixed Graph`
+----
+true	Mixed Graph
+
+# Supported delimited labels, property names, and RETURN aliases proceed far
+# enough to require a selected graph.
 statement error
 MATCH (n:`Person Label`) RETURN n
 ----

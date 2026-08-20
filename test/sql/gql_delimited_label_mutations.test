@@ -1,0 +1,109 @@
+# name: test/sql/gql_delimited_label_mutations.test
+# description: Delimited labels in SET and REMOVE mutations
+# group: [sql]
+
+require duckgql
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'Ada', 'Person'),
+        ('p2', 'Grace', 'Person')
+    ) nodes("external_id:ID(People)", "name:string", ":LABEL")
+) TO '__TEST_DIR__/gql_delimited_label_mutation_nodes.csv' (FORMAT CSV, HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        ('p1', 'p2', 'KNOWS')
+    ) relationships(":START_ID(People)", ":END_ID(People)", ":TYPE")
+) TO '__TEST_DIR__/gql_delimited_label_mutation_edges.csv' (FORMAT CSV, HEADER)
+
+statement ok
+CREATE GRAPH delimited_label_mutations ANY
+
+statement ok
+COPY GRAPH delimited_label_mutations FROM (
+    VERTICES '__TEST_DIR__/gql_delimited_label_mutation_nodes.csv',
+    EDGES '__TEST_DIR__/gql_delimited_label_mutation_edges.csv'
+) FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH delimited_label_mutations
+
+# Both delimiter forms are accepted and preserve their unquoted spelling.
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p1'
+SET person IS "Important Person", person IS `Temporary Label`
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p1'
+----
+[person, Important Person, Temporary Label]
+
+# Repeating a delimited label mutation remains idempotent.
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p1'
+SET person IS `Important Person`, person IS "Temporary Label"
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p1'
+----
+[person, Important Person, Temporary Label]
+
+# REMOVE accepts either delimiter form, including a form different from SET.
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p1'
+REMOVE person IS "Temporary Label"
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p1'
+----
+[person, Important Person]
+
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p1'
+REMOVE person IS `Important Person`
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p1'
+----
+[person]
+
+# Existing regular label mutations retain lowercase normalization.
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p2'
+SET person IS Reviewed
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p2'
+----
+[person, reviewed]
+
+statement ok
+MATCH (person:Person) WHERE person.external_id = 'p2'
+REMOVE person IS Reviewed
+
+query T
+SELECT CAST(__gql_label AS VARCHAR)
+FROM gql_data.graph_1_vertices
+WHERE external_id = 'p2'
+----
+[person]
+
+# Binding variables remain restricted to regular identifiers by the grammar.
+statement error
+MATCH (person:Person)
+SET "person" IS "Rejected Label"
+----
+<REGEX>:.*GQL parser error.*
