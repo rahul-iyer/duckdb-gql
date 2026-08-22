@@ -1245,8 +1245,7 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 			GqlMutation mutation;
 			mutation.source = SourceRange(*item);
 			if (auto property = item->setPropertyItem()) {
-				if (!IsRegularIdentifier(property->bindingVariableReference()->getText()) ||
-				    !IsRegularIdentifier(property->propertyName()->getText())) {
+				if (!IsRegularIdentifier(property->bindingVariableReference()->getText())) {
 					return fail(*property, "delimited SET property targets");
 				}
 				mutation.type = GqlMutationType::SET_PROPERTY;
@@ -1344,9 +1343,6 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 				}
 				if (auto properties = all->propertyKeyValuePairList()) {
 					for (auto property : properties->propertyKeyValuePair()) {
-						if (!IsRegularIdentifier(property->propertyName()->getText())) {
-							return fail(*property, "delimited SET all-properties name");
-						}
 						GqlMutation assignment;
 						assignment.type = GqlMutationType::SET_PROPERTY;
 						assignment.variable = variable;
@@ -1389,8 +1385,7 @@ bool GqlTransformer::TransformMutation(GQLParser::PrimitiveDataModifyingStatemen
 			GqlMutation mutation;
 			mutation.source = SourceRange(*item);
 			if (auto property = item->removePropertyItem()) {
-				if (!IsRegularIdentifier(property->bindingVariableReference()->getText()) ||
-				    !IsRegularIdentifier(property->propertyName()->getText())) {
+				if (!IsRegularIdentifier(property->bindingVariableReference()->getText())) {
 					return fail(*property, "delimited REMOVE property targets");
 				}
 				mutation.type = GqlMutationType::REMOVE_PROPERTY;
