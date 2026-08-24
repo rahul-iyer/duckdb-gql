@@ -178,11 +178,12 @@ declared labels/edge types, allowed properties, and per-type `NOT NULL`
 properties. Properties shared by multiple node or edge types must map to the
 same DuckDB physical type.
 
-`INSERT RETURN` can return one or more directly inserted node variables. Each
-result has the same node struct representation as `MATCH`, including its
-generated `vertex_id`, labels, and mapped properties. Result columns preserve
-the `RETURN` list order. Edge values, expressions, ordering, and pagination are
-not yet supported on standalone `INSERT RETURN`.
+`INSERT RETURN` can return one or more directly inserted node and edge
+variables. Each result has the same graph-element struct representation as
+`MATCH`, including its generated identity, labels or edge type, endpoints, and
+mapped properties. Node and edge values can be mixed, and result columns
+preserve the `RETURN` list order. Expressions, ordering, and pagination are not
+yet supported on standalone `INSERT RETURN`.
 
 Standalone `INSERT` also accepts multiple comma-separated directed paths in a
 single mutation, including paths containing edges:

@@ -357,7 +357,8 @@ public:
 };
 
 struct GqlInsertResultProjection {
-	idx_t vertex_index = DConstants::INVALID_INDEX;
+	GqlPatternElementType element_type = GqlPatternElementType::VERTEX;
+	idx_t element_index = DConstants::INVALID_INDEX;
 	string name;
 };
 

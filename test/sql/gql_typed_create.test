@@ -213,3 +213,87 @@ SELECT count(*) FROM duckdb_tables()
 WHERE schema_name = 'gql_data' AND table_name LIKE 'graph_%'
 ----
 0
+
+# INSERT RETURN projects newly inserted edges with the same identity, type,
+# endpoints, and properties exposed by MATCH.
+statement ok
+CREATE GRAPH insert_return_edges TYPED {
+    (Node :Node {id INT64 NOT NULL, name STRING}),
+    (Node)-[:LINK {weight INT32}]->(Node)
+}
+
+statement ok
+SESSION SET GRAPH insert_return_edges
+
+query T
+INSERT (source:Node {id: 1, name: 'Source'})
+       -[created_edge:LINK {weight: 10}]->
+       (target:Node {id: 2, name: 'Target'})
+RETURN created_edge
+----
+{'edge_id': 1, '__gql_type': link, '__gql_source': 1, '__gql_target': 2, 'weight': 10}
+
+# Node and edge projections share one ordered result, including an edge alias.
+query TTT
+INSERT (mixed_source:Node {id: 3, name: 'Mixed source'})
+       -[mixed_edge:LINK {weight: 20}]->
+       (mixed_target:Node {id: 4, name: 'Mixed target'})
+RETURN mixed_target, mixed_edge AS relationship, mixed_source
+----
+{'vertex_id': 4, '__gql_labels': node, 'id': 4, 'name': Mixed target}	{'edge_id': 2, '__gql_type': link, '__gql_source': 3, '__gql_target': 4, 'weight': 20}	{'vertex_id': 3, '__gql_labels': node, 'id': 3, 'name': Mixed source}
+
+# Edge indices remain correct across independent paths and mixed projection
+# order.
+query TTTT
+INSERT (a:Node {id: 5, name: 'A'})-[e1:LINK {weight: 30}]->(b:Node {id: 6, name: 'B'}),
+       (c:Node {id: 7, name: 'C'})-[e2:LINK {weight: 31}]->(d:Node {id: 8, name: 'D'})
+RETURN e1, d, e2, a
+----
+{'edge_id': 3, '__gql_type': link, '__gql_source': 5, '__gql_target': 6, 'weight': 30}	{'vertex_id': 8, '__gql_labels': node, 'id': 8, 'name': D}	{'edge_id': 4, '__gql_type': link, '__gql_source': 7, '__gql_target': 8, 'weight': 31}	{'vertex_id': 5, '__gql_labels': node, 'id': 5, 'name': A}
+
+query TT
+INSERT (repeat_source:Node {id: 9, name: 'Repeat source'})
+       -[repeated_edge:LINK {weight: 50}]->
+       (repeat_target:Node {id: 10, name: 'Repeat target'})
+RETURN repeated_edge AS first_copy, repeated_edge AS second_copy
+----
+{'edge_id': 5, '__gql_type': link, '__gql_source': 9, '__gql_target': 10, 'weight': 50}	{'edge_id': 5, '__gql_type': link, '__gql_source': 9, '__gql_target': 10, 'weight': 50}
+
+# Invalid projections fail before any part of the INSERT is written.
+statement error
+INSERT (known_source:Node {id: 11, name: 'Known source'})
+       -[known_edge:LINK {weight: 55}]->
+       (known_target:Node {id: 12, name: 'Known target'})
+RETURN missing
+----
+<REGEX>:.*GQL INSERT RETURN variable 'missing' is not a directly inserted node.*
+
+query I
+MATCH (node:Node) WHERE node.id = 11 OR node.id = 12
+RETURN count(*)
+----
+0
+
+# Returning an edge keeps the complete mutation under the caller's transaction.
+statement ok
+BEGIN TRANSACTION
+
+query T
+INSERT (rollback_source:Node {id: 11, name: 'Rollback source'})
+       -[rollback_edge:LINK {weight: 60}]->
+       (rollback_target:Node {id: 12, name: 'Rollback target'})
+RETURN rollback_edge
+----
+{'edge_id': 6, '__gql_type': link, '__gql_source': 11, '__gql_target': 12, 'weight': 60}
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (:Node)-[relationship:LINK]->(:Node) WHERE relationship.weight = 60
+RETURN count(*)
+----
+0
+
+statement ok
+DROP GRAPH insert_return_edges

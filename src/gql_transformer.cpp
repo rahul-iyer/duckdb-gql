@@ -125,35 +125,40 @@ shared_ptr<GqlStatement> GqlTransformer::Transform(GQLParser::GqlProgramContext 
 		}
 		auto body = return_statements[0]->returnStatementBody();
 		if (!body || body->ASTERISK() || body->setQuantifier() || body->groupByClause() || !body->returnItemList()) {
-			return unsupported("INSERT RETURN form other than directly inserted node variables");
+			return unsupported("INSERT RETURN form other than directly inserted graph element variables");
 		}
 		for (auto item : body->returnItemList()->returnItem()) {
 			GqlProjection projection;
 			if (!TransformProjection(item, projection) || !projection.expression ||
 			    projection.expression->type != GqlExpressionType::VARIABLE_REFERENCE) {
-				return unsupported("INSERT RETURN expression other than a node variable");
+				return unsupported("INSERT RETURN expression other than a graph element variable");
 			}
 			auto &variable = projection.expression->variable.value;
-			idx_t vertex_index = DConstants::INVALID_INDEX;
+			GqlPatternElementType element_type = GqlPatternElementType::VERTEX;
+			idx_t element_index = DConstants::INVALID_INDEX;
+			auto resolve = [&](GqlPatternElementType type, idx_t index) {
+				if (element_index != DConstants::INVALID_INDEX) {
+					throw BinderException("GQL INSERT RETURN variable '%s' is ambiguous", variable);
+				}
+				element_type = type;
+				element_index = index;
+			};
 			for (idx_t index = 0; index < insert->vertices.size(); index++) {
 				if (insert->vertices[index].variable.value != variable) {
 					continue;
 				}
-				if (vertex_index != DConstants::INVALID_INDEX) {
-					throw BinderException("GQL INSERT RETURN node variable '%s' is ambiguous", variable);
-				}
-				vertex_index = index;
+				resolve(GqlPatternElementType::VERTEX, index);
 			}
-			if (vertex_index == DConstants::INVALID_INDEX) {
-				for (const auto &edge : insert->edges) {
-					if (edge.variable.value == variable) {
-						return unsupported("INSERT RETURN edge values");
-					}
+			for (idx_t index = 0; index < insert->edges.size(); index++) {
+				if (insert->edges[index].variable.value == variable) {
+					resolve(GqlPatternElementType::EDGE, index);
 				}
+			}
+			if (element_index == DConstants::INVALID_INDEX) {
 				throw BinderException("GQL INSERT RETURN variable '%s' is not a directly inserted node", variable);
 			}
 			insert->return_projections.push_back(
-			    {vertex_index, projection.alias.IsEmpty() ? variable : projection.alias.value});
+			    {element_type, element_index, projection.alias.IsEmpty() ? variable : projection.alias.value});
 		}
 	}
 	if (!statement) {
