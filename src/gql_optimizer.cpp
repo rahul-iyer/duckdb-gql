@@ -2,6 +2,7 @@
 
 #include "gql_catalog.hpp"
 #include "gql_csr.hpp"
+#include "gql_import.hpp"
 
 #include "duckdb/common/string_util.hpp"
 
@@ -424,13 +425,9 @@ static bool ContainsLabel(const vector<string> &labels, const string &candidate)
 	return false;
 }
 
-static const GqlCsrEdgeLabelStats *TryEdgeLabelStats(const GqlCsrSnapshot &snapshot, const string &label) {
-	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
-	if (entry == snapshot.label_ids.end() || entry->second >= snapshot.edge_label_stats.size()) {
-		return nullptr;
-	}
-	const auto &stats = snapshot.edge_label_stats[entry->second];
-	return stats.edge_count == 0 ? nullptr : &stats;
+static const GqlCsrEdgeLabelStats *TryEdgeLabelStats(const GqlFanoutStatistics &statistics, const string &label) {
+	auto entry = statistics.find(StringUtil::Lower(label));
+	return entry == statistics.end() ? nullptr : &entry->second;
 }
 
 static idx_t ClampCardinality(long double value) {
@@ -441,14 +438,14 @@ static idx_t ClampCardinality(long double value) {
 	return static_cast<idx_t>(std::ceil(value));
 }
 
-static idx_t EstimateFixedExpansionRows(const GqlCsrSnapshot &snapshot, const string &label, const string &direction,
+static idx_t EstimateFixedExpansionRows(const GqlFanoutStatistics &statistics, const string &label, const string &direction,
                                         idx_t seed_rows) {
 	if (seed_rows == DConstants::INVALID_INDEX) {
 		return DConstants::INVALID_INDEX;
 	}
-	auto stats = TryEdgeLabelStats(snapshot, label);
+	auto stats = TryEdgeLabelStats(statistics, label);
 	if (!stats) {
-		return 0;
+		return DConstants::INVALID_INDEX;
 	}
 	auto active_vertices = direction == "out" ? stats->outgoing_vertex_count : stats->incoming_vertex_count;
 	if (active_vertices == 0 || seed_rows == 0) {
@@ -458,15 +455,15 @@ static idx_t EstimateFixedExpansionRows(const GqlCsrSnapshot &snapshot, const st
 	return MinValue<idx_t>(ClampCardinality(estimate), NumericCast<idx_t>(stats->edge_count));
 }
 
-static idx_t EstimateBoundedPathRows(const GqlCsrSnapshot &snapshot, const GqlBindingAccessPath &path,
+static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, const GqlBindingAccessPath &path,
                                      idx_t seed_rows) {
 	if (seed_rows == DConstants::INVALID_INDEX) {
 		return DConstants::INVALID_INDEX;
 	}
 	if (path.unbounded) {
-		auto stats = TryEdgeLabelStats(snapshot, path.edge_label);
+		auto stats = TryEdgeLabelStats(statistics, path.edge_label);
 		if (!stats) {
-			return 0;
+			return DConstants::INVALID_INDEX;
 		}
 		auto maximum_degree =
 		    path.expansion_direction == "out" ? stats->max_outgoing_degree : stats->max_incoming_degree;
@@ -483,7 +480,7 @@ static idx_t EstimateBoundedPathRows(const GqlCsrSnapshot &snapshot, const GqlBi
 	idx_t frontier = seed_rows;
 	idx_t result = 0;
 	for (idx_t depth = 1; depth <= path.maximum_repetitions; depth++) {
-		frontier = EstimateFixedExpansionRows(snapshot, path.edge_label, path.expansion_direction, frontier);
+		frontier = EstimateFixedExpansionRows(statistics, path.edge_label, path.expansion_direction, frontier);
 		if (frontier == DConstants::INVALID_INDEX) {
 			return frontier;
 		}
@@ -500,8 +497,8 @@ static bool BatchedElementFetchBeatsScan(idx_t frontier_rows) {
 	return frontier_rows != DConstants::INVALID_INDEX && frontier_rows <= GQL_BATCHED_ELEMENT_FETCH_THRESHOLD;
 }
 
-static bool CsrFrontierBeatsBulkScan(const GqlCsrSnapshot &snapshot, const string &label, idx_t frontier_rows) {
-	auto stats = TryEdgeLabelStats(snapshot, label);
+static bool CsrFrontierBeatsBulkScan(const GqlFanoutStatistics &statistics, const string &label, idx_t frontier_rows) {
+	auto stats = TryEdgeLabelStats(statistics, label);
 	if (!stats || frontier_rows == DConstants::INVALID_INDEX) {
 		return false;
 	}
@@ -509,9 +506,9 @@ static bool CsrFrontierBeatsBulkScan(const GqlCsrSnapshot &snapshot, const strin
 	return frontier_rows <= threshold;
 }
 
-static bool CsrAvailableSeedBeatsBulkScan(const GqlCsrSnapshot &snapshot, const string &label,
+static bool CsrAvailableSeedBeatsBulkScan(const GqlFanoutStatistics &statistics, const string &label,
                                           const string &direction) {
-	auto stats = TryEdgeLabelStats(snapshot, label);
+	auto stats = TryEdgeLabelStats(statistics, label);
 	if (!stats) {
 		return false;
 	}
@@ -527,6 +524,20 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 	}
 
 	auto snapshot = GqlTryGetCsrSnapshot(context, graph_name);
+	GqlFanoutStatistics statistics;
+	// A valid CSR reflects table-write invalidation too, so prefer its fresh
+	// statistics when available (including after direct SQL writes).
+	if (snapshot) {
+		for (const auto &label : snapshot->label_ids) {
+			if (label.second < snapshot->edge_label_stats.size() &&
+			    snapshot->edge_label_stats[label.second].edge_count > 0) {
+				statistics[label.first] = snapshot->edge_label_stats[label.second];
+			}
+		}
+	}
+	if (statistics.empty()) {
+		statistics = GqlLoadFanoutStatistics(context, graph.graph_id);
+	}
 	const bool can_use_vertex_postings = StringUtil::CIEquals(graph.vertex.key_column, "__gql_id") &&
 	                                     StringUtil::CIEquals(graph.vertex.label_column, "__gql_label") &&
 	                                     graph.vertex.label_is_list && snapshot;
@@ -711,8 +722,13 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 				if (expand_from_left && reachable[right.binding_index]) {
 					const auto left_rows = stage_plan.bindings[left.binding_index].estimated_rows;
 					const auto right_rows = stage_plan.bindings[right.binding_index].estimated_rows;
-					if (right_rows != DConstants::INVALID_INDEX &&
-					    (left_rows == DConstants::INVALID_INDEX || right_rows < left_rows)) {
+					const auto left_cost = EstimateFixedExpansionRows(statistics, edge.label,
+					                                                  edge.reverse ? "in" : "out", left_rows);
+					const auto right_cost = EstimateFixedExpansionRows(statistics, edge.label,
+					                                                   edge.reverse ? "out" : "in", right_rows);
+					if ((right_cost != DConstants::INVALID_INDEX && right_cost < left_cost) ||
+					    (right_cost == left_cost && right_rows != DConstants::INVALID_INDEX &&
+					     (left_rows == DConstants::INVALID_INDEX || right_rows < left_rows))) {
 						expand_from_left = false;
 					} else if (left_rows == DConstants::INVALID_INDEX && right_rows == DConstants::INVALID_INDEX &&
 					           available[right.binding_index] && !available[left.binding_index]) {
@@ -727,7 +743,7 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 				    !available[expansion_vertex_binding] &&
 				    (stage_plan.bindings[expansion_vertex_binding].type ==
 				         GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH ||
-				     !CsrFrontierBeatsBulkScan(*snapshot, edge.label, seed_rows))) {
+				     !CsrFrontierBeatsBulkScan(statistics, edge.label, seed_rows))) {
 					// A correlated CSR expansion should beat scanning this edge
 					// relation by a meaningful margin. This applies equally to
 					// topology-only and property-bearing hybrid expansions.
@@ -739,14 +755,11 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 				const auto priority =
 				    edge.quantified ? uint8_t(0)
 				                    : (seed_is_independent &&
-				                               CsrAvailableSeedBeatsBulkScan(*snapshot, edge.label, expansion_direction)
+				                               CsrAvailableSeedBeatsBulkScan(statistics, edge.label, expansion_direction)
 				                           ? uint8_t(1)
 				                           : uint8_t(2));
-				if (selected_pattern != DConstants::INVALID_INDEX && priority >= selected_priority) {
-					continue;
-				}
 				idx_t estimated_rows = DConstants::INVALID_INDEX;
-				if (snapshot) {
+				if (!statistics.empty()) {
 					if (edge.quantified) {
 						GqlBindingAccessPath estimate_path;
 						estimate_path.edge_label = edge.label;
@@ -754,11 +767,16 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 						estimate_path.minimum_repetitions = edge.minimum_repetitions;
 						estimate_path.maximum_repetitions = edge.maximum_repetitions;
 						estimate_path.unbounded = edge.unbounded;
-						estimated_rows = EstimateBoundedPathRows(*snapshot, estimate_path, seed_rows);
+						estimated_rows = EstimateBoundedPathRows(statistics, estimate_path, seed_rows);
 					} else {
 						estimated_rows =
-						    EstimateFixedExpansionRows(*snapshot, edge.label, expansion_direction, seed_rows);
+						    EstimateFixedExpansionRows(statistics, edge.label, expansion_direction, seed_rows);
 					}
+				}
+				if (selected_pattern != DConstants::INVALID_INDEX &&
+				    (priority > selected_priority ||
+				     (priority == selected_priority && estimated_rows >= selected_estimated_rows))) {
+					continue;
 				}
 				selected_pattern = pattern_index;
 				selected_expand_from_left = expand_from_left;

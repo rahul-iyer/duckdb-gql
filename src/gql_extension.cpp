@@ -113,6 +113,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlPropertyIndexesFunction());
 	RegisterAlgorithmFunctions(loader);
 	loader.RegisterFunction(GqlRelationalMatchFunction());
+	loader.RegisterFunction(GqlTrailUniqueFunction());
 	loader.RegisterFunction(GqlRecursiveMatchFunction());
 	loader.RegisterFunction(GqlAlgorithmCallFunction());
 	loader.RegisterFunction(GqlAlgorithmResultFunction());

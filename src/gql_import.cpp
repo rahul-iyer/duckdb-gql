@@ -403,6 +403,126 @@ static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema 
 	}
 }
 
+GqlFanoutStatistics GqlLoadFanoutStatistics(ClientContext &context, uint64_t graph_id) {
+	GqlFanoutStatistics result;
+	// A separate connection cannot observe the caller's uncommitted mutations.
+	if (!context.transaction.IsAutoCommit()) {
+		return result;
+	}
+	Connection connection(*context.db);
+	auto rows = GqlQuery(connection,
+	    "SELECT edge_label, edge_count, source_count, target_count, max_out_degree, max_in_degree "
+	    "FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g "
+	    "ON s.graph_id = g.graph_id AND s.graph_version = g.graph_version WHERE s.graph_id = " + to_string(graph_id));
+	for (idx_t row = 0; row < rows->RowCount(); row++) {
+		auto &stats = result[rows->GetValue(0, row).GetValue<string>()];
+		stats.edge_count = rows->GetValue(1, row).GetValue<uint64_t>();
+		stats.outgoing_vertex_count = rows->GetValue(2, row).GetValue<uint64_t>();
+		stats.incoming_vertex_count = rows->GetValue(3, row).GetValue<uint64_t>();
+		stats.max_outgoing_degree = rows->GetValue(4, row).GetValue<uint64_t>();
+		stats.max_incoming_degree = rows->GetValue(5, row).GetValue<uint64_t>();
+	}
+	return result;
+}
+
+// Use the import transaction so COPY publishes data and statistics together.
+static idx_t AnalyzeGraphTables(Connection &connection, const string &graph_name) {
+	auto graph = GqlQuery(connection, "SELECT graph_id, graph_version FROM gql_internal.graphs WHERE graph_name = " +
+	                                      GqlQuoteLiteral(graph_name));
+	if (graph->RowCount() == 0) {
+		throw InvalidInputException("Graph '%s' does not exist", graph_name);
+	}
+	auto tables = GqlQuery(connection, "SELECT DISTINCT catalog_name, schema_name, table_name, ownership, element_kind "
+	                                   "FROM gql_internal.graph_element_tables WHERE graph_id = " +
+	                                       graph->GetValue(0, 0).ToString());
+	for (idx_t row = 0; row < tables->RowCount(); row++) {
+		if (tables->GetValue(3, row).GetValue<string>() == "REFERENCED") {
+			throw NotImplementedException("ANALYZE GRAPH supports managed graphs; analyze referenced source tables directly");
+		}
+	}
+	for (idx_t row = 0; row < tables->RowCount(); row++) {
+		GqlQuery(connection, "ANALYZE " + GqlQuoteIdentifier(tables->GetValue(0, row).GetValue<string>()) + "." +
+		                         GqlQuoteIdentifier(tables->GetValue(1, row).GetValue<string>()) + "." +
+		                         GqlQuoteIdentifier(tables->GetValue(2, row).GetValue<string>()));
+	}
+	auto graph_id = graph->GetValue(0, 0).ToString();
+	GqlQuery(connection, "DELETE FROM gql_internal.graph_fanout_statistics WHERE graph_id = " + graph_id);
+	for (idx_t row = 0; row < tables->RowCount(); row++) {
+		if (tables->GetValue(4, row).GetValue<string>() != "EDGE") {
+			continue;
+		}
+		auto table = GqlQuoteIdentifier(tables->GetValue(0, row).GetValue<string>()) + "." +
+		             GqlQuoteIdentifier(tables->GetValue(1, row).GetValue<string>()) + "." +
+		             GqlQuoteIdentifier(tables->GetValue(2, row).GetValue<string>());
+		// Aggregate each direction independently: no adjacency build and no
+		// source/target cross product. Parallel edges and self loops count.
+		GqlQuery(connection, "INSERT INTO gql_internal.graph_fanout_statistics "
+		    "WITH outgoing AS (SELECT __gql_type AS label, __gql_source_id, count(*) AS degree FROM " + table +
+		    " GROUP BY 1, 2), incoming AS (SELECT __gql_type AS label, __gql_target_id, count(*) AS degree FROM " + table +
+		    " GROUP BY 1, 2), o AS (SELECT label, sum(degree) AS edges, count(*) AS sources, max(degree) AS max_degree "
+		    "FROM outgoing GROUP BY label), i AS (SELECT label, count(*) AS targets, max(degree) AS max_degree "
+		    "FROM incoming GROUP BY label) SELECT " + graph_id + ", " + graph->GetValue(1, 0).ToString() +
+		    ", o.label, o.edges, o.sources, i.targets, o.max_degree, i.max_degree FROM o JOIN i USING (label)");
+	}
+	return tables->RowCount();
+}
+
+struct AnalyzeGraphBindData : TableFunctionData {
+	explicit AnalyzeGraphBindData(string name) : graph_name(std::move(name)) {
+	}
+	string graph_name;
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<AnalyzeGraphBindData>(graph_name);
+	}
+	bool Equals(const FunctionData &other) const override {
+		auto data = dynamic_cast<const AnalyzeGraphBindData *>(&other);
+		return data && data->graph_name == graph_name;
+	}
+};
+
+static unique_ptr<FunctionData> AnalyzeGraphBind(ClientContext &, TableFunctionBindInput &input,
+                                                vector<LogicalType> &types, vector<string> &names) {
+	names = {"success", "graph_name", "tables_analyzed"};
+	types = {LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::UBIGINT};
+	return make_uniq<AnalyzeGraphBindData>(input.inputs[0].GetValue<string>());
+}
+
+static void AnalyzeGraph(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<CopyGraphState>();
+	if (state.done) {
+		return;
+	}
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("ANALYZE GRAPH is not eligible inside an explicit transaction");
+	}
+	auto &data = input.bind_data->Cast<AnalyzeGraphBindData>();
+	Connection connection(*context.db);
+	GqlEnsureStorage(connection);
+	connection.BeginTransaction();
+	idx_t table_count;
+	try {
+		table_count = AnalyzeGraphTables(connection, data.graph_name);
+		connection.Commit();
+	} catch (...) {
+		if (connection.HasActiveTransaction()) {
+			connection.Rollback();
+		}
+		throw;
+	}
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value(true));
+	output.SetValue(1, 0, Value(data.graph_name));
+	output.SetValue(2, 0, Value::UBIGINT(table_count));
+	state.done = true;
+}
+
+TableFunction GqlAnalyzeGraphFunction() {
+	TableFunction function("gql_analyze_graph_native", {LogicalType::VARCHAR}, AnalyzeGraph);
+	function.bind = AnalyzeGraphBind;
+	function.init_global = CopyGraphInit;
+	return function;
+}
+
 static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &state = input.global_state->Cast<CopyGraphState>();
 	if (state.done) {
@@ -491,6 +611,7 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		GqlAttachManagedGraphTables(connection, data.graph_name, qualified_vertex, "__gql_id", "__gql_label",
 		                            qualified_edge, "__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type",
 		                            false);
+		AnalyzeGraphTables(connection, data.graph_name);
 		connection.Commit();
 	} catch (...) {
 		if (connection.HasActiveTransaction()) {

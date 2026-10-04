@@ -1,6 +1,7 @@
 #include "gql_lowerer.hpp"
 
 #include "gql_relational.hpp"
+#include "gql_optimizer.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
@@ -14,6 +15,7 @@
 #include "duckdb/parser/result_modifier.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
 
 namespace duckdb {
 
@@ -434,6 +436,66 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 	return std::move(select);
 }
 
+static bool ContainsAggregate(const GqlBoundExpression &expression) {
+	if (expression.aggregate || (expression.left && ContainsAggregate(*expression.left)) ||
+	    (expression.right && ContainsAggregate(*expression.right))) {
+		return true;
+	}
+	for (const auto &argument : expression.arguments) {
+		if (ContainsAggregate(*argument)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Keep aggregate expressions above UNION ALL, projecting their scalar inputs
+// from each alternative. Scalar operators stay above the union too, so the
+// SQL binder can recognize grouping keys inside expressions containing an
+// aggregate (e.g. RETURN x, x * 2 + count(*)).
+static shared_ptr<GqlBoundExpression> ExtractAggregateInputs(const shared_ptr<GqlBoundExpression> &expression,
+                                                            vector<GqlBoundProjection> &inputs,
+                                                            vector<Value> &input_programs) {
+	if (expression->expression_type == GqlExpressionType::LITERAL) {
+		return expression;
+	}
+	auto type = expression->expression_type;
+	bool graph_input = type == GqlExpressionType::VARIABLE_REFERENCE ||
+	                   type == GqlExpressionType::PROPERTY_REFERENCE || type == GqlExpressionType::ELEMENT_ID ||
+	                   type == GqlExpressionType::LABELED || expression->result_type.id == GqlTypeId::PATH ||
+	                   (type == GqlExpressionType::FUNCTION && expression->function_name == "path_length");
+	if (graph_input) {
+		auto program = GqlSerializeExpression(*expression);
+		idx_t index = 0;
+		for (; index < input_programs.size(); index++) {
+			if (Value::NotDistinctFrom(program, input_programs[index])) {
+				break;
+			}
+		}
+		if (index == inputs.size()) {
+			inputs.push_back({expression, "__gql_aggregate_input_" + to_string(index), expression->source});
+			input_programs.push_back(std::move(program));
+		}
+		auto reference = make_shared_ptr<GqlBoundExpression>();
+		reference->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
+		reference->result_type = expression->result_type;
+		reference->binding_index = index;
+		return reference;
+	}
+	auto result = make_shared_ptr<GqlBoundExpression>(*expression);
+	if (expression->left) {
+		result->left = ExtractAggregateInputs(expression->left, inputs, input_programs);
+	}
+	if (expression->right) {
+		result->right = ExtractAggregateInputs(expression->right, inputs, input_programs);
+	}
+	result->arguments.clear();
+	for (const auto &argument : expression->arguments) {
+		result->arguments.push_back(ExtractAggregateInputs(argument, inputs, input_programs));
+	}
+	return result;
+}
+
 unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 	if (plans.empty()) {
 		throw InternalException("GQL MATCH produced no native alternatives");
@@ -445,6 +507,16 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 	}
 
 	const auto &first_project = plans[0].root->Cast<GqlLogicalProject>();
+	auto original_projections = first_project.projections;
+	auto visible_count = first_project.visible_projection_count == DConstants::INVALID_INDEX
+	                         ? original_projections.size()
+	                         : first_project.visible_projection_count;
+	bool has_aggregate = false;
+	for (const auto &projection : original_projections) {
+		has_aggregate |= ContainsAggregate(*projection.expression);
+	}
+	vector<shared_ptr<GqlBoundExpression>> aggregate_expressions;
+	vector<string> input_names;
 	auto distinct = first_project.distinct;
 	auto order_by = first_project.order_by;
 	auto has_limit = first_project.has_limit;
@@ -476,6 +548,42 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 		project.limit = 0;
 		project.has_offset = false;
 		project.offset = 0;
+		if (has_aggregate) {
+			vector<GqlBoundProjection> inputs;
+			vector<Value> input_programs;
+			vector<shared_ptr<GqlBoundExpression>> expressions;
+			for (const auto &projection : project.projections) {
+				expressions.push_back(ExtractAggregateInputs(projection.expression, inputs, input_programs));
+			}
+			// COUNT(*) still needs one row per match, including when every
+			// alternative is empty. It must not count one aggregate row per arm.
+			if (inputs.empty()) {
+				auto present = make_shared_ptr<GqlBoundExpression>();
+				present->expression_type = GqlExpressionType::LITERAL;
+				present->literal = {GqlLiteralType::INTEGER, "1"};
+				present->result_type = {GqlTypeId::INTEGER, false};
+				inputs.push_back({std::move(present), "__gql_aggregate_present", {}});
+			}
+			if (aggregate_expressions.empty()) {
+				aggregate_expressions = std::move(expressions);
+				for (const auto &input : inputs) {
+					input_names.push_back(input.name);
+				}
+			} else {
+				if (inputs.size() != input_names.size() || expressions.size() != aggregate_expressions.size()) {
+					throw InternalException("GQL alternatives have inconsistent aggregate inputs");
+				}
+				for (idx_t index = 0; index < expressions.size(); index++) {
+					if (!Value::NotDistinctFrom(GqlSerializeExpression(*expressions[index]),
+					                           GqlSerializeExpression(*aggregate_expressions[index]))) {
+						throw InternalException("GQL alternatives have inconsistent aggregate expressions");
+					}
+				}
+			}
+			project.projections = std::move(inputs);
+			project.visible_projection_count = project.projections.size();
+			GqlOptimize(plan);
+		}
 	}
 
 	auto set_operation = make_uniq<SetOperationNode>();
@@ -484,8 +592,30 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 	for (const auto &plan : plans) {
 		set_operation->children.push_back(LowerSelectNode(plan));
 	}
+	unique_ptr<QueryNode> root = std::move(set_operation);
+	if (has_aggregate) {
+		auto aggregate = make_uniq<SelectNode>();
+		auto rows_statement = make_uniq<SelectStatement>();
+		rows_statement->node = std::move(root);
+		aggregate->from_table = make_uniq<SubqueryRef>(std::move(rows_statement), "__gql_aggregate_rows");
+		GroupingSet grouping_set;
+		for (idx_t index = 0; index < aggregate_expressions.size(); index++) {
+			auto expression = GqlLowerProjectedExpression(*aggregate_expressions[index], input_names,
+			                                              "__gql_aggregate_rows");
+			if (!ContainsAggregate(*original_projections[index].expression)) {
+				grouping_set.insert(aggregate->groups.group_expressions.size());
+				aggregate->groups.group_expressions.push_back(expression->Copy());
+			}
+			expression->SetAlias(original_projections[index].name);
+			aggregate->select_list.push_back(std::move(expression));
+		}
+		if (!grouping_set.empty()) {
+			aggregate->groups.grouping_sets.push_back(std::move(grouping_set));
+		}
+		root = std::move(aggregate);
+	}
 	if (distinct) {
-		set_operation->modifiers.push_back(make_uniq<DistinctModifier>());
+		root->modifiers.push_back(make_uniq<DistinctModifier>());
 	}
 	if (!order_by.empty()) {
 		auto order = make_uniq<OrderModifier>();
@@ -496,7 +626,7 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 			                                                      : OrderByNullType::ORDER_DEFAULT,
 			                           make_uniq<PositionalReferenceExpression>(entry.projection_index + 1));
 		}
-		set_operation->modifiers.push_back(std::move(order));
+		root->modifiers.push_back(std::move(order));
 	}
 	if (has_limit || has_offset) {
 		auto result_limit = make_uniq<LimitModifier>();
@@ -506,9 +636,25 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 		if (has_offset) {
 			result_limit->offset = make_uniq<ConstantExpression>(Value::UBIGINT(offset));
 		}
-		set_operation->modifiers.push_back(std::move(result_limit));
+		root->modifiers.push_back(std::move(result_limit));
 	}
-	statement->node = std::move(set_operation);
+	if (has_aggregate && visible_count < original_projections.size()) {
+		auto result_statement = make_uniq<SelectStatement>();
+		result_statement->node = std::move(root);
+		auto source = make_uniq<SubqueryRef>(std::move(result_statement), "__gql_aggregate_result");
+		for (idx_t index = 0; index < original_projections.size(); index++) {
+			source->column_name_alias.push_back("__gql_result_" + to_string(index));
+		}
+		auto visible = make_uniq<SelectNode>();
+		for (idx_t index = 0; index < visible_count; index++) {
+			auto column = make_uniq<ColumnRefExpression>(source->column_name_alias[index], source->alias);
+			column->SetAlias(original_projections[index].name);
+			visible->select_list.push_back(std::move(column));
+		}
+		visible->from_table = std::move(source);
+		root = std::move(visible);
+	}
+	statement->node = std::move(root);
 	return std::move(statement);
 }
 

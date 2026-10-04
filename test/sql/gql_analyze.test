@@ -1,0 +1,157 @@
+# name: test/sql/gql_analyze.test
+# description: Refresh managed graph optimizer statistics
+# group: [gql]
+
+load __TEST_DIR__/gql_analyze.db
+
+require duckgql
+
+statement ok
+CREATE GRAPH refresh_stats ANY
+
+query ITI
+ANALYZE GRAPH refresh_stats
+----
+true	refresh_stats	0
+
+statement ok
+COPY (SELECT i::VARCHAR AS "id:ID", 'Person' AS ":LABEL", i AS "score:int" FROM range(100) t(i)) TO '__TEST_DIR__/analyze_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":START_ID", ((i+1)%100)::VARCHAR AS ":END_ID", 'LINK' AS ":TYPE" FROM range(100) t(i)) TO '__TEST_DIR__/analyze_edges.csv' (HEADER)
+
+query ITII
+COPY GRAPH refresh_stats FROM (VERTICES '__TEST_DIR__/analyze_nodes.csv', EDGES '__TEST_DIR__/analyze_edges.csv') FORMAT GRAPH
+----
+true	refresh_stats	100	100
+
+# Compare against native ANALYZE as the oracle for the automatic refresh.
+statement ok
+CREATE TABLE saved_stats AS SELECT stats(score) AS value FROM gql_data.graph_1_vertices LIMIT 1
+
+statement ok
+ANALYZE gql_data.graph_1_vertices
+
+query I
+SELECT stats(score) = (SELECT value FROM saved_stats) FROM gql_data.graph_1_vertices LIMIT 1
+----
+true
+
+# Updates leave old distinct estimates behind; explicit graph ANALYZE refreshes them.
+statement ok
+UPDATE gql_data.graph_1_vertices SET score = 7
+
+query I
+SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+----
+false
+
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_source_id = 1
+
+query ITI
+analyze /* stats */ graph REFRESH_STATS
+----
+true	refresh_stats	2
+
+query I
+SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+----
+true
+
+query I
+SELECT contains(stats(__gql_source_id), '[Approx Unique: 1]') FROM gql_data.graph_1_edges LIMIT 1
+----
+true
+
+restart
+
+statement ok
+ANALYZE GRAPH refresh_stats
+
+query I
+SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+----
+true
+
+statement ok
+ANALYZE
+
+statement error
+ANALYZE GRAPH missing_graph
+----
+Graph 'missing_graph' does not exist
+
+statement error
+ANALYZE GRAPH refresh_stats garbage
+----
+unexpected trailing input
+
+# A SQL table named graph remains a valid target for native ANALYZE.
+statement ok
+CREATE TABLE graph (i INTEGER)
+
+statement ok
+ANALYZE graph
+
+statement ok
+BEGIN
+
+statement error
+ANALYZE GRAPH refresh_stats
+----
+ANALYZE GRAPH is not eligible inside an explicit transaction
+
+statement ok
+ROLLBACK
+
+statement ok
+DROP GRAPH refresh_stats
+
+statement ok
+CREATE GRAPH "Stats Graph" ANY
+
+query ITI
+ANALYZE GRAPH `Stats Graph`
+----
+true	Stats Graph	0
+
+statement error
+ANALYZE GRAPH "Stats Graph" extra
+----
+unexpected trailing input
+
+statement ok
+CREATE GRAPH "Quote""Graph" ANY
+
+query ITI
+ANALYZE GRAPH "Quote""Graph"
+----
+true	Quote"Graph	0
+
+statement error
+ANALYZE GRAPH "unterminated
+----
+unterminated
+
+statement ok
+CREATE TABLE ref_nodes (id BIGINT)
+
+statement ok
+CREATE TABLE ref_edges (id BIGINT, src BIGINT, dst BIGINT)
+
+statement ok
+CREATE GRAPH ref_stats TYPED {
+    (Person :Person {id INT64}),
+    (Person)-[:LINK {id INT64}]->(Person)
+} FROM TABLES (
+    VERTEX TABLE gql_analyze.main.ref_nodes MAP TO NODE TYPE Person KEY (id) PROPERTIES (id AS id),
+    EDGE TABLE gql_analyze.main.ref_edges MAP TO EDGE TYPE LINK KEY (id)
+    SOURCE (src) REFERENCES NODE TYPE Person
+    DESTINATION (dst) REFERENCES NODE TYPE Person PROPERTIES (id AS id)
+)
+
+statement error
+ANALYZE GRAPH ref_stats
+----
+ANALYZE GRAPH supports managed graphs

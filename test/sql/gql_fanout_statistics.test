@@ -1,0 +1,163 @@
+# name: test/sql/gql_fanout_statistics.test
+# description: Persisted directed fanout statistics, refresh and mutation versions
+# group: [gql]
+
+load __TEST_DIR__/gql_fanout_statistics.db
+
+require duckgql
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "id:int", 'Node' AS ":LABEL" FROM range(1,7) t(i)) TO '__TEST_DIR__/fanout_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1','1','HUB'), ('1','2','HUB'), ('1','2','HUB'), ('1','3','HUB'), ('2','3','LOW'), ('3','2','LOW')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/fanout_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH fanout ANY
+
+statement ok
+COPY GRAPH fanout FROM (VERTICES '__TEST_DIR__/fanout_nodes.csv', EDGES '__TEST_DIR__/fanout_edges.csv') FORMAT GRAPH
+
+# Parallel edges, a self loop, isolated vertices and two asymmetric types.
+query TIIIII rowsort
+SELECT edge_label, edge_count, source_count, target_count, max_out_degree, max_in_degree FROM gql_internal.graph_fanout_statistics
+----
+hub	4	1	3	4	2
+low	2	2	2	1	1
+
+restart
+
+query I
+SELECT count(*) FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g USING (graph_id, graph_version)
+----
+2
+
+statement ok
+SESSION SET GRAPH fanout
+
+statement ok
+CALL gql_create_property_index('fanout', 'id')
+
+query I
+MATCH (a:Node)-[:HUB]->{1,2}(b:Node) WHERE a.id = 1 RETURN count(*)
+----
+7
+
+restart
+
+statement ok
+SESSION SET GRAPH fanout
+
+# With both endpoints indexed, fanout costing should expand from the target:
+# ceil(4/3) incoming edges versus 4 outgoing, without building CSR.
+statement ok
+PRAGMA enable_profiling = 'json'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/fanout_direction.json'
+
+query II rowsort
+MATCH (a:Node)-[:HUB]->{1,2}(b:Node) WHERE a.id = 1 AND b.id = 2 RETURN a.id, b.id
+----
+1	2
+1	2
+1	2
+1	2
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT regexp_matches(content, '"Conditions":\s*\[\s*"__gql_id = __gql_target_id"[^}]*"Delim Index"|"Delim Index"[^}]*"Conditions":\s*\[\s*"__gql_id = __gql_target_id"') FROM read_text('__TEST_DIR__/fanout_direction.json')
+----
+1
+
+# Without analyzed statistics, the same tie defaults to the left endpoint.
+statement ok
+DELETE FROM gql_internal.graph_fanout_statistics
+
+restart
+
+statement ok
+SESSION SET GRAPH fanout
+
+statement ok
+PRAGMA enable_profiling = 'json'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/fanout_no_statistics.json'
+
+query II rowsort
+MATCH (a:Node)-[:HUB]->{1,2}(b:Node) WHERE a.id = 1 AND b.id = 2 RETURN a.id, b.id
+----
+1	2
+1	2
+1	2
+1	2
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT regexp_matches(content, '"Conditions":\s*\[\s*"__gql_id = __gql_source_id"[^}]*"Delim Index"|"Delim Index"[^}]*"Conditions":\s*\[\s*"__gql_id = __gql_source_id"') FROM read_text('__TEST_DIR__/fanout_no_statistics.json')
+----
+1
+
+statement ok
+ANALYZE GRAPH fanout
+
+statement ok
+CALL gql_build_csr('fanout')
+
+query I
+MATCH (a:Node)-[:HUB]->{1,2}(b:Node) WHERE a.id = 1 RETURN count(*)
+----
+7
+
+statement ok
+INSERT (:Node {id: 7})
+
+# The optimizer's version join rejects statistics after a GQL mutation.
+query I
+SELECT count(*) FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g USING (graph_id, graph_version)
+----
+0
+
+statement ok
+ANALYZE GRAPH fanout
+
+query I
+SELECT count(*) FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g USING (graph_id, graph_version)
+----
+2
+
+# Direct SQL writes require explicit refresh, just like native ANALYZE.
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_type = 'hub'
+
+statement ok
+ANALYZE GRAPH fanout
+
+query TIIIII
+SELECT edge_label, edge_count, source_count, target_count, max_out_degree, max_in_degree FROM gql_internal.graph_fanout_statistics
+----
+low	2	2	2	1	1
+
+statement ok
+DELETE FROM gql_data.graph_1_edges
+
+statement ok
+ANALYZE GRAPH fanout
+
+query I
+SELECT count(*) FROM gql_internal.graph_fanout_statistics
+----
+0
+
+statement ok
+DROP GRAPH fanout
+
+query I
+SELECT count(*) FROM gql_internal.graph_fanout_statistics
+----
+0

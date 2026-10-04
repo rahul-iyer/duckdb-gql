@@ -254,7 +254,8 @@ static bool StartsWithGqlCommand(const string &query) {
 	       StartsWithGqlKeywords(query, {"SESSION", "SET", "PROPERTY", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "PROPERTY", "GRAPH"}) ||
-	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) || StartsWithMergePattern(query) ||
+	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) ||
+	       StartsWithGqlKeywords(query, {"ANALYZE", "GRAPH"}) || StartsWithMergePattern(query) ||
 	       StartsWithGqlKeywords(query, {"MATCH"}) || StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) ||
 	       StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') || StartsWithAlgorithmCall(query);
 }
@@ -1238,12 +1239,23 @@ private:
 	idx_t offset;
 };
 
-class CopyGraphParser {
+class GraphMaintenanceParser {
 public:
-	explicit CopyGraphParser(const string &query_p) : query(query_p) {
+	explicit GraphMaintenanceParser(const string &query_p) : query(query_p) {
 	}
 
 	shared_ptr<GqlStatement> Parse() {
+		if (ConsumeKeyword("ANALYZE")) {
+			command = "ANALYZE GRAPH";
+			ExpectKeyword("GRAPH");
+			auto name = ParseIdentifier();
+			if (!AtEnd()) {
+				Error("unexpected trailing input");
+			}
+			GqlSourceRange source;
+			source.end_offset = query.size();
+			return make_shared_ptr<GqlAnalyzeGraphStatement>(source, std::move(name));
+		}
 		ExpectKeyword("COPY");
 		ExpectKeyword("GRAPH");
 		auto graph_name = ParseIdentifier();
@@ -1290,7 +1302,7 @@ private:
 	}
 
 	[[noreturn]] void Error(const string &message) const {
-		throw ParserException("COPY GRAPH parser error at byte %llu: %s", static_cast<unsigned long long>(offset),
+		throw ParserException("%s parser error at byte %llu: %s", command, static_cast<unsigned long long>(offset),
 		                      message);
 	}
 
@@ -1328,6 +1340,27 @@ private:
 	GqlIdentifier ParseIdentifier() {
 		SkipWhitespace();
 		auto start = offset;
+		if (offset < query.size() && (query[offset] == '"' || query[offset] == '`')) {
+			auto delimiter = query[offset++];
+			GqlIdentifier result;
+			while (offset < query.size()) {
+				auto character = query[offset++];
+				if (character != delimiter) {
+					result.value += character;
+				} else if (offset < query.size() && query[offset] == delimiter) {
+					result.value += delimiter;
+					offset++;
+				} else {
+					if (result.value.empty()) {
+						Error("graph name cannot be empty");
+					}
+					result.source.start_offset = start;
+					result.source.end_offset = offset;
+					return result;
+				}
+			}
+			Error("unterminated graph name");
+		}
 		if (offset >= query.size() ||
 		    !(std::isalpha(static_cast<unsigned char>(query[offset])) || query[offset] == '_')) {
 			Error("expected a regular graph name");
@@ -1384,6 +1417,7 @@ private:
 		Error("expected TRUE or FALSE");
 	}
 
+	string command = "COPY GRAPH";
 	const string &query;
 	idx_t offset = 0;
 };
@@ -1706,10 +1740,11 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 		parse_data->statement = std::move(statement);
 		return ParserExtensionParseResult(std::move(parse_data));
 	}
-	if (StartsWithGqlKeywords(gql_query, {"COPY", "GRAPH"})) {
+	if (StartsWithGqlKeywords(gql_query, {"COPY", "GRAPH"}) ||
+	    StartsWithGqlKeywords(gql_query, {"ANALYZE", "GRAPH"})) {
 		auto parse_data = make_uniq<GqlParseData>();
 		parse_data->query = gql_query;
-		parse_data->statement = CopyGraphParser(gql_query).Parse();
+		parse_data->statement = GraphMaintenanceParser(gql_query).Parse();
 		return ParserExtensionParseResult(std::move(parse_data));
 	}
 	if (StartsWithMergePattern(gql_query)) {
@@ -2076,6 +2111,10 @@ ParserExtensionPlanResult GqlPlan(ParserExtensionInfo *, ClientContext &,
 		result.parameters.emplace_back(create.referenced.validate);
 		return result;
 	}
+	case GqlStatementType::ANALYZE_GRAPH:
+		result.function = GqlAnalyzeGraphFunction();
+		result.parameters.emplace_back(statement.Cast<GqlAnalyzeGraphStatement>().graph_name.value);
+		return result;
 	case GqlStatementType::COPY_GRAPH: {
 		auto &copy = statement.Cast<GqlCopyGraphStatement>();
 		result.function = GqlCopyGraphFunction();

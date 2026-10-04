@@ -1,0 +1,94 @@
+# name: test/sql/gql_trail_label_disjointness.test
+# description: Scalar edge labels prove trail disjointness without losing edge multiplicity
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a', 'N', 'a'), ('b', 'N', 'b')) v(":ID", ":LABEL", "name:string")) TO '__TEST_DIR__/trail_label_nodes.csv' (HEADER, FORMAT CSV)
+
+# Two parallel R self-loops and one each of S and T. The isolated node exercises
+# null extension. IDs, not endpoint pairs, determine trail uniqueness.
+statement ok
+COPY (SELECT * FROM (VALUES ('a','a','R'), ('a','a','R'), ('a','a','S'), ('a','a','T')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/trail_label_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH trail_labels ANY
+
+statement ok
+COPY GRAPH trail_labels FROM (VERTICES '__TEST_DIR__/trail_label_nodes.csv', EDGES '__TEST_DIR__/trail_label_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH trail_labels
+
+statement ok
+PRAGMA enable_profiling = 'query_tree'
+
+statement ok
+PRAGMA profiling_output = '__TEST_DIR__/trail_disjoint_plan.txt'
+
+query I
+MATCH ()-[:R]->()-[:S]->()-[:T]->() RETURN count(*)
+----
+2
+
+statement ok
+PRAGMA disable_profiling
+
+# No pair of differently labeled scalar edges can reuse an edge ID.
+query I
+SELECT contains(content, '!=') FROM read_text('__TEST_DIR__/trail_disjoint_plan.txt')
+----
+false
+
+# The two R positions still need an inequality. Eliminating all comparisons
+# would incorrectly return four matches instead of two.
+query I
+MATCH ()-[:R]->()-[:S]->()-[:R]->() RETURN count(*)
+----
+2
+
+query I
+MATCH ()-[:R]->()-[:R]->() RETURN count(*)
+----
+2
+
+# An unlabeled position overlaps every label: (4 * 2) - 2 reused R edges.
+query I
+MATCH ()-[]->()-[:R]->() RETURN count(*)
+----
+6
+
+query I
+MATCH ()-[]->()-[]->() RETURN count(*)
+----
+12
+
+# Independent paths can reuse the same edge; disjointness is path-local.
+query I
+MATCH (a)-[:R]->(b), (b)-[:R]->(a) RETURN count(*)
+----
+4
+
+query TI rowsort
+MATCH (n:N)
+OPTIONAL MATCH (n)-[:R]->()-[:S]->()-[:R]->(m)
+RETURN n.name, count(m)
+----
+a	2
+b	0
+
+# Native lowering inside explicit transactions must retain the same proof.
+statement ok
+BEGIN
+
+query I
+MATCH ()-[:R]->()-[:S]->()-[:R]->() RETURN count(*)
+----
+2
+
+statement ok
+ROLLBACK
+
+statement ok
+DROP GRAPH trail_labels

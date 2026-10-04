@@ -1,0 +1,117 @@
+# name: test/sql/gql_key_only_trails.test
+# description: Key-only paths retain vertex checks and adjacent edge uniqueness
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a','N','a'), ('b','N','b')) v(":ID", ":LABEL", "name:string")) TO '__TEST_DIR__/key_only_trail_nodes.csv' (HEADER, FORMAT CSV)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a','a','R'), ('a','a','R'), ('a','a','S'), ('a','a','T')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/key_only_trail_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH key_only_trails ANY
+
+statement ok
+COPY GRAPH key_only_trails FROM (VERTICES '__TEST_DIR__/key_only_trail_nodes.csv', EDGES '__TEST_DIR__/key_only_trail_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH key_only_trails
+
+statement ok
+PRAGMA enable_profiling='query_tree'
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/key_only_trail_plan.txt'
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)
+RETURN count(*)
+----
+2
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT contains(content, 'SEMI') AND contains(content, 'STREAMING_LIMIT')
+FROM read_text('__TEST_DIR__/key_only_trail_plan.txt')
+----
+true
+
+# Actual vertices can repeat; only edge identity must be unique within the path.
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)
+WHERE element_id(a) <> element_id(c)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (a:N)-[:R]-(b:N)-[:R]-(c:N)-[:S]->(d:N)
+RETURN count(*)
+----
+8
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:Missing)
+RETURN count(*)
+----
+0
+
+# Vertex property reads use the original lowering.
+query TI rowsort
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)
+RETURN a.name, count(*)
+----
+a	2
+
+query TI rowsort
+MATCH (n:N)
+OPTIONAL MATCH (n)-[:R]->(b)-[:R]->(c)-[:S]->(d)
+RETURN n.name, count(d)
+----
+a	2
+b	0
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)-[:T]->(e:N)
+RETURN count(*)
+----
+2
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)
+WHERE a.name = 'a'
+RETURN count(a)
+----
+2
+
+# Non-adjacent repeated labels and a syntactically closed path retain the fallback.
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:R]->(d:N)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(a)
+RETURN count(*)
+----
+2
+
+statement ok
+BEGIN
+
+query I
+MATCH (a:N)-[:R]->(b:N)-[:R]->(c:N)-[:S]->(d:N)
+RETURN count(*)
+----
+2
+
+statement ok
+ROLLBACK
+
+statement ok
+DROP GRAPH key_only_trails

@@ -360,6 +360,25 @@ static vector<uint8_t> BuildVertexMask(const GqlCsrSnapshot &snapshot, const str
 	}
 	vector<uint8_t> mask(snapshot.vertex_ids.size(), false);
 	projected_count = 0;
+	// Reuse the label index when the snapshot already has it. Minimal
+	// algorithm projections retain the scan fallback without building more CSR.
+	if (snapshot.capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS) {
+		if (required_label == std::numeric_limits<uint32_t>::max()) {
+			return mask;
+		}
+		auto label_index = NumericCast<idx_t>(required_label);
+		// Labels introduced only by edges have no vertex posting range.
+		if (label_index + 1 >= snapshot.vertex_label_posting_offsets.size()) {
+			return mask;
+		}
+		auto begin = snapshot.vertex_label_posting_offsets[label_index];
+		auto end = snapshot.vertex_label_posting_offsets[label_index + 1];
+		projected_count = NumericCast<idx_t>(end - begin);
+		for (auto offset = begin; offset < end; offset++) {
+			mask[snapshot.vertex_label_postings[offset]] = true;
+		}
+		return mask;
+	}
 	for (idx_t vertex = 0; vertex < snapshot.vertex_ids.size(); vertex++) {
 		for (idx_t offset = snapshot.vertex_label_offsets[vertex]; offset < snapshot.vertex_label_offsets[vertex + 1];
 		     offset++) {
@@ -2786,7 +2805,7 @@ static int64_t ComputeShortestPathLength(ClientContext &context, const Algorithm
 	auto vertex_label = data.configuration.size() > 1 ? data.configuration[1].value : string();
 	auto edge_label = data.configuration.size() > 2 ? data.configuration[2].value : string();
 	auto snapshot = GqlGetOrBuildCsrSnapshot(context, data.configuration[0].value,
-	                                         AlgorithmCsrCapabilities(CsrDirection::OUT, edge_label, vertex_label));
+	                                         AlgorithmCsrCapabilities(CsrDirection::BOTH, edge_label, vertex_label));
 	idx_t projected_count;
 	auto vertex_mask = BuildVertexMask(*snapshot, vertex_label, projected_count);
 	auto source = RequireProjectedVertex(*snapshot, vertex_mask, state.frontier[0], "source");
@@ -2796,32 +2815,59 @@ static int64_t ComputeShortestPathLength(ClientContext &context, const Algorithm
 	}
 	bool filter_label;
 	auto required_label = ResolveLabel(*snapshot, edge_label, filter_label);
-	vector<uint8_t> visited(snapshot->vertex_ids.size(), false);
-	vector<pair<idx_t, idx_t>> queue;
-	visited[source] = true;
-	queue.emplace_back(source, 0);
-	for (idx_t head = 0; head < queue.size(); head++) {
-		if (context.IsInterrupted()) {
-			throw InterruptException();
-		}
-		auto vertex = queue[head].first;
-		auto depth = queue[head].second;
-		bool found = false;
-		VisitNeighbors(*snapshot, vertex, CsrDirection::OUT, filter_label, required_label,
-		               [&](idx_t neighbor, uint64_t) {
-			               if (!InVertexProjection(vertex_mask, neighbor) || visited[neighbor]) {
+	// Each side advances a complete BFS layer. Until the first intersection,
+	// their visited balls are disjoint, so the first connecting edge gives
+	// forward_depth + backward_depth + 1, regardless of which side advances.
+	// One byte per vertex records ownership; no per-vertex distances or full
+	// traversal history are needed for this scalar result.
+	vector<uint8_t> visited(snapshot->vertex_ids.size(), 0);
+	vector<idx_t> forward {source}, backward {target}, next;
+	visited[source] = 1;
+	visited[target] = 2;
+	idx_t forward_depth = 0, backward_depth = 0;
+	auto degree = [&](idx_t vertex, bool reverse) {
+		auto &offsets = reverse ? snapshot->incoming_offsets : snapshot->outgoing_offsets;
+		return offsets[vertex + 1] - offsets[vertex];
+	};
+	uint64_t forward_work = degree(source, false), backward_work = degree(target, true);
+	while (!forward.empty() && !backward.empty()) {
+		// Edge volume handles hubs better than frontier cardinality. Counts are
+		// upper bounds when a label projection excludes some of the edges.
+		bool reverse = backward_work < forward_work;
+		auto &frontier = reverse ? backward : forward;
+		auto owner = reverse ? 2 : 1;
+		next.clear();
+		uint64_t next_work = 0;
+		for (auto vertex : frontier) {
+			if (context.IsInterrupted()) {
+				throw InterruptException();
+			}
+			bool found = false;
+			VisitNeighbors(*snapshot, vertex, reverse ? CsrDirection::IN : CsrDirection::OUT,
+			               filter_label, required_label, [&](idx_t neighbor, uint64_t) {
+				               if (!InVertexProjection(vertex_mask, neighbor) || visited[neighbor] == owner) {
+					               return true;
+				               }
+				               if (visited[neighbor]) {
+					               found = true;
+					               return false;
+				               }
+				               visited[neighbor] = owner;
+				               next.push_back(neighbor);
+				               next_work += degree(neighbor, reverse);
 				               return true;
-			               }
-			               if (neighbor == target) {
-				               found = true;
-				               return false;
-			               }
-			               visited[neighbor] = true;
-			               queue.emplace_back(neighbor, depth + 1);
-			               return true;
-		               });
-		if (found) {
-			return NumericCast<int64_t>(depth + 1);
+			               });
+			if (found) {
+				return NumericCast<int64_t>(forward_depth + backward_depth + 1);
+			}
+		}
+		frontier.swap(next);
+		if (reverse) {
+			backward_depth++;
+			backward_work = next_work;
+		} else {
+			forward_depth++;
+			forward_work = next_work;
 		}
 	}
 	return -1;

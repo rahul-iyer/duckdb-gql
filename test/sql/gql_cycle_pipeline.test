@@ -1,0 +1,147 @@
+# name: test/sql/gql_cycle_pipeline.test
+# description: Cycle-first pipelines preserve path bags and shared endpoint constraints
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT 'a' AS ":ID", 'N' AS ":LABEL", 'a' AS "name:string") TO '__TEST_DIR__/cycle_nodes.csv' (HEADER, FORMAT CSV)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a','a','R'), ('a','a','R'), ('a','a','R'), ('a','a','S')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/cycle_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH cycle_pipeline ANY
+
+statement ok
+COPY GRAPH cycle_pipeline FROM (VERTICES '__TEST_DIR__/cycle_nodes.csv', EDGES '__TEST_DIR__/cycle_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cycle_pipeline
+
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/cycle_pipeline_plan.txt'
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(*)
+----
+162
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT contains(content, 'STREAMING_LIMIT') AND contains(content, 'SEMI') FROM read_text('__TEST_DIR__/cycle_pipeline_plan.txt')
+----
+true
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(DISTINCT element_id(a))
+----
+1
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]-(b)-[e2:R]-(c)-[e3:R]-(a)
+RETURN count(*)
+----
+1296
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a:Missing)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+WHERE element_id(a) <> element_id(b)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(a)
+----
+162
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(d)-[e4:R]->(a)
+RETURN count(*)
+----
+0
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(w:N)-[extra:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(*)
+----
+324
+
+statement ok
+BEGIN
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(*)
+----
+162
+
+statement ok
+MATCH (n:N) INSERT (n)-[:R]->(n)
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(d)-[e4:R]->(a)
+RETURN count(*)
+----
+1536
+
+statement ok
+ROLLBACK
+
+statement ok
+DROP GRAPH cycle_pipeline

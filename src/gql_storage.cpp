@@ -51,6 +51,11 @@ void GqlEnsureStorage(Connection &connection) {
 	                     "graph_name VARCHAR NOT NULL UNIQUE, "
 	                     "graph_version UBIGINT NOT NULL DEFAULT 0, "
 	                     "created_at TIMESTAMP NOT NULL DEFAULT current_timestamp)");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_fanout_statistics ("
+	                     "graph_id UBIGINT NOT NULL, graph_version UBIGINT NOT NULL, edge_label VARCHAR NOT NULL, "
+	                     "edge_count UBIGINT NOT NULL, source_count UBIGINT NOT NULL, target_count UBIGINT NOT NULL, "
+	                     "max_out_degree UBIGINT NOT NULL, max_in_degree UBIGINT NOT NULL, "
+	                     "PRIMARY KEY (graph_id, edge_label))");
 	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_storage ("
 	                     "graph_id UBIGINT PRIMARY KEY, "
 	                     "storage_mode VARCHAR NOT NULL, "
@@ -1038,6 +1043,7 @@ static void DropGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		                         to_string(graph_id) + ")");
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_schema_elements WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_schemas WHERE graph_id = " + to_string(graph_id));
+		GqlQuery(connection, "DELETE FROM gql_internal.graph_fanout_statistics WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_storage WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graphs WHERE graph_id = " + to_string(graph_id));
 		connection.Commit();

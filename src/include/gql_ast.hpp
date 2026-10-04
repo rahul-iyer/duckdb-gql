@@ -219,6 +219,7 @@ struct GqlMutation {
 enum class GqlStatementType : uint8_t {
 	CREATE_GRAPH,
 	COPY_GRAPH,
+	ANALYZE_GRAPH,
 	DROP_GRAPH,
 	SESSION_SET_GRAPH,
 	SESSION_RESET_GRAPH,
@@ -313,6 +314,13 @@ public:
 	bool if_not_exists;
 	GqlGraphSchemaDefinition schema;
 	GqlReferencedGraphDefinition referenced;
+};
+
+struct GqlAnalyzeGraphStatement : GqlStatement {
+	GqlAnalyzeGraphStatement(GqlSourceRange source, GqlIdentifier name)
+	    : GqlStatement(GqlStatementType::ANALYZE_GRAPH, std::move(source)), graph_name(std::move(name)) {
+	}
+	GqlIdentifier graph_name;
 };
 
 class GqlCopyGraphStatement final : public GqlStatement {

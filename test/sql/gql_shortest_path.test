@@ -1,0 +1,136 @@
+# name: test/sql/gql_shortest_path.test
+# description: Bidirectional directed shortest paths, projections, and invalidation
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT i::VARCHAR AS "id:ID", CASE WHEN i = 5 THEN 'node' ELSE 'node;selected' END AS ":LABEL" FROM range(1, 7) r(i)) TO '__TEST_DIR__/shortest_nodes.csv' (HEADER, FORMAT CSV)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1','2','route'), ('2','3','route'), ('3','4','route'), ('1','5','route'), ('5','4','route')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/shortest_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH shortest ANY
+
+statement ok
+COPY GRAPH shortest FROM (VERTICES '__TEST_DIR__/shortest_nodes.csv', EDGES '__TEST_DIR__/shortest_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH shortest
+
+# The short path crosses a vertex excluded by the selected projection.
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4)
+YIELD distance RETURN distance
+----
+2
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'SELECTED', 'ROUTE')
+YIELD distance RETURN distance
+----
+3
+
+# Searching incoming edges at the target must not make traversal undirected.
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 4, 1)
+YIELD distance RETURN distance
+----
+-1
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 6)
+YIELD distance RETURN distance
+----
+-1
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 6, 6)
+YIELD distance RETURN distance
+----
+0
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, '', 'missing')
+YIELD distance RETURN distance
+----
+-1
+
+statement error
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 5, 'selected')
+YIELD distance RETURN distance
+----
+projection
+
+statement error
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 999)
+YIELD distance RETURN distance
+----
+does not exist
+
+# A new edge must invalidate the two-direction snapshot.
+statement ok
+MATCH (a:node), (b:node) WHERE a.id = '1' AND b.id = '4' INSERT (a)-[:shortcut]->(b)
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4)
+YIELD distance RETURN distance
+----
+1
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, '', 'route')
+YIELD distance RETURN distance
+----
+2
+
+# Parallel edges, self-loops, and cycles do not change the minimum distance.
+statement ok
+MATCH (a:node), (b:node) WHERE a.id = '1' AND b.id = '4' INSERT (a)-[:route]->(a), (a)-[:route]->(b), (b)-[:route]->(a)
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, '', 'route')
+YIELD distance RETURN distance
+----
+1
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 4, 2, '', 'route')
+YIELD distance RETURN distance
+----
+2
+
+# Repeated MATCH rows are accepted when they identify one distinct pair.
+query I
+MATCH (a:node), (b:node), (c:node) WHERE a.id = '1' AND b.id = '4'
+CALL algo.shortest_path_length('shortest', element_id(a), element_id(b))
+YIELD distance RETURN distance
+----
+1
+
+statement error
+MATCH (a:node), (b:node) WHERE b.id = '4'
+CALL algo.shortest_path_length('shortest', element_id(a), element_id(b))
+YIELD distance RETURN distance
+----
+exactly one source and one target
+
+statement error
+MATCH (a:node), (b:node) WHERE a.id = '999' AND b.id = '4'
+CALL algo.shortest_path_length('shortest', element_id(a), element_id(b))
+YIELD distance RETURN distance
+----
+exactly one source and one target

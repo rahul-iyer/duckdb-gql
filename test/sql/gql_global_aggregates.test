@@ -1,0 +1,184 @@
+# name: test/sql/gql_global_aggregates.test
+# description: Aggregate over the complete bag of undirected MATCH alternatives
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a','a','A',1), ('b','b','A',2), ('c','c','B',NULL), ('d','d','B',10)) v("id:ID", "name:string", "category:string", "score:int")) TO '__TEST_DIR__/global_aggregate_nodes.csv' (HEADER, FORMAT CSV)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('a','b','R',1), ('b','c','R',3), ('c','a','R',8), ('a','b','R',5)) e(":START_ID", ":END_ID", ":TYPE", "weight:int")) TO '__TEST_DIR__/global_aggregate_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH global_aggregates ANY
+
+statement ok
+COPY GRAPH global_aggregates FROM (VERTICES '__TEST_DIR__/global_aggregate_nodes.csv', EDGES '__TEST_DIR__/global_aggregate_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH global_aggregates
+
+# Two orientations are one result bag, not two separately aggregated rows.
+query I
+MATCH (a)-[:R]-(b) RETURN count(*)
+----
+8
+
+query IIIII
+MATCH (a)-[e:R]-(b)
+RETURN count(*), count(a.score), count(DISTINCT a.score), count(DISTINCT element_id(a)), count(DISTINCT e)
+----
+8	6	2	3	4
+
+query RRII
+MATCH (a)-[e:R]-(b) RETURN sum(e.weight), avg(e.weight), min(a.score), max(a.score)
+----
+34.000	4.250	1	2
+
+# The two orientations have different sizes and overlapping DISTINCT values.
+query IRR
+MATCH (a)-[e:R]-(b) WHERE a.name = 'a'
+RETURN count(*), sum(e.weight), avg(e.weight)
+----
+3	14.000	4.667
+
+query IRR
+MATCH (a)-[:R]-(b)
+RETURN count(DISTINCT a.score), sum(DISTINCT a.score), avg(DISTINCT a.score)
+----
+2	3.000	1.500
+
+query TI rowsort
+MATCH (a)-[:R]-(b) RETURN a.category, count(*)
+----
+A	6
+B	2
+
+query II rowsort
+MATCH (a)-[:R]-(b) RETURN element_id(a), count(*)
+----
+1	3
+2	3
+3	2
+
+# Shared scalar inputs must remain valid grouping keys inside expressions.
+query IR rowsort
+MATCH (a)-[:R]-(b) RETURN a.score, a.score + count(*)
+----
+1	4.000
+2	5.000
+NULL	NULL
+
+query IR
+MATCH (a)-[:R]-(b) RETURN count(*) + 1, coalesce(avg(a.score), 0)
+----
+9	1.500
+
+# Empty global aggregates still emit exactly one row with SQL NULL semantics.
+query IIRRR
+MATCH (a)-[e:R]-(b) WHERE a.name = 'absent'
+RETURN count(*), count(DISTINCT a.score), sum(e.weight), avg(e.weight), min(e.weight)
+----
+0	0	NULL	NULL	NULL
+
+query TI
+MATCH (a)-[:R]-(b) WHERE a.name = 'absent' RETURN a.category, count(*)
+----
+
+query I
+MATCH (a)-[:R]-(b) WHERE a.name = 'absent' RETURN count(*) + 1
+----
+1
+
+# Only one orientation contributes rows.
+query I
+MATCH (a)-[:R]-(b) WHERE a.name = 'a' AND b.name = 'c' RETURN count(*)
+----
+1
+
+# NULLs from optional stages are inputs to the global aggregate.
+query III
+MATCH (a)-[:R]-(b) OPTIONAL MATCH (b)-[extra:X]->(c)
+RETURN count(*), count(extra), count(DISTINCT element_id(a))
+----
+8	0	3
+
+# LSQB Q3/Q6 shapes: three and two undirected edges, with trail semantics.
+query I
+MATCH (a)-[:R]-(b)-[:R]-(c)-[:R]-(a) RETURN count(*)
+----
+12
+
+query I
+MATCH (a)-[:R]-(b)-[:R]-(c) WHERE element_id(a) <> element_id(c) RETURN count(*)
+----
+10
+
+# ORDER BY / OFFSET / LIMIT apply after the global grouping operation.
+query TI
+MATCH (a)-[:R]-(b) RETURN a.name, count(*) AS n ORDER BY n DESC, a.name OFFSET 1 LIMIT 1
+----
+b	3
+
+query T
+MATCH (a)-[:R]-(b) RETURN a.name ORDER BY count(*) DESC, a.name
+----
+a
+b
+c
+
+query I
+MATCH (a)-[:R]-(b) RETURN count(*) LIMIT 0
+----
+
+query TI
+MATCH (a)-[:R]-(b) RETURN DISTINCT a.category, count(*) ORDER BY a.category
+----
+A	6
+B	2
+
+# Constant aggregate arguments need row multiplicity even without properties.
+query II
+MATCH (a)-[:R]-(b) RETURN count(DISTINCT 1), sum(1)
+----
+1	8
+
+query II
+MATCH (a)-[:R]-(b) WHERE a.name = 'absent' RETURN count(DISTINCT 1), sum(1)
+----
+0	NULL
+
+# Hidden ordering expressions must not expose an extra column or confuse
+# duplicate default projection names.
+query II
+MATCH (a)-[:R]-(b) RETURN min(a.score), max(a.score) ORDER BY count(*)
+----
+1	2
+
+# Grouped LIMIT/OFFSET on an unreturned aggregate retain only visible fields.
+query T
+MATCH (a)-[:R]-(b) RETURN a.name ORDER BY count(*) DESC, a.name OFFSET 1 LIMIT 1
+----
+b
+
+# Scalar expressions above aggregates can use a selected grouping key.
+query II rowsort
+MATCH (a)-[:R]-(b) RETURN a.score, a.score * 2 + count(*)
+----
+1	5
+2	7
+NULL	NULL
+
+query II rowsort
+MATCH (a)-[:R]-(b) RETURN a.score + 1, (a.score + 1) + count(*)
+----
+2	5
+3	6
+NULL	NULL
+
+query TI rowsort
+MATCH (a)-[:R]-(b) RETURN upper(a.category), count(*)
+----
+A	6
+B	2

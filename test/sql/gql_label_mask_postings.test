@@ -1,0 +1,73 @@
+# name: test/sql/gql_label_mask_postings.test
+# description: Algorithm label masks reuse existing postings and preserve projections
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT i::VARCHAR AS "id:ID", CASE WHEN i = 5 THEN 'node' ELSE 'node;selected' END AS ":LABEL" FROM range(1, 7) r(i)) TO '__TEST_DIR__/postings_nodes.csv' (HEADER, FORMAT CSV)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('1','2','route'), ('2','3','route'), ('3','4','route'), ('1','5','route'), ('5','4','route')) e(":START_ID", ":END_ID", ":TYPE")) TO '__TEST_DIR__/postings_edges.csv' (HEADER, FORMAT CSV)
+
+statement ok
+CREATE GRAPH shortest ANY
+
+statement ok
+COPY GRAPH shortest FROM (VERTICES '__TEST_DIR__/postings_nodes.csv', EDGES '__TEST_DIR__/postings_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH shortest
+
+statement ok
+CALL gql_build_csr('shortest')
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'SELECTED', 'ROUTE')
+YIELD distance RETURN distance
+----
+3
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'node', 'route')
+YIELD distance RETURN distance
+----
+2
+
+statement error
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'missing', 'route')
+YIELD distance RETURN distance
+----
+projection
+
+statement error
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 5, 'selected', 'route')
+YIELD distance RETURN distance
+----
+projection
+
+# An edge-only label is known globally but has no vertex posting range.
+statement error
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'route', 'route')
+YIELD distance RETURN distance
+----
+projection
+
+# Mutation invalidates the derived snapshot; results remain correct after rebuild.
+statement ok
+MATCH (a:node), (b:node) WHERE a.id = '1' AND b.id = '4' INSERT (a)-[:route]->(b)
+
+statement ok
+CALL gql_build_csr('shortest')
+
+query I
+MATCH (seed:node) WHERE seed.id = '1'
+CALL algo.shortest_path_length('shortest', 1, 4, 'selected', 'route')
+YIELD distance RETURN distance
+----
+1
