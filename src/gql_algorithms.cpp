@@ -6,6 +6,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -217,7 +220,7 @@ static void PublishAlgorithmMetrics(ClientContext &context, const shared_ptr<Gql
 enum class CsrDirection : uint8_t { OUT, IN, BOTH };
 
 static const Value *NamedParameter(const TableFunctionBindInput &input, const string &name) {
-	auto entry = input.named_parameters.find(name);
+	auto entry = input.named_parameters.find(Identifier(name));
 	return entry == input.named_parameters.end() ? nullptr : &entry->second;
 }
 
@@ -286,7 +289,7 @@ struct TraversalBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> ReadTraversalBind(TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                                                  vector<string> &names, idx_t vertex_label_position) {
+                                                  vector<Identifier> &names, idx_t vertex_label_position) {
 	if ((input.inputs.size() != 2 && input.inputs.size() != 3) || input.inputs[0].IsNull() ||
 	    input.inputs[1].IsNull()) {
 		throw BinderException("GQL CSR traversal requires a graph name and start vertex ID");
@@ -330,12 +333,12 @@ static unique_ptr<FunctionData> ReadTraversalBind(TableFunctionBindInput &input,
 }
 
 static unique_ptr<FunctionData> TraversalBind(ClientContext &, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ReadTraversalBind(input, return_types, names, 2);
 }
 
 static unique_ptr<FunctionData> SsspBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = TraversalBind(context, input, return_types, names);
 	names = {"vertex_id", "distance", "parent_vertex_id", "edge_id", "settled_order"};
 	return result;
@@ -456,19 +459,19 @@ struct TraversalRow {
 
 struct TraversalOutputWriter {
 	explicit TraversalOutputWriter(DataChunk &output_p) : output(output_p) {
-		vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-		depths = FlatVector::GetData<uint64_t>(output.data[1]);
-		parent_ids = FlatVector::GetData<uint64_t>(output.data[2]);
-		edge_ids = FlatVector::GetData<uint64_t>(output.data[3]);
-		visit_orders = FlatVector::GetData<uint64_t>(output.data[4]);
+		vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+		depths = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+		parent_ids = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+		edge_ids = FlatVector::GetDataMutable<uint64_t>(output.data[3]);
+		visit_orders = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
 	}
 
 	void Write(idx_t row_index, const GqlCsrSnapshot &snapshot, const TraversalRow &row, idx_t visit_order) {
 		vertex_ids[row_index] = snapshot.vertex_ids[row.vertex];
 		depths[row_index] = row.depth;
 		visit_orders[row_index] = visit_order;
-		auto &parent_validity = FlatVector::Validity(output.data[2]);
-		auto &edge_validity = FlatVector::Validity(output.data[3]);
+		auto &parent_validity = FlatVector::ValidityMutable(output.data[2]);
+		auto &edge_validity = FlatVector::ValidityMutable(output.data[3]);
 		if (row.has_parent) {
 			parent_ids[row_index] = snapshot.vertex_ids[row.parent];
 			edge_ids[row_index] = row.edge_id;
@@ -493,7 +496,7 @@ struct WeightedSsspBindData : TraversalBindData {
 };
 
 static unique_ptr<FunctionData> WeightedSsspBind(ClientContext &, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 3 || input.inputs[2].IsNull() || input.inputs[2].GetValue<string>().empty()) {
 		throw BinderException("GQL weighted SSSP requires a non-empty edge weight property");
 	}
@@ -679,7 +682,7 @@ static void WeightedSsspFunction(ClientContext &context, TableFunctionInput &inp
 			}
 		});
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct BfsState : GlobalTableFunctionState {
@@ -749,7 +752,7 @@ static void BfsFunction(ClientContext &context, TableFunctionInput &input, DataC
 			               return true;
 		               });
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct DfsFrame {
@@ -876,7 +879,7 @@ static void DfsFunction(ClientContext &context, TableFunctionInput &input, DataC
 			state.finished = true;
 		}
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct PageRankBindData : TableFunctionData {
@@ -889,7 +892,7 @@ struct PageRankBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> PageRankBind(ClientContext &, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if ((input.inputs.size() != 1 && input.inputs.size() != 2) || input.inputs[0].IsNull()) {
 		throw BinderException("GQL PageRank requires a graph name");
 	}
@@ -1187,10 +1190,10 @@ static void PageRankFunction(ClientContext &context, TableFunctionInput &input, 
 		ComputePageRank(context, data, state);
 	}
 	auto output_start = std::chrono::steady_clock::now();
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto ranks = FlatVector::GetData<double>(output.data[1]);
-	auto iterations = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto converged = FlatVector::GetData<bool>(output.data[3]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto ranks = FlatVector::GetDataMutable<double>(output.data[1]);
+	auto iterations = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto converged = FlatVector::GetDataMutable<bool>(output.data[3]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.ranks.size()) {
 		auto vertex = state.offset++;
@@ -1203,7 +1206,7 @@ static void PageRankFunction(ClientContext &context, TableFunctionInput &input, 
 		converged[count] = state.converged;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	state.metrics->output_seconds += ElapsedSeconds(output_start);
 	state.metrics->total_seconds = state.metrics->csr_seconds + state.metrics->initialization_seconds +
 	                               state.metrics->iteration_seconds + state.metrics->output_seconds;
@@ -1231,7 +1234,7 @@ static unique_ptr<GraphAlgorithmBindData> ReadGraphAlgorithmBind(const TableFunc
 }
 
 static unique_ptr<FunctionData> ComponentBind(const string &algorithm_name, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = ReadGraphAlgorithmBind(input, algorithm_name);
 	names = {"vertex_id", "component_id", "component_size"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
@@ -1239,12 +1242,12 @@ static unique_ptr<FunctionData> ComponentBind(const string &algorithm_name, Tabl
 }
 
 static unique_ptr<FunctionData> WccBind(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ComponentBind("WCC", input, return_types, names);
 }
 
 static unique_ptr<FunctionData> SccBind(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return ComponentBind("SCC", input, return_types, names);
 }
 
@@ -1432,9 +1435,9 @@ static void ComputeScc(ClientContext &context, const GraphAlgorithmBindData &dat
 }
 
 static void WriteComponentRows(ComponentState &state, DataChunk &output) {
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto component_ids = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto component_sizes = FlatVector::GetData<uint64_t>(output.data[2]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto component_ids = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto component_sizes = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.component_ids.size()) {
 		auto vertex = state.offset++;
@@ -1446,7 +1449,7 @@ static void WriteComponentRows(ComponentState &state, DataChunk &output) {
 		component_sizes[count] = state.component_sizes[vertex];
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void WccFunction(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
@@ -1468,7 +1471,7 @@ static void SccFunction(ClientContext &context, TableFunctionInput &input, DataC
 }
 
 static unique_ptr<FunctionData> TriangleCountBind(ClientContext &, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = ReadGraphAlgorithmBind(input, "triangle count");
 	names = {"vertex_id", "triangle_count", "degree", "local_clustering_coefficient", "global_triangle_count"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::DOUBLE,
@@ -1589,11 +1592,11 @@ static void TriangleCountFunction(ClientContext &context, TableFunctionInput &in
 	if (!state.initialized) {
 		ComputeTriangleCounts(context, data, state);
 	}
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto triangle_counts = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto degrees = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto coefficients = FlatVector::GetData<double>(output.data[3]);
-	auto global_counts = FlatVector::GetData<uint64_t>(output.data[4]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto triangle_counts = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto degrees = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto coefficients = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto global_counts = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.triangle_counts.size()) {
 		auto vertex = state.offset++;
@@ -1610,11 +1613,11 @@ static void TriangleCountFunction(ClientContext &context, TableFunctionInput &in
 		global_counts[count] = state.global_triangle_count;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static unique_ptr<FunctionData> LccBind(ClientContext &, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = ReadGraphAlgorithmBind(input, "local clustering coefficient");
 	names = {"vertex_id", "degree", "directed_neighbor_edge_count", "local_clustering_coefficient"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::DOUBLE};
@@ -1735,10 +1738,10 @@ static void LccFunction(ClientContext &context, TableFunctionInput &input, DataC
 	if (!state.initialized) {
 		ComputeLcc(context, data, state);
 	}
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto degrees = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto edge_counts = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto coefficients = FlatVector::GetData<double>(output.data[3]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto degrees = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto edge_counts = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto coefficients = FlatVector::GetDataMutable<double>(output.data[3]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.degrees.size()) {
 		auto vertex = state.offset++;
@@ -1754,7 +1757,7 @@ static void LccFunction(ClientContext &context, TableFunctionInput &input, DataC
 		                                (static_cast<double>(state.degrees[vertex]) * (state.degrees[vertex] - 1));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct LouvainBindData : GraphAlgorithmBindData {
@@ -1765,7 +1768,7 @@ struct LouvainBindData : GraphAlgorithmBindData {
 };
 
 static unique_ptr<FunctionData> LouvainBind(ClientContext &, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto projection = ReadGraphAlgorithmBind(input, "Louvain");
 	auto result = make_uniq<LouvainBindData>();
 	result->graph_name = std::move(projection->graph_name);
@@ -2173,13 +2176,13 @@ static void LouvainFunction(ClientContext &context, TableFunctionInput &input, D
 	if (!state.initialized) {
 		ComputeLouvain(context, data, state);
 	}
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto community_ids = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto community_sizes = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto modularities = FlatVector::GetData<double>(output.data[3]);
-	auto levels = FlatVector::GetData<uint64_t>(output.data[4]);
-	auto iterations = FlatVector::GetData<uint64_t>(output.data[5]);
-	auto converged = FlatVector::GetData<bool>(output.data[6]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto community_ids = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto community_sizes = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto modularities = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto levels = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
+	auto iterations = FlatVector::GetDataMutable<uint64_t>(output.data[5]);
+	auto converged = FlatVector::GetDataMutable<bool>(output.data[6]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.projected_to_snapshot.size()) {
 		auto vertex = state.offset++;
@@ -2193,11 +2196,11 @@ static void LouvainFunction(ClientContext &context, TableFunctionInput &input, D
 		converged[count] = state.converged;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static unique_ptr<FunctionData> DegreeBind(ClientContext &, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = ReadGraphAlgorithmBind(input, "degree");
 	names = {"vertex_id", "out_degree", "in_degree", "total_degree"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
@@ -2263,10 +2266,10 @@ static void DegreeFunction(ClientContext &context, TableFunctionInput &input, Da
 	if (!state.initialized) {
 		ComputeDegrees(context, data, state);
 	}
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto out_degrees = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto in_degrees = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto total_degrees = FlatVector::GetData<uint64_t>(output.data[3]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto out_degrees = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto in_degrees = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto total_degrees = FlatVector::GetDataMutable<uint64_t>(output.data[3]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.out_degrees.size()) {
 		auto vertex = state.offset++;
@@ -2279,7 +2282,7 @@ static void DegreeFunction(ClientContext &context, TableFunctionInput &input, Da
 		total_degrees[count] = state.out_degrees[vertex] + state.in_degrees[vertex];
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct ClosenessBindData : TableFunctionData {
@@ -2290,7 +2293,7 @@ struct ClosenessBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> ClosenessBind(ClientContext &, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if ((input.inputs.size() != 1 && input.inputs.size() != 2) || input.inputs[0].IsNull()) {
 		throw BinderException("GQL closeness requires a graph name");
 	}
@@ -2396,10 +2399,10 @@ static void ClosenessFunction(ClientContext &context, TableFunctionInput &input,
 	if (!state.initialized) {
 		ComputeCloseness(context, data, state);
 	}
-	auto vertex_ids = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto reachable_counts = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto distance_sums = FlatVector::GetData<uint64_t>(output.data[2]);
-	auto scores = FlatVector::GetData<double>(output.data[3]);
+	auto vertex_ids = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto reachable_counts = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto distance_sums = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto scores = FlatVector::GetDataMutable<double>(output.data[3]);
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && state.offset < state.scores.size()) {
 		auto vertex = state.offset++;
@@ -2412,7 +2415,7 @@ static void ClosenessFunction(ClientContext &context, TableFunctionInput &input,
 		scores[count] = state.scores[vertex];
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // Generic blocking procedure node used by MATCH -> CALL pipelines. DuckDB
@@ -2516,28 +2519,27 @@ struct AlgorithmYieldColumn {
 
 static unique_ptr<ParsedExpression> AlgorithmColumn(const string &table, const string &column,
                                                     const string &alias = string()) {
-	auto result = make_uniq<ColumnRefExpression>(column, table);
+	auto result = make_uniq<ColumnRefExpression>(Identifier(column), Identifier(table));
 	if (!alias.empty()) {
-		result->SetAlias(alias);
+		result->SetAlias(Identifier(alias));
 	}
 	return std::move(result);
 }
 
 static unique_ptr<TableRef> AlgorithmElementTable(const GqlElementTableBinding &table, const string &alias) {
 	if (!table.relation_sql.empty()) {
-		Parser parser;
+		auto parser = Parser::GetBuiltinParser();
 		parser.ParseQuery(table.relation_sql);
 		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 			throw InternalException("Invalid referenced graph union relation");
 		}
 		auto statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
-		return make_uniq<SubqueryRef>(std::move(statement), alias);
+		return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
 	}
 	auto result = make_uniq<BaseTableRef>();
-	result->catalog_name = table.catalog_name;
-	result->schema_name = table.schema_name;
-	result->table_name = table.table_name;
-	result->alias = alias;
+	result->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+	                         Identifier(table.table_name));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
@@ -2635,18 +2637,18 @@ static unique_ptr<TableRef> AlgorithmResultBindReplace(ClientContext &context, T
 		                      procedure_name, yield_name);
 	}
 
-	vector<unique_ptr<ParsedExpression>> arguments;
+	vector<FunctionArgument> arguments;
 	for (idx_t index = 0; index < argument_values.size(); index++) {
 		auto type = static_cast<GqlLiteralType>(argument_types[index]);
-		auto argument = make_uniq<ConstantExpression>(AlgorithmLiteralValue(type, argument_values[index]));
-		if (!argument_names[index].empty()) {
-			argument->SetAlias(argument_names[index]);
-		}
-		arguments.push_back(std::move(argument));
+		auto argument = ConstantExpression::FromValue(AlgorithmLiteralValue(type, argument_values[index]));
+		// DuckDB's table-function binder reads named arguments from expression aliases.
+		argument->SetAlias(Identifier(argument_names[index]));
+		arguments.emplace_back(Identifier(argument_names[index]), std::move(argument));
 	}
 	auto algorithm = make_uniq<TableFunctionRef>();
-	algorithm->function = make_uniq<FunctionExpression>("system", "algo", definition->name, std::move(arguments));
-	algorithm->alias = "__gql_algo";
+	algorithm->function = make_uniq<FunctionExpression>(QualifiedName("system", "algo", Identifier(definition->name)),
+	                                                    std::move(arguments));
+	algorithm->alias = Identifier("__gql_algo");
 	unique_ptr<TableRef> from = std::move(algorithm);
 	if (needs_vertex_join) {
 		AppendAlgorithmJoin(from, AlgorithmElementTable(graph.vertex, "__gql_vertex"), JoinType::INNER, "__gql_algo",
@@ -2678,7 +2680,7 @@ static unique_ptr<TableRef> AlgorithmResultBindReplace(ClientContext &context, T
 }
 
 static unique_ptr<FunctionData> AlgorithmCallBind(ClientContext &, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 4 || input.inputs[1].IsNull() || input.inputs[2].IsNull() || input.inputs[3].IsNull()) {
 		throw BinderException("Invalid GQL algorithm CALL node");
 	}
@@ -2735,7 +2737,7 @@ static unique_ptr<FunctionData> AlgorithmCallBind(ClientContext &, TableFunction
 		result->configuration.push_back(std::move(literal));
 	}
 	for (const auto &output : definition->outputs) {
-		names.push_back(output.name);
+		names.emplace_back(output.name);
 		// Algorithm ordinals/counts are non-negative and their hot writers use
 		// uint64_t arrays. Keep that physical representation while the GQL binder
 		// continues to expose the values as semantic INTEGERs.
@@ -2762,7 +2764,7 @@ static OperatorResultType AlgorithmCallInput(ExecutionContext &, TableFunctionIn
                                              DataChunk &output) {
 	auto &data = input.bind_data->Cast<AlgorithmCallBindData>();
 	auto &state = input.global_state->Cast<AlgorithmCallGlobalState>();
-	output.SetCardinality(0);
+	output.SetChildCardinality(0);
 	if (data.definition->input_mode == GqlProcedureInputMode::NONE) {
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
@@ -2843,8 +2845,8 @@ static int64_t ComputeShortestPathLength(ClientContext &context, const Algorithm
 				throw InterruptException();
 			}
 			bool found = false;
-			VisitNeighbors(*snapshot, vertex, reverse ? CsrDirection::IN : CsrDirection::OUT,
-			               filter_label, required_label, [&](idx_t neighbor, uint64_t) {
+			VisitNeighbors(*snapshot, vertex, reverse ? CsrDirection::IN : CsrDirection::OUT, filter_label,
+			               required_label, [&](idx_t neighbor, uint64_t) {
 				               if (!InVertexProjection(vertex_mask, neighbor) || visited[neighbor] == owner) {
 					               return true;
 				               }
@@ -2969,7 +2971,7 @@ static void PipelineDfsFunction(ClientContext &context, PipelineDfsState &state,
 			break;
 		}
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void InitializeAlgorithmCall(ExecutionContext &context, const AlgorithmCallBindData &data,
@@ -3070,7 +3072,7 @@ static OperatorFinalizeResultType AlgorithmCallFinalize(ExecutionContext &contex
 		if (state.shortest_path_done) {
 			return OperatorFinalizeResultType::FINISHED;
 		}
-		output.SetCardinality(1);
+		output.SetChildCardinality(1);
 		output.SetValue(0, 0, Value::BIGINT(ComputeShortestPathLength(context.client, data, state)));
 		state.shortest_path_done = true;
 	} else if (data.definition->name == "bfs" || data.definition->name == "sssp") {
@@ -3126,12 +3128,14 @@ TableFunction GqlAlgorithmResultFunction() {
 }
 
 static void AddTraversalNamedParameters(TableFunction &function) {
-	function.varargs = LogicalType::VARCHAR;
-	function.named_parameters["direction"] = LogicalType::VARCHAR;
-	function.named_parameters["max_depth"] = LogicalType::BIGINT;
-	function.named_parameters["edge_label"] = LogicalType::VARCHAR;
-	function.named_parameters["vertex_label"] = LogicalType::VARCHAR;
-	function.named_parameters["target_vertex_id"] = LogicalType::BIGINT;
+	function.GetSignature().AddArgs("args", LogicalType::VARCHAR);
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("direction", LogicalType::VARCHAR);
+		options.Add("max_depth", LogicalType::BIGINT);
+		options.Add("edge_label", LogicalType::VARCHAR);
+		options.Add("vertex_label", LogicalType::VARCHAR);
+		options.Add("target_vertex_id", LogicalType::BIGINT);
+	});
 }
 
 TableFunction GqlBfsFunction() {
@@ -3163,10 +3167,12 @@ TableFunction GqlWeightedSsspFunction() {
 	                       WeightedSsspFunction);
 	function.bind = WeightedSsspBind;
 	function.init_global = WeightedSsspInit;
-	function.named_parameters["direction"] = LogicalType::VARCHAR;
-	function.named_parameters["edge_label"] = LogicalType::VARCHAR;
-	function.named_parameters["vertex_label"] = LogicalType::VARCHAR;
-	function.named_parameters["target_vertex_id"] = LogicalType::BIGINT;
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("direction", LogicalType::VARCHAR);
+		options.Add("edge_label", LogicalType::VARCHAR);
+		options.Add("vertex_label", LogicalType::VARCHAR);
+		options.Add("target_vertex_id", LogicalType::BIGINT);
+	});
 	return function;
 }
 
@@ -3174,19 +3180,23 @@ TableFunction GqlPageRankFunction() {
 	TableFunction function("pagerank", {LogicalType::VARCHAR}, PageRankFunction);
 	function.bind = PageRankBind;
 	function.init_global = PageRankInit;
-	function.named_parameters["damping"] = LogicalType::DOUBLE;
-	function.named_parameters["max_iterations"] = LogicalType::BIGINT;
-	function.named_parameters["tolerance"] = LogicalType::DOUBLE;
-	function.named_parameters["edge_label"] = LogicalType::VARCHAR;
-	function.named_parameters["vertex_label"] = LogicalType::VARCHAR;
-	function.varargs = LogicalType::VARCHAR;
+	function.GetSignature().AddArgs("args", LogicalType::VARCHAR);
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("damping", LogicalType::DOUBLE);
+		options.Add("max_iterations", LogicalType::BIGINT);
+		options.Add("tolerance", LogicalType::DOUBLE);
+		options.Add("edge_label", LogicalType::VARCHAR);
+		options.Add("vertex_label", LogicalType::VARCHAR);
+	});
 	return function;
 }
 
 static void AddProjectionParameters(TableFunction &function) {
-	function.varargs = LogicalType::VARCHAR;
-	function.named_parameters["edge_label"] = LogicalType::VARCHAR;
-	function.named_parameters["vertex_label"] = LogicalType::VARCHAR;
+	function.GetSignature().AddArgs("args", LogicalType::VARCHAR);
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("edge_label", LogicalType::VARCHAR);
+		options.Add("vertex_label", LogicalType::VARCHAR);
+	});
 }
 
 TableFunction GqlWccFunction() {
@@ -3225,11 +3235,13 @@ TableFunction GqlLouvainFunction() {
 	TableFunction function("louvain", {LogicalType::VARCHAR}, LouvainFunction);
 	function.bind = LouvainBind;
 	function.init_global = LouvainInit;
-	function.named_parameters["resolution"] = LogicalType::DOUBLE;
-	function.named_parameters["max_iterations"] = LogicalType::BIGINT;
-	function.named_parameters["max_levels"] = LogicalType::BIGINT;
-	function.named_parameters["tolerance"] = LogicalType::DOUBLE;
 	AddProjectionParameters(function);
+	function.GetSignature().ExtendTypedKwargs([](TypedKwargs &options) {
+		options.Add("resolution", LogicalType::DOUBLE);
+		options.Add("max_iterations", LogicalType::BIGINT);
+		options.Add("max_levels", LogicalType::BIGINT);
+		options.Add("tolerance", LogicalType::DOUBLE);
+	});
 	return function;
 }
 
@@ -3245,8 +3257,9 @@ TableFunction GqlClosenessFunction() {
 	TableFunction function("closeness", {LogicalType::VARCHAR}, ClosenessFunction);
 	function.bind = ClosenessBind;
 	function.init_global = ClosenessInit;
-	function.named_parameters["direction"] = LogicalType::VARCHAR;
 	AddProjectionParameters(function);
+	function.GetSignature().ExtendTypedKwargs(
+	    [](TypedKwargs &options) { options.Add("direction", LogicalType::VARCHAR); });
 	return function;
 }
 
@@ -3261,17 +3274,16 @@ struct AlgorithmStatsState : GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> AlgorithmStatsBind(ClientContext &, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<AlgorithmStatsBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
 	result->algorithm = StringUtil::Lower(input.inputs[1].GetValue<string>());
 	if (result->graph_name.empty() || result->algorithm.empty()) {
 		throw BinderException("GQL algorithm stats requires a graph name and algorithm name");
 	}
-	names = {"graph_name",             "algorithm",         "csr_built",       "csr_seconds",
-	         "initialization_seconds", "iteration_seconds", "output_seconds",  "total_seconds",
-	         "worker_count",           "vertex_count",      "edge_count",      "iterations",
-	         "converged"};
+	names = {"graph_name",        "algorithm",      "csr_built",     "csr_seconds",  "initialization_seconds",
+	         "iteration_seconds", "output_seconds", "total_seconds", "worker_count", "vertex_count",
+	         "edge_count",        "iterations",     "converged"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN, LogicalType::DOUBLE,
 	                LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,
 	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
@@ -3279,8 +3291,7 @@ static unique_ptr<FunctionData> AlgorithmStatsBind(ClientContext &, TableFunctio
 	return std::move(result);
 }
 
-static unique_ptr<GlobalTableFunctionState> AlgorithmStatsInit(ClientContext &context,
-                                                               TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> AlgorithmStatsInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<AlgorithmStatsBindData>();
 	auto result = make_uniq<AlgorithmStatsState>();
 	auto metrics_state =
@@ -3298,7 +3309,7 @@ static void AlgorithmStatsFunction(ClientContext &, TableFunctionInput &input, D
 		return;
 	}
 	auto &metrics = *state.metrics;
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(metrics.graph_name));
 	output.SetValue(1, 0, Value(metrics.algorithm));
 	output.SetValue(2, 0, Value::BOOLEAN(metrics.csr_built));
@@ -3316,8 +3327,7 @@ static void AlgorithmStatsFunction(ClientContext &, TableFunctionInput &input, D
 }
 
 TableFunction GqlAlgorithmStatsFunction() {
-	TableFunction function("gql_algorithm_stats", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                       AlgorithmStatsFunction);
+	TableFunction function("gql_algorithm_stats", {LogicalType::VARCHAR, LogicalType::VARCHAR}, AlgorithmStatsFunction);
 	function.bind = AlgorithmStatsBind;
 	function.init_global = AlgorithmStatsInit;
 	return function;

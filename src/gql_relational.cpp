@@ -48,8 +48,9 @@ static void TrailUnique(DataChunk &args, ExpressionState &, Vector &result) {
 		values[col] = UnifiedVectorFormat::GetData<uint64_t>(formats[col]);
 	}
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	FlatVector::Validity(result).SetAllValid(args.size());
-	auto output = FlatVector::GetData<bool>(result);
+	FlatVector::SetSize(result, args.size());
+	FlatVector::ValidityMutable(result).SetAllValid(args.size());
+	auto output = FlatVector::GetDataMutable<bool>(result);
 	bool all_valid = true;
 	for (const auto &format : formats) {
 		all_valid = all_valid && format.validity.AllValid();
@@ -85,8 +86,8 @@ static void TrailUnique(DataChunk &args, ExpressionState &, Vector &result) {
 ScalarFunction GqlTrailUniqueFunction() {
 	ScalarFunction function("gql_trail_unique", vector<LogicalType>(3, LogicalType::UBIGINT), LogicalType::BOOLEAN,
 	                        TrailUnique);
-	function.varargs = LogicalType::UBIGINT;
-	function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	function.GetSignature().AddArgs("args", LogicalType::UBIGINT);
+	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return function;
 }
 
@@ -603,11 +604,11 @@ static RecursiveMatchInput ReadRecursiveMatchInput(TableFunctionBindInput &input
 }
 
 static unique_ptr<ParsedExpression> Column(const string &table, const string &column) {
-	return make_uniq<ColumnRefExpression>(column, table);
+	return make_uniq<ColumnRefExpression>(Identifier(column), Identifier(table));
 }
 
 static unique_ptr<ParsedExpression> Constant(Value value) {
-	return make_uniq<ConstantExpression>(std::move(value));
+	return ConstantExpression::FromValue(std::move(value));
 }
 
 static unique_ptr<ParsedExpression> Compare(ExpressionType type, unique_ptr<ParsedExpression> left,
@@ -635,31 +636,30 @@ static unique_ptr<ParsedExpression> And(vector<unique_ptr<ParsedExpression>> exp
 
 static unique_ptr<TableRef> NamedTable(const string &name, const string &alias) {
 	auto result = make_uniq<BaseTableRef>();
-	result->table_name = name;
-	result->alias = alias;
+	result->SetTable(Identifier(name));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
 static unique_ptr<TableRef> ElementTable(const GqlElementTableBinding &table, const string &alias) {
 	if (!table.relation_sql.empty()) {
-		Parser parser;
+		auto parser = Parser::GetBuiltinParser();
 		parser.ParseQuery(table.relation_sql);
 		if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 			throw InternalException("Invalid referenced graph union relation");
 		}
 		auto statement = unique_ptr_cast<SQLStatement, SelectStatement>(std::move(parser.statements[0]));
-		return make_uniq<SubqueryRef>(std::move(statement), alias);
+		return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
 	}
 	auto result = make_uniq<BaseTableRef>();
-	result->catalog_name = table.catalog_name;
-	result->schema_name = table.schema_name;
-	result->table_name = table.table_name;
-	result->alias = alias;
+	result->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+	                         Identifier(table.table_name));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
 static unique_ptr<ParsedExpression> Aliased(unique_ptr<ParsedExpression> expression, const string &alias) {
-	expression->SetAlias(alias);
+	expression->SetAlias(Identifier(alias));
 	return expression;
 }
 
@@ -790,7 +790,7 @@ static idx_t ExpressionEnd(const GqlExpressionProgram &program, idx_t node) {
 }
 
 static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_ptr<ParsedExpression>> arguments) {
-	return make_uniq<FunctionExpression>(name, std::move(arguments));
+	return make_uniq<FunctionExpression>(Identifier(name), std::move(arguments));
 }
 
 static unique_ptr<ParsedExpression> ElementHasLabel(const string &table_alias, const string &label_column,
@@ -931,8 +931,8 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			CaseCheck missing_path;
 			missing_path.when_expr = std::move(missing);
 			missing_path.then_expr = Constant(Value());
-			result->case_checks.push_back(std::move(missing_path));
-			result->else_expr = Constant(Value::BIGINT(NumericCast<int64_t>(edge_count)));
+			result->CaseChecksMutable().push_back(std::move(missing_path));
+			result->ElseMutable() = Constant(Value::BIGINT(NumericCast<int64_t>(edge_count)));
 			return std::move(result);
 		}
 		auto lowered_name = name == "count" && program.child_counts[node] == 0 ? "count_star" : name;
@@ -951,8 +951,8 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		if (name == "coalesce") {
 			return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(arguments));
 		}
-		auto result = make_uniq<FunctionExpression>(lowered_name, std::move(arguments));
-		result->distinct = program.distinct[node];
+		auto result = make_uniq<FunctionExpression>(Identifier(lowered_name), std::move(arguments));
+		result->DistinctMutable() = program.distinct[node];
 		return std::move(result);
 	}
 	case GqlExpressionType::UNARY: {
@@ -964,7 +964,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		vector<unique_ptr<ParsedExpression>> children;
 		children.push_back(std::move(input));
 		auto result = make_uniq<FunctionExpression>(unary == GqlUnaryOperator::PLUS ? "+" : "-", std::move(children));
-		result->is_operator = true;
+		result->IsOperatorMutable() = true;
 		return std::move(result);
 	}
 	case GqlExpressionType::IS_NULL: {
@@ -1021,8 +1021,8 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			vector<unique_ptr<ParsedExpression>> children;
 			children.push_back(std::move(left));
 			children.push_back(std::move(right));
-			auto result = make_uniq<FunctionExpression>(ArithmeticName(binary), std::move(children));
-			result->is_operator = true;
+			auto result = make_uniq<FunctionExpression>(Identifier(ArithmeticName(binary)), std::move(children));
+			result->IsOperatorMutable() = true;
 			return std::move(result);
 		}
 		if (binary == GqlBinaryOperator::CONCATENATE) {
@@ -1030,7 +1030,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			children.push_back(std::move(left));
 			children.push_back(std::move(right));
 			auto result = make_uniq<FunctionExpression>("||", std::move(children));
-			result->is_operator = true;
+			result->IsOperatorMutable() = true;
 			return std::move(result);
 		}
 		return Compare(ComparisonType(binary), std::move(left), std::move(right));
@@ -1052,7 +1052,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 }
 
 unique_ptr<ParsedExpression> GqlLowerProjectedExpression(const GqlBoundExpression &expression,
-                                                       const vector<string> &columns, const string &table_alias) {
+                                                         const vector<string> &columns, const string &table_alias) {
 	vector<RelationalIdentityAccess> identities;
 	for (const auto &column : columns) {
 		identities.push_back({table_alias, column});
@@ -1086,7 +1086,7 @@ static bool AllowsDuplicateElimination(const GqlExpressionProgram &program) {
 
 static void AppendStructField(vector<unique_ptr<ParsedExpression>> &fields, unique_ptr<ParsedExpression> expression,
                               const string &name) {
-	expression->SetAlias(name);
+	expression->SetAlias(Identifier(name));
 	fields.push_back(std::move(expression));
 }
 
@@ -1102,7 +1102,7 @@ static unique_ptr<TableRef> CsrExpansionTable(const string &graph_name, const st
 	arguments.push_back(Function("struct_pack", std::move(fields)));
 	auto result = make_uniq<TableFunctionRef>();
 	result->function = make_uniq<FunctionExpression>("gql_csr_expand", std::move(arguments));
-	result->alias = edge_alias;
+	result->alias = Identifier(edge_alias);
 	return std::move(result);
 }
 
@@ -1124,10 +1124,11 @@ static unique_ptr<TableRef> ElementFetchTable(const string &graph_name, const st
 		arguments.push_back(std::move(element_id));
 	}
 	auto result = make_uniq<TableFunctionRef>();
-	result->function = make_uniq<FunctionExpression>(!columns.empty() ? "gql_vertex_fetch_projected" :
-	                                               element_kind == "vertex" ? "gql_vertex_fetch" : "gql_edge_fetch",
-	                                               std::move(arguments));
-	result->alias = alias;
+	result->function = make_uniq<FunctionExpression>(!columns.empty()           ? "gql_vertex_fetch_projected"
+	                                                 : element_kind == "vertex" ? "gql_vertex_fetch"
+	                                                                            : "gql_edge_fetch",
+	                                                 std::move(arguments));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
@@ -1165,19 +1166,19 @@ static unique_ptr<TableRef> CsrPathExpansionTable(const string &graph_name, cons
 	arguments.push_back(Function("struct_pack", std::move(fields)));
 	auto result = make_uniq<TableFunctionRef>();
 	result->function = make_uniq<FunctionExpression>("gql_csr_path_expand", std::move(arguments));
-	result->alias = edge_alias;
+	result->alias = Identifier(edge_alias);
 	if (path.distinct_endpoints) {
-		result->alias = edge_alias + "_trails";
+		result->alias = Identifier(edge_alias + "_trails");
 		auto select = make_uniq<SelectNode>();
 		select->select_list.push_back(Aliased(Constant(Value::UBIGINT(0)), "__gql_edge_id"));
 		for (const auto &column : {"__gql_source_id", "__gql_target_id", "__gql_type"}) {
-			select->select_list.push_back(Aliased(Column(result->alias, column), column));
+			select->select_list.push_back(Aliased(Column(result->alias.GetIdentifierName(), column), column));
 		}
 		select->modifiers.push_back(make_uniq<DistinctModifier>());
 		select->from_table = std::move(result);
 		auto statement = make_uniq<SelectStatement>();
 		statement->node = std::move(select);
-		return make_uniq<SubqueryRef>(std::move(statement), edge_alias);
+		return make_uniq<SubqueryRef>(std::move(statement), Identifier(edge_alias));
 	}
 	return std::move(result);
 }
@@ -1241,7 +1242,7 @@ static unique_ptr<TableRef> RelationalPathExpansionTable(const GqlTableGraphBind
 	}
 	auto statement = make_uniq<SelectStatement>();
 	statement->node = std::move(root);
-	return make_uniq<SubqueryRef>(std::move(statement), edge_alias);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(edge_alias));
 }
 
 static unique_ptr<TableRef> CsrVerticesTable(const string &graph_name, const string &label, const string &alias) {
@@ -1250,7 +1251,7 @@ static unique_ptr<TableRef> CsrVerticesTable(const string &graph_name, const str
 	arguments.push_back(Constant(Value(label)));
 	auto result = make_uniq<TableFunctionRef>();
 	result->function = make_uniq<FunctionExpression>("gql_csr_vertices", std::move(arguments));
-	result->alias = alias;
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
@@ -1267,17 +1268,17 @@ static unique_ptr<TableRef> PropertyIndexTable(const GqlElementTableBinding &tab
 	candidate_statement->node = std::move(candidates);
 
 	auto cte = make_uniq<CommonTableExpressionInfo>();
-	cte->query = std::move(candidate_statement);
+	cte->query_node = std::move(candidate_statement->node);
 	cte->materialized = CTEMaterialize::CTE_MATERIALIZE_ALWAYS;
 	auto cte_name = "gql_property_index_candidates_" + to_string(stage_index) + "_" + to_string(binding_index);
 
 	auto materialized = make_uniq<SelectNode>();
-	materialized->cte_map.map[cte_name] = std::move(cte);
+	materialized->cte_map.map[Identifier(cte_name)] = std::move(cte);
 	materialized->from_table = NamedTable(cte_name, cte_name);
 	materialized->select_list.push_back(make_uniq<StarExpression>());
 	auto statement = make_uniq<SelectStatement>();
 	statement->node = std::move(materialized);
-	return make_uniq<SubqueryRef>(std::move(statement), alias);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
 }
 
 static unique_ptr<ParsedExpression> GraphElementValueAt(const GqlExpressionProgram &program, idx_t node,
@@ -1347,8 +1348,8 @@ static unique_ptr<ParsedExpression> GraphElementValueAt(const GqlExpressionProgr
 	missing.when_expr =
 	    make_uniq<OperatorExpression>(ExpressionType::OPERATOR_IS_NULL, Column(alias, table.key_column));
 	missing.then_expr = Constant(Value());
-	result->case_checks.push_back(std::move(missing));
-	result->else_expr = std::move(packed);
+	result->CaseChecksMutable().push_back(std::move(missing));
+	result->ElseMutable() = std::move(packed);
 	return std::move(result);
 }
 
@@ -1414,8 +1415,8 @@ static unique_ptr<ParsedExpression> GraphPathValue(const GqlExpressionProgram &p
 	CaseCheck missing_path;
 	missing_path.when_expr = std::move(missing);
 	missing_path.then_expr = Constant(Value());
-	result->case_checks.push_back(std::move(missing_path));
-	result->else_expr = std::move(packed);
+	result->CaseChecksMutable().push_back(std::move(missing_path));
+	result->ElseMutable() = std::move(packed);
 	return std::move(result);
 }
 
@@ -1441,10 +1442,10 @@ static void AppendProjections(SelectNode &select, const vector<GqlExpressionProg
 			expression = LowerExpression(projections[index], property_aliases, identities, desired_type);
 		}
 		if (has_aggregate && !ContainsAggregate(projections[index])) {
-			grouping_set.insert(select.groups.group_expressions.size());
+			grouping_set.insert(ProjectionIndex(select.groups.group_expressions.size()));
 			select.groups.group_expressions.push_back(expression->Copy());
 		}
-		expression->SetAlias(projection_names[index]);
+		expression->SetAlias(Identifier(projection_names[index]));
 		select.select_list.push_back(std::move(expression));
 	}
 	if (!grouping_set.empty()) {
@@ -1474,7 +1475,8 @@ static void AppendResultModifiers(SelectNode &select, const vector<GqlExpression
 		auto order = make_uniq<OrderModifier>();
 		for (idx_t index = 0; index < modifiers.order_indices.size(); index++) {
 			auto projection_index = modifiers.order_indices[index];
-			unique_ptr<ParsedExpression> column = make_uniq<ColumnRefExpression>(projection_names[projection_index]);
+			unique_ptr<ParsedExpression> column =
+			    make_uniq<ColumnRefExpression>(Identifier(projection_names[projection_index]));
 			auto result_type = static_cast<GqlTypeId>(projections[projection_index].result_types[0]);
 			if (normalized_property_values && result_type == GqlTypeId::PROPERTY_VALUE) {
 				// DuckDB VARIANT is intentionally not directly orderable. ANY graphs do
@@ -1703,7 +1705,7 @@ static unique_ptr<TableRef> TableBackedNativeRecursiveMatch(const GqlTableGraphB
 	depth_arguments.push_back(Column("gql_path_previous", "depth"));
 	depth_arguments.push_back(Constant(Value::UBIGINT(1)));
 	auto next_depth = Function("+", std::move(depth_arguments));
-	next_depth->Cast<FunctionExpression>().is_operator = true;
+	next_depth->Cast<FunctionExpression>().IsOperatorMutable() = true;
 	step->select_list.push_back(Aliased(std::move(next_depth), "depth"));
 
 	auto recursive = make_uniq<RecursiveCTENode>();
@@ -1914,8 +1916,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				// materialize its complete value. Their columns were collected above.
 				if (node > 0) {
 					auto previous = static_cast<GqlExpressionType>(program.node_types[node - 1]);
-					if (previous == GqlExpressionType::PROPERTY_REFERENCE || previous == GqlExpressionType::ELEMENT_ID ||
-					    previous == GqlExpressionType::LABELED) {
+					if (previous == GqlExpressionType::PROPERTY_REFERENCE ||
+					    previous == GqlExpressionType::ELEMENT_ID || previous == GqlExpressionType::LABELED) {
 						continue;
 					}
 				}
@@ -2066,7 +2068,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			cycle->modifiers.push_back(std::move(boundary));
 			auto statement = make_uniq<SelectStatement>();
 			statement->node = std::move(cycle);
-			result.source = make_uniq<SubqueryRef>(std::move(statement), cycle_alias);
+			result.source = make_uniq<SubqueryRef>(std::move(statement), Identifier(cycle_alias));
 
 			return result;
 		}
@@ -2133,7 +2135,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				checked->modifiers.push_back(std::move(boundary));
 				auto checked_statement = make_uniq<SelectStatement>();
 				checked_statement->node = std::move(checked);
-				source = make_uniq<SubqueryRef>(std::move(checked_statement), alias);
+				source = make_uniq<SubqueryRef>(std::move(checked_statement), Identifier(alias));
 				if (!result.source) {
 					result.source = std::move(source);
 				} else {
@@ -2166,9 +2168,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			for (idx_t index = 1; index < pattern.elements.size(); index += 2) {
 				const auto &edge = pattern.elements[index];
 				endpoint_joins.push_back({edge.binding_index, pattern.elements[index - 1].binding_index,
-				                         edge.reverse ? graph.edge_target_column : graph.edge_source_column});
+				                          edge.reverse ? graph.edge_target_column : graph.edge_source_column});
 				endpoint_joins.push_back({edge.binding_index, pattern.elements[index + 1].binding_index,
-				                         edge.reverse ? graph.edge_source_column : graph.edge_target_column});
+				                          edge.reverse ? graph.edge_source_column : graph.edge_target_column});
 			}
 		}
 		auto merge_components = [&](idx_t left, idx_t right) {
@@ -2176,8 +2178,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			for (const auto &endpoint : endpoint_joins) {
 				if ((component_ids[endpoint.edge] == left && component_ids[endpoint.vertex] == right) ||
 				    (component_ids[endpoint.edge] == right && component_ids[endpoint.vertex] == left)) {
-					conditions.push_back(Equal(Column(identities[endpoint.edge].table_alias, endpoint.column),
-					                           Column(identities[endpoint.vertex].table_alias, graph.vertex.key_column)));
+					conditions.push_back(
+					    Equal(Column(identities[endpoint.edge].table_alias, endpoint.column),
+					          Column(identities[endpoint.vertex].table_alias, graph.vertex.key_column)));
 				}
 			}
 			if (conditions.empty()) {
@@ -2299,13 +2302,13 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 					if (element.type == GqlPatternElementType::VERTEX && posting_selected) {
 						continue;
 					}
-					if (trail_strategy == TrailStrategy::COMPLETE_PATH &&
-					    element.type == GqlPatternElementType::EDGE && !table.label_is_list &&
-					    table.static_labels.empty() && !table.label_column.empty()) {
+					if (trail_strategy == TrailStrategy::COMPLETE_PATH && element.type == GqlPatternElementType::EDGE &&
+					    !table.label_is_list && table.static_labels.empty() && !table.label_column.empty()) {
 						// In a MATCH condition NULL and false both reject the row.
 						// Expose scalar equality to native scan statistics/pushdown.
-						result.conditions.push_back(Equal(Column(identities[element.binding_index].table_alias,
-						                                         table.label_column), Constant(Value(label))));
+						result.conditions.push_back(
+						    Equal(Column(identities[element.binding_index].table_alias, table.label_column),
+						          Constant(Value(label))));
 					} else {
 						result.conditions.push_back(
 						    ElementHasLabel(identities[element.binding_index].table_alias, table, label));
@@ -2487,7 +2490,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				checked->modifiers.push_back(std::move(boundary));
 				auto statement = make_uniq<SelectStatement>();
 				statement->node = std::move(checked);
-				pipeline.from = make_uniq<SubqueryRef>(std::move(statement), alias);
+				pipeline.from = make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
 			}
 		}
 	}

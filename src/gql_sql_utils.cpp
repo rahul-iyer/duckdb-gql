@@ -2,7 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
 namespace duckdb {
@@ -21,10 +21,10 @@ void GqlThrowOnError(const BaseQueryResult &result, const string &context) {
 	}
 }
 
-unique_ptr<MaterializedQueryResult> GqlQuery(Connection &connection, const string &sql, const string &context) {
+unique_ptr<GqlQueryResult> GqlQuery(Connection &connection, const string &sql, const string &context) {
 	auto result = connection.Query(sql);
 	GqlThrowOnError(*result, context);
-	return result;
+	return make_uniq<GqlQueryResult>(std::move(result));
 }
 
 } // namespace duckdb

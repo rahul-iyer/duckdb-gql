@@ -13,7 +13,10 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
+#include "duckdb/main/query_result_stream.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/object_cache.hpp"
@@ -28,6 +31,14 @@
 #include <unordered_set>
 
 namespace duckdb {
+
+static unique_ptr<DataChunk> FetchCsrRows(QueryResultStream<> &stream) {
+	auto chunk = stream.Fetch();
+	if (stream.HasError()) {
+		throw InvalidInputException("DuckGQL CSR query failed: %s", stream.GetError());
+	}
+	return chunk;
+}
 
 static constexpr const char *GQL_CSR_WRITE_OBSERVER_STATE_KEY = "gql_csr_write_observer_state";
 static constexpr const char *GQL_CSR_GENERATION_CACHE_KEY = "gql_csr_generation_state";
@@ -84,8 +95,8 @@ static void AdvanceCsrTableWriteGeneration(ClientContext &context, const string 
 }
 
 struct GqlCsrWriteObserverState : ClientContextState {
-	RebindQueryInfo OnExecutePrepared(ClientContext &context, PreparedStatementCallbackInfo &info,
-	                                  RebindQueryInfo current_rebind) override {
+	RebindQueryInfo OnRebindPreparedStatement(ClientContext &context, BindPreparedStatementCallbackInfo &info,
+	                                          RebindQueryInfo current_rebind) override {
 		if (!info.prepared_statement.properties.IsReadOnly()) {
 			AdvanceCsrWriteGeneration(context);
 		}
@@ -351,16 +362,16 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	auto vertex_rowid_projection =
 	    StringUtil::CIEquals(binding.vertex.ownership, "MANAGED") ? "CAST(rowid AS UBIGINT)" : "CAST(0 AS UBIGINT)";
-	auto vertices =
-	    connection.SendQuery("SELECT CAST(" + GqlQuoteIdentifier(binding.vertex.key_column) +
-	                         " AS UBIGINT) AS vertex_id, " + vertex_label_projection + ", " + vertex_rowid_projection +
-	                         " AS physical_rowid FROM " + QualifiedTable(binding.vertex) + " ORDER BY vertex_id");
-	GqlThrowOnError(*vertices);
+	auto vertices = make_uniq<QueryResultStream<>>(
+	    connection.Submit("SELECT CAST(" + GqlQuoteIdentifier(binding.vertex.key_column) +
+	                      " AS UBIGINT) AS vertex_id, " + vertex_label_projection + ", " + vertex_rowid_projection +
+	                      " AS physical_rowid FROM " + QualifiedTable(binding.vertex) + " ORDER BY vertex_id"));
+
 	snapshot->vertex_ids_match_rowids = StringUtil::CIEquals(binding.vertex.ownership, "MANAGED");
 	if (build_vertex_labels) {
 		snapshot->vertex_label_offsets.push_back(0);
 	}
-	while (auto chunk = vertices->Fetch()) {
+	while (auto chunk = FetchCsrRows(*vertices)) {
 		UnifiedVectorFormat vertex_data;
 		UnifiedVectorFormat label_data;
 		UnifiedVectorFormat label_child_data;
@@ -479,7 +490,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		}
 		auto column = GqlQuoteIdentifier(property->second);
 		auto type_result = GqlQuery(connection, "SELECT " + column + " FROM " + edge_table + " LIMIT 0");
-		if (!type_result->types[0].IsNumeric()) {
+		if (!type_result->GetTypes()[0].IsNumeric()) {
 			throw BinderException("GQL edge weight property '%s' must have a numeric type", weight_property);
 		}
 		weight_projection = ", CAST(" + column + " AS DOUBLE)";
@@ -505,11 +516,11 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->outgoing_degrees.Resize(snapshot->vertex_ids.size(),
 		                                  expected_edges <= std::numeric_limits<uint32_t>::max());
 	}
-	auto degree_rows = connection.SendQuery(endpoint_projection);
-	GqlThrowOnError(*degree_rows);
+	auto degree_rows = make_uniq<QueryResultStream<>>(connection.Submit(endpoint_projection));
+
 	idx_t counted_edges = 0;
 	snapshot->edge_ids_match_rowids = build_edge_ids && StringUtil::CIEquals(binding.edge.ownership, "MANAGED");
-	while (auto chunk = degree_rows->Fetch()) {
+	while (auto chunk = FetchCsrRows(*degree_rows)) {
 		UnifiedVectorFormat edge_id_data;
 		UnifiedVectorFormat source_data;
 		UnifiedVectorFormat target_data;
@@ -596,13 +607,13 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	auto outgoing_cursor = snapshot->outgoing_offsets;
 	auto incoming_cursor = snapshot->incoming_offsets;
-	auto edge_rows = connection.SendQuery(edge_projection);
-	GqlThrowOnError(*edge_rows);
+	auto edge_rows = make_uniq<QueryResultStream<>>(connection.Submit(edge_projection));
+
 	idx_t scattered_edges = 0;
 	bool edge_labels_uniform = true;
 	bool saw_edge_label = false;
 	uint32_t uniform_edge_label_id = 0;
-	while (auto chunk = edge_rows->Fetch()) {
+	while (auto chunk = FetchCsrRows(*edge_rows)) {
 		UnifiedVectorFormat edge_id_data;
 		UnifiedVectorFormat source_data;
 		UnifiedVectorFormat target_data;
@@ -982,7 +993,7 @@ static bool TryCsrVertexLabelRange(const GqlCsrSnapshot &snapshot, const string 
 }
 
 static unique_ptr<FunctionData> CsrVerticesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<CsrVerticesBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
 	result->label = StringUtil::Lower(input.inputs[1].GetValue<string>());
@@ -1021,7 +1032,7 @@ static void CsrVerticesFunction(ClientContext &, TableFunctionInput &input, Data
 		output.SetValue(0, index, Value::UBIGINT(state.snapshot->vertex_ids[vertex]));
 	}
 	state.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static unique_ptr<NodeStatistics> CsrVerticesCardinality(ClientContext &, const FunctionData *bind_data) {
@@ -1030,7 +1041,7 @@ static unique_ptr<NodeStatistics> CsrVerticesCardinality(ClientContext &, const 
 }
 
 static unique_ptr<FunctionData> NeighborsBind(ClientContext &, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<CsrBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
 	auto vertex_id = input.inputs[1].GetValue<int64_t>();
@@ -1080,7 +1091,7 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
 		output.SetValue(1, index, Value::UBIGINT(state.rows[state.offset + index].second));
 	}
 	state.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 struct CsrExpandLocalState : LocalTableFunctionState {
@@ -1098,7 +1109,7 @@ struct CsrExpandLocalState : LocalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> CsrExpandBind(ClientContext &, TableFunctionBindInput &,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR};
 	return make_uniq<TableFunctionData>();
@@ -1223,7 +1234,7 @@ static OperatorResultType CsrExpandFunction(ExecutionContext &context, TableFunc
 		output.SetValue(3, count, Value(state.edge_label));
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	if (state.cursor < state.end) {
 		return OperatorResultType::HAVE_MORE_OUTPUT;
 	}
@@ -1257,10 +1268,10 @@ struct ElementFetchBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> ElementFetchBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto graph_name = GqlGetSelectedGraph(context);
-	const bool projected = input.table_function.name == "gql_vertex_fetch_projected";
-	string element_kind = input.table_function.name == "gql_vertex_fetch" || projected ? "vertex" : "edge";
+	const bool projected = input.table_function.GetName() == "gql_vertex_fetch_projected";
+	string element_kind = input.table_function.GetName() == "gql_vertex_fetch" || projected ? "vertex" : "edge";
 
 	GqlTableGraphBinding graph;
 	if (!GqlTryLoadTableGraph(context, graph_name, graph)) {
@@ -1274,9 +1285,9 @@ static unique_ptr<FunctionData> ElementFetchBind(ClientContext &context, TableFu
 		throw BinderException("GQL element fetch requires managed canonical IDs that match physical row IDs");
 	}
 
-	auto &catalog = Catalog::GetCatalog(context, binding.catalog_name);
-	auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, binding.schema_name, binding.table_name,
-	                                    OnEntryNotFound::THROW_EXCEPTION);
+	auto &catalog = Catalog::GetCatalog(context, Identifier(binding.catalog_name));
+	auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(binding.schema_name),
+	                                    Identifier(binding.table_name), OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = table_entry->Cast<TableCatalogEntry>();
 	if (!table.IsDuckTable()) {
 		throw BinderException("GQL element fetch requires native DuckDB table storage");
@@ -1294,11 +1305,11 @@ static unique_ptr<FunctionData> ElementFetchBind(ClientContext &context, TableFu
 			throw BinderException("Projected vertex fetch requires vertex_id UBIGINT and columns STRUCT");
 		}
 		for (const auto &field : StructType::GetChildTypes(fields[1].second)) {
-			requested.insert(StringUtil::Lower(field.first));
+			requested.insert(StringUtil::Lower(field.first.GetIdentifierName()));
 		}
 	}
 	for (const auto &column : table.GetColumns().Logical()) {
-		if (projected && requested.erase(StringUtil::Lower(column.Name())) == 0) {
+		if (projected && requested.erase(StringUtil::Lower(column.Name().GetIdentifierName())) == 0) {
 			continue;
 		}
 		names.push_back(column.Name());
@@ -1360,7 +1371,7 @@ static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableF
 		// Resolve dictionary/constant selection before accessing the ID child.
 		input.data[0].Flatten(input.size());
 	}
-	auto &ids = bind.projected ? *StructVector::GetEntries(input.data[0])[0] : input.data[0];
+	auto &ids = bind.projected ? StructVector::GetEntries(input.data[0])[0] : input.data[0];
 	for (idx_t row = 0; row < input.size(); row++) {
 		if (bind.projected && !FlatVector::Validity(input.data[0]).RowIsValid(row)) {
 			continue;
@@ -1381,7 +1392,7 @@ static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableF
 	auto &global = data_p.global_state->Cast<ElementFetchGlobalState>();
 	auto &table = global.table.Cast<DuckTableEntry>();
 	auto &transaction = DuckTransaction::Get(context.client, table.catalog);
-	Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(local.row_ids.data()));
+	Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(local.row_ids.data()), local.row_ids.size());
 	table.GetStorage().Fetch(transaction, output, global.column_ids, row_ids, local.row_ids.size(), local.fetch_state);
 	if (output.size() == 0) {
 		return OperatorResultType::NEED_MORE_INPUT;
@@ -1420,7 +1431,7 @@ struct CsrPathExpandLocalState : LocalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> CsrPathExpandBind(ClientContext &, TableFunctionBindInput &,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR};
 	return make_uniq<TableFunctionData>();
@@ -1571,10 +1582,10 @@ static OperatorResultType CsrPathExpandFunction(ExecutionContext &context, Table
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 
-	auto result_edges = FlatVector::GetData<uint64_t>(output.data[0]);
-	auto result_sources = FlatVector::GetData<uint64_t>(output.data[1]);
-	auto result_targets = FlatVector::GetData<uint64_t>(output.data[2]);
-	output.data[3].Reference(Value(state.edge_label));
+	auto result_edges = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto result_sources = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto result_targets = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	output.data[3].Reference(Value(state.edge_label), count_t(STANDARD_VECTOR_SIZE));
 	idx_t count = 0;
 	while (count < STANDARD_VECTOR_SIZE && NextCsrPath(state)) {
 		auto edge_id = state.edge_ids.empty() ? 0 : state.edge_ids.back();
@@ -1583,7 +1594,7 @@ static OperatorResultType CsrPathExpandFunction(ExecutionContext &context, Table
 		result_targets[count] = state.outgoing ? state.current_end_id : state.start_id;
 		count++;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	// A standalone table scan consumes this in/out function until it emits an
 	// empty chunk (it does not honor NEED_MORE_INPUT). Preserve the exhausted
 	// state after the last nonempty chunk so that call cannot restart the seed.
@@ -1595,7 +1606,7 @@ static OperatorResultType CsrPathExpandFunction(ExecutionContext &context, Table
 }
 
 static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<CsrBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
 	auto weight = input.named_parameters.find("weight_property");
@@ -1677,7 +1688,7 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 	auto snapshot = GetPreparedTableSnapshot(context, data.graph_name, *storage, GQL_CSR_FULL);
 	auto build_count = ReadCsrBuildCount(*storage);
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(data.graph_name));
 	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
 	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size()));
@@ -1696,7 +1707,7 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	auto storage = GetDerivedGraphStorageState(context);
 	auto snapshot = GetPreparedTableSnapshot(context, data.graph_name, *storage, 0, data.weight_property);
 	auto build_count = ReadCsrBuildCount(*storage);
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(data.graph_name));
 	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
 	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size()));
@@ -1739,7 +1750,7 @@ struct CsrEdgeStatsState : GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> CsrEdgeStatsBind(ClientContext &, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<CsrBindData>();
 	result->graph_name = input.inputs[0].GetValue<string>();
 	names = {"edge_label",          "edge_count",          "outgoing_vertex_count", "incoming_vertex_count",
@@ -1785,7 +1796,7 @@ static void CsrEdgeStatsFunction(ClientContext &, TableFunctionInput &input, Dat
 		output.SetValue(7, index, Value::UBIGINT(stats.max_incoming_degree));
 	}
 	state.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction GqlNeighborsFunction() {
@@ -1830,7 +1841,7 @@ TableFunction GqlCsrPathExpandFunction() {
 }
 
 static TableFunction GqlElementFetchFunction(const string &name) {
-	TableFunction function(name, {LogicalType::UBIGINT}, nullptr, ElementFetchBind, ElementFetchGlobalInit,
+	TableFunction function(Identifier(name), {LogicalType::UBIGINT}, nullptr, ElementFetchBind, ElementFetchGlobalInit,
 	                       ElementFetchLocalInit);
 	function.in_out_function = ElementFetchFunction;
 	function.projection_pushdown = true;
@@ -1843,7 +1854,7 @@ TableFunction GqlVertexFetchFunction() {
 
 TableFunction GqlProjectedVertexFetchFunction() {
 	auto function = GqlElementFetchFunction("gql_vertex_fetch_projected");
-	function.arguments = {LogicalType::ANY};
+	function.GetSignature() = FunctionSignature(vector<LogicalType> {LogicalType::ANY}, function.GetReturnType());
 	return function;
 }
 
@@ -1854,7 +1865,7 @@ TableFunction GqlEdgeFetchFunction() {
 TableFunction GqlBuildCsrFunction() {
 	TableFunction function("gql_build_csr", {LogicalType::VARCHAR}, BuildCsrFunction);
 	function.bind = [](ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-	                   vector<string> &names) -> unique_ptr<FunctionData> {
+	                   vector<Identifier> &names) -> unique_ptr<FunctionData> {
 		auto result = make_uniq<CsrBindData>();
 		result->graph_name = input.inputs[0].GetValue<string>();
 		names = {"graph_name", "graph_version", "vertex_count", "edge_count", "memory_bytes", "build_count"};
@@ -1869,7 +1880,8 @@ TableFunction GqlBuildCsrFunction() {
 TableFunction GqlCsrStatsFunction() {
 	TableFunction function("gql_csr_stats", {LogicalType::VARCHAR}, CsrStatsFunction);
 	function.bind = CsrStatsBind;
-	function.named_parameters["weight_property"] = LogicalType::VARCHAR;
+	function.GetSignature().WithTypedKwargs(
+	    "options", [](TypedKwargs &options) { options.Add("weight_property", LogicalType::VARCHAR); });
 	function.init_global = SingleRowInit;
 	return function;
 }

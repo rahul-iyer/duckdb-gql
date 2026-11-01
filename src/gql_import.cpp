@@ -8,7 +8,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 
 namespace duckdb {
 
@@ -137,11 +137,11 @@ static GraphHeaderField ParseField(const string &column_name, const LogicalType 
 static GraphHeaderSchema ReadSchema(Connection &connection, const string &table_name, bool relationships) {
 	auto result = GqlQuery(connection, "SELECT * FROM " + GqlQuoteIdentifier(table_name) + " LIMIT 0");
 	GraphHeaderSchema schema;
-	for (idx_t index = 0; index < result->names.size(); index++) {
-		if (result->names[index] == IMPORT_ROW_ID) {
+	for (idx_t index = 0; index < result->GetNames().size(); index++) {
+		if (result->GetNames()[index] == IMPORT_ROW_ID) {
 			continue;
 		}
-		auto field = ParseField(result->names[index], result->types[index]);
+		auto field = ParseField(result->GetNames()[index].GetIdentifierName(), result->GetTypes()[index]);
 		if (field.role != GraphHeaderFieldRole::PROPERTY && field.source_type.IsNested()) {
 			throw InvalidInputException("Graph structural field '%s' must be scalar in the initial importer",
 			                            field.column_name);
@@ -245,7 +245,7 @@ struct CopyGraphBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> CopyGraphBind(ClientContext &, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 4 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
 	    input.inputs[3].IsNull()) {
 		throw BinderException("COPY GRAPH requires a graph, vertex file, edge file, and validation mode");
@@ -296,7 +296,7 @@ static string NativeValueExpression(const GraphHeaderField &field, const string 
 			return "CAST(" + source + " AS " + target_type + "[])";
 		}
 		return "CASE WHEN " + source + " IS NULL THEN NULL WHEN " + source + " = '' THEN []::" + target_type +
-		       "[] ELSE list_transform(string_split(" + source + ", ';'), item -> CAST(item AS " + target_type +
+		       "[] ELSE list_transform(string_split(" + source + ", ';'), lambda item: CAST(item AS " + target_type +
 		       ")) END";
 	}
 	if (type.empty()) {
@@ -366,7 +366,7 @@ static string NativeLabelExpression(const GraphHeaderSchema &schema, const strin
 	auto label = "CAST(" + Column(alias, schema.labels[0]) + " AS VARCHAR)";
 	return "CASE WHEN " + label + " IS NULL OR trim(" + label +
 	       ") = '' THEN []::VARCHAR[] ELSE list_filter(list_transform(string_split(" + label +
-	       ", ';'), item -> lower(trim(item))), item -> item <> '') END";
+	       ", ';'), lambda item: lower(trim(item))), lambda item: item <> '') END";
 }
 
 static void ValidateNativeInput(Connection &connection, const GraphHeaderSchema &nodes,
@@ -410,10 +410,11 @@ GqlFanoutStatistics GqlLoadFanoutStatistics(ClientContext &context, uint64_t gra
 		return result;
 	}
 	Connection connection(*context.db);
-	auto rows = GqlQuery(connection,
-	    "SELECT edge_label, edge_count, source_count, target_count, max_out_degree, max_in_degree "
-	    "FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g "
-	    "ON s.graph_id = g.graph_id AND s.graph_version = g.graph_version WHERE s.graph_id = " + to_string(graph_id));
+	auto rows =
+	    GqlQuery(connection, "SELECT edge_label, edge_count, source_count, target_count, max_out_degree, max_in_degree "
+	                         "FROM gql_internal.graph_fanout_statistics s JOIN gql_internal.graphs g "
+	                         "ON s.graph_id = g.graph_id AND s.graph_version = g.graph_version WHERE s.graph_id = " +
+	                             to_string(graph_id));
 	for (idx_t row = 0; row < rows->RowCount(); row++) {
 		auto &stats = result[rows->GetValue(0, row).GetValue<string>()];
 		stats.edge_count = rows->GetValue(1, row).GetValue<uint64_t>();
@@ -437,7 +438,8 @@ static idx_t AnalyzeGraphTables(Connection &connection, const string &graph_name
 	                                       graph->GetValue(0, 0).ToString());
 	for (idx_t row = 0; row < tables->RowCount(); row++) {
 		if (tables->GetValue(3, row).GetValue<string>() == "REFERENCED") {
-			throw NotImplementedException("ANALYZE GRAPH supports managed graphs; analyze referenced source tables directly");
+			throw NotImplementedException(
+			    "ANALYZE GRAPH supports managed graphs; analyze referenced source tables directly");
 		}
 	}
 	for (idx_t row = 0; row < tables->RowCount(); row++) {
@@ -456,13 +458,19 @@ static idx_t AnalyzeGraphTables(Connection &connection, const string &graph_name
 		             GqlQuoteIdentifier(tables->GetValue(2, row).GetValue<string>());
 		// Aggregate each direction independently: no adjacency build and no
 		// source/target cross product. Parallel edges and self loops count.
-		GqlQuery(connection, "INSERT INTO gql_internal.graph_fanout_statistics "
-		    "WITH outgoing AS (SELECT __gql_type AS label, __gql_source_id, count(*) AS degree FROM " + table +
-		    " GROUP BY 1, 2), incoming AS (SELECT __gql_type AS label, __gql_target_id, count(*) AS degree FROM " + table +
-		    " GROUP BY 1, 2), o AS (SELECT label, sum(degree) AS edges, count(*) AS sources, max(degree) AS max_degree "
-		    "FROM outgoing GROUP BY label), i AS (SELECT label, count(*) AS targets, max(degree) AS max_degree "
-		    "FROM incoming GROUP BY label) SELECT " + graph_id + ", " + graph->GetValue(1, 0).ToString() +
-		    ", o.label, o.edges, o.sources, i.targets, o.max_degree, i.max_degree FROM o JOIN i USING (label)");
+		GqlQuery(
+		    connection,
+		    "INSERT INTO gql_internal.graph_fanout_statistics "
+		    "WITH outgoing AS (SELECT __gql_type AS label, __gql_source_id, count(*) AS degree FROM " +
+		        table +
+		        " GROUP BY 1, 2), incoming AS (SELECT __gql_type AS label, __gql_target_id, count(*) AS degree FROM " +
+		        table +
+		        " GROUP BY 1, 2), o AS (SELECT label, sum(degree) AS edges, count(*) AS sources, max(degree) AS "
+		        "max_degree "
+		        "FROM outgoing GROUP BY label), i AS (SELECT label, count(*) AS targets, max(degree) AS max_degree "
+		        "FROM incoming GROUP BY label) SELECT " +
+		        graph_id + ", " + graph->GetValue(1, 0).ToString() +
+		        ", o.label, o.edges, o.sources, i.targets, o.max_degree, i.max_degree FROM o JOIN i USING (label)");
 	}
 	return tables->RowCount();
 }
@@ -481,7 +489,7 @@ struct AnalyzeGraphBindData : TableFunctionData {
 };
 
 static unique_ptr<FunctionData> AnalyzeGraphBind(ClientContext &, TableFunctionBindInput &input,
-                                                vector<LogicalType> &types, vector<string> &names) {
+                                                 vector<LogicalType> &types, vector<Identifier> &names) {
 	names = {"success", "graph_name", "tables_analyzed"};
 	types = {LogicalType::BOOLEAN, LogicalType::VARCHAR, LogicalType::UBIGINT};
 	return make_uniq<AnalyzeGraphBindData>(input.inputs[0].GetValue<string>());
@@ -509,7 +517,7 @@ static void AnalyzeGraph(ClientContext &context, TableFunctionInput &input, Data
 		}
 		throw;
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	output.SetValue(1, 0, Value(data.graph_name));
 	output.SetValue(2, 0, Value::UBIGINT(table_count));
@@ -619,7 +627,7 @@ static void CopyGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		}
 		throw;
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	output.SetValue(1, 0, Value(data.graph_name));
 	output.SetValue(2, 0, Value::UBIGINT(vertex_count));

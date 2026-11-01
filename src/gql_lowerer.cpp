@@ -347,8 +347,8 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 		auto child_statement = make_uniq<SelectStatement>();
 		child_statement->node = std::move(child_query);
 		auto child_expression = make_uniq<SubqueryExpression>();
-		child_expression->subquery_type = SubqueryType::SCALAR;
-		child_expression->subquery = std::move(child_statement);
+		child_expression->GetSubqueryTypeMutable() = SubqueryType::SCALAR;
+		child_expression->SubqueryMutable() = std::move(child_statement);
 
 		vector<Value> configuration_values;
 		vector<Value> configuration_types;
@@ -358,11 +358,11 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 		}
 		vector<unique_ptr<ParsedExpression>> arguments;
 		arguments.push_back(std::move(child_expression));
-		arguments.push_back(make_uniq<ConstantExpression>(Value(call.procedure_name)));
+		arguments.push_back(ConstantExpression::FromValue(Value(call.procedure_name)));
 		arguments.push_back(
-		    make_uniq<ConstantExpression>(Value::LIST(LogicalType::VARCHAR, std::move(configuration_values))));
+		    ConstantExpression::FromValue(Value::LIST(LogicalType::VARCHAR, std::move(configuration_values))));
 		arguments.push_back(
-		    make_uniq<ConstantExpression>(Value::LIST(LogicalType::UTINYINT, std::move(configuration_types))));
+		    ConstantExpression::FromValue(Value::LIST(LogicalType::UTINYINT, std::move(configuration_types))));
 		auto function_ref = make_uniq<TableFunctionRef>();
 		function_ref->function = make_uniq<FunctionExpression>("gql_algorithm_call", std::move(arguments));
 
@@ -375,8 +375,9 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 			    projection.expression->binding_index >= call.output_names.size()) {
 				throw NotImplementedException("GQL procedure RETURN currently supports yielded variables");
 			}
-			auto expression = make_uniq<ColumnRefExpression>(call.output_names[projection.expression->binding_index]);
-			expression->SetAlias(projection.name);
+			auto expression =
+			    make_uniq<ColumnRefExpression>(Identifier(call.output_names[projection.expression->binding_index]));
+			expression->SetAlias(Identifier(projection.name));
 			select->select_list.push_back(std::move(expression));
 		}
 		if (project.distinct) {
@@ -388,7 +389,8 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 				if (entry.projection_index >= project.projections.size()) {
 					throw InternalException("Invalid GQL CALL order projection");
 				}
-				auto expression = make_uniq<ColumnRefExpression>(project.projections[entry.projection_index].name);
+				auto expression =
+				    make_uniq<ColumnRefExpression>(Identifier(project.projections[entry.projection_index].name));
 				order->orders.emplace_back(
 				    entry.descending ? OrderType::DESCENDING : OrderType::ASCENDING,
 				    entry.null_order_specified
@@ -401,10 +403,10 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 		if (project.has_limit || project.has_offset) {
 			auto limit = make_uniq<LimitModifier>();
 			if (project.has_limit) {
-				limit->limit = make_uniq<ConstantExpression>(Value::UBIGINT(project.limit));
+				limit->limit = ConstantExpression::FromValue(Value::UBIGINT(project.limit));
 			}
 			if (project.has_offset) {
-				limit->offset = make_uniq<ConstantExpression>(Value::UBIGINT(project.offset));
+				limit->offset = ConstantExpression::FromValue(Value::UBIGINT(project.offset));
 			}
 			select->modifiers.push_back(std::move(limit));
 		}
@@ -413,7 +415,7 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 	auto lowered = GqlLower(plan);
 	vector<unique_ptr<ParsedExpression>> arguments;
 	for (auto &parameter : lowered.parameters) {
-		arguments.push_back(make_uniq<ConstantExpression>(std::move(parameter)));
+		arguments.push_back(ConstantExpression::FromValue(std::move(parameter)));
 	}
 
 	auto function_ref = make_uniq<TableFunctionRef>();
@@ -428,8 +430,8 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 		select->select_list.push_back(make_uniq<StarExpression>());
 	} else {
 		for (idx_t index = 0; index < visible_count; index++) {
-			auto expression = make_uniq<ColumnRefExpression>(project.projections[index].name);
-			expression->SetAlias(project.projections[index].name);
+			auto expression = make_uniq<ColumnRefExpression>(Identifier(project.projections[index].name));
+			expression->SetAlias(Identifier(project.projections[index].name));
 			select->select_list.push_back(std::move(expression));
 		}
 	}
@@ -454,15 +456,15 @@ static bool ContainsAggregate(const GqlBoundExpression &expression) {
 // SQL binder can recognize grouping keys inside expressions containing an
 // aggregate (e.g. RETURN x, x * 2 + count(*)).
 static shared_ptr<GqlBoundExpression> ExtractAggregateInputs(const shared_ptr<GqlBoundExpression> &expression,
-                                                            vector<GqlBoundProjection> &inputs,
-                                                            vector<Value> &input_programs) {
+                                                             vector<GqlBoundProjection> &inputs,
+                                                             vector<Value> &input_programs) {
 	if (expression->expression_type == GqlExpressionType::LITERAL) {
 		return expression;
 	}
 	auto type = expression->expression_type;
-	bool graph_input = type == GqlExpressionType::VARIABLE_REFERENCE ||
-	                   type == GqlExpressionType::PROPERTY_REFERENCE || type == GqlExpressionType::ELEMENT_ID ||
-	                   type == GqlExpressionType::LABELED || expression->result_type.id == GqlTypeId::PATH ||
+	bool graph_input = type == GqlExpressionType::VARIABLE_REFERENCE || type == GqlExpressionType::PROPERTY_REFERENCE ||
+	                   type == GqlExpressionType::ELEMENT_ID || type == GqlExpressionType::LABELED ||
+	                   expression->result_type.id == GqlTypeId::PATH ||
 	                   (type == GqlExpressionType::FUNCTION && expression->function_name == "path_length");
 	if (graph_input) {
 		auto program = GqlSerializeExpression(*expression);
@@ -575,7 +577,7 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 				}
 				for (idx_t index = 0; index < expressions.size(); index++) {
 					if (!Value::NotDistinctFrom(GqlSerializeExpression(*expressions[index]),
-					                           GqlSerializeExpression(*aggregate_expressions[index]))) {
+					                            GqlSerializeExpression(*aggregate_expressions[index]))) {
 						throw InternalException("GQL alternatives have inconsistent aggregate expressions");
 					}
 				}
@@ -600,13 +602,13 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 		aggregate->from_table = make_uniq<SubqueryRef>(std::move(rows_statement), "__gql_aggregate_rows");
 		GroupingSet grouping_set;
 		for (idx_t index = 0; index < aggregate_expressions.size(); index++) {
-			auto expression = GqlLowerProjectedExpression(*aggregate_expressions[index], input_names,
-			                                              "__gql_aggregate_rows");
+			auto expression =
+			    GqlLowerProjectedExpression(*aggregate_expressions[index], input_names, "__gql_aggregate_rows");
 			if (!ContainsAggregate(*original_projections[index].expression)) {
-				grouping_set.insert(aggregate->groups.group_expressions.size());
+				grouping_set.insert(ProjectionIndex(aggregate->groups.group_expressions.size()));
 				aggregate->groups.group_expressions.push_back(expression->Copy());
 			}
-			expression->SetAlias(original_projections[index].name);
+			expression->SetAlias(Identifier(original_projections[index].name));
 			aggregate->select_list.push_back(std::move(expression));
 		}
 		if (!grouping_set.empty()) {
@@ -631,10 +633,10 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 	if (has_limit || has_offset) {
 		auto result_limit = make_uniq<LimitModifier>();
 		if (has_limit) {
-			result_limit->limit = make_uniq<ConstantExpression>(Value::UBIGINT(limit));
+			result_limit->limit = ConstantExpression::FromValue(Value::UBIGINT(limit));
 		}
 		if (has_offset) {
-			result_limit->offset = make_uniq<ConstantExpression>(Value::UBIGINT(offset));
+			result_limit->offset = ConstantExpression::FromValue(Value::UBIGINT(offset));
 		}
 		root->modifiers.push_back(std::move(result_limit));
 	}
@@ -643,12 +645,13 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 		result_statement->node = std::move(root);
 		auto source = make_uniq<SubqueryRef>(std::move(result_statement), "__gql_aggregate_result");
 		for (idx_t index = 0; index < original_projections.size(); index++) {
-			source->column_name_alias.push_back("__gql_result_" + to_string(index));
+			source->column_name_alias.emplace_back("__gql_result_" + to_string(index));
 		}
 		auto visible = make_uniq<SelectNode>();
 		for (idx_t index = 0; index < visible_count; index++) {
-			auto column = make_uniq<ColumnRefExpression>(source->column_name_alias[index], source->alias);
-			column->SetAlias(original_projections[index].name);
+			auto column =
+			    make_uniq<ColumnRefExpression>(Identifier(source->column_name_alias[index]), Identifier(source->alias));
+			column->SetAlias(Identifier(original_projections[index].name));
 			visible->select_list.push_back(std::move(column));
 		}
 		visible->from_table = std::move(source);

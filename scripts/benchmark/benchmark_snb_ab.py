@@ -18,6 +18,8 @@ from pathlib import Path
 
 from benchmark_snb_gql_interactive import build_benchmark_cases, sql_literal
 
+from duckdb_profile import normalize_profile
+
 
 def run(cli, database, sql, timeout):
     result = subprocess.run(
@@ -90,7 +92,7 @@ def main():
                     actual = rows(Path(str(stem) + ".csv"))
                     if actual != expected:
                         raise AssertionError(f"{variant}/{name}/{sample}: ordered CSV mismatch")
-                    profile = json.loads(Path(str(stem) + ".json").read_text())
+                    profile = normalize_profile(json.loads(Path(str(stem) + ".json").read_text()))
                     samples[name][variant].append(profile["latency"])
                 median = statistics.median(samples[name][variant])
                 print(f"  {name}: verified, {median * 1000:.3f} ms median", flush=True)

@@ -7,7 +7,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 
 #include <algorithm>
 #include <unordered_map>
@@ -615,7 +615,7 @@ static unique_ptr<GlobalTableFunctionState> SingleRowInit(ClientContext &, Table
 }
 
 static unique_ptr<FunctionData> CommandBind(ClientContext &, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("A graph name is required");
 	}
@@ -660,7 +660,7 @@ static vector<bool> ReadCreateGraphBooleans(const Value &value) {
 }
 
 static unique_ptr<FunctionData> CreateGraphBind(ClientContext &, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 31 || input.inputs[0].IsNull() || input.inputs[1].IsNull() || input.inputs[2].IsNull() ||
 	    input.inputs[3].IsNull()) {
 		throw BinderException("Invalid CREATE GRAPH schema payload");
@@ -821,7 +821,7 @@ static unique_ptr<FunctionData> CreateGraphBind(ClientContext &, TableFunctionBi
 }
 
 static unique_ptr<FunctionData> SetGraphBind(ClientContext &, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("A graph name is required");
 	}
@@ -831,14 +831,14 @@ static unique_ptr<FunctionData> SetGraphBind(ClientContext &, TableFunctionBindI
 }
 
 static unique_ptr<FunctionData> ResetGraphBind(ClientContext &, TableFunctionBindInput &,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"success", "graph_name"};
 	return_types = {LogicalType::BOOLEAN, LogicalType::VARCHAR};
 	return nullptr;
 }
 
 static unique_ptr<FunctionData> PropertyIndexBind(ClientContext &, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("A graph name and vertex property name are required");
 	}
@@ -853,7 +853,7 @@ static unique_ptr<FunctionData> PropertyIndexBind(ClientContext &, TableFunction
 }
 
 static unique_ptr<FunctionData> MutationControlBind(ClientContext &, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.size() != 2 || input.inputs[0].IsNull() || input.inputs[1].IsNull()) {
 		throw BinderException("GQL mutation control requires a command id and phase");
 	}
@@ -892,13 +892,13 @@ static void MutationControl(ClientContext &context, TableFunctionInput &input, D
 			context.transaction.SetAutoCommit(true);
 		}
 	}
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	row_state.done = true;
 }
 
 static void EmitCommandResult(DataChunk &output, SingleRowState &state, const string &graph_name) {
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	output.SetValue(1, 0, Value(graph_name));
 	state.done = true;
@@ -1043,7 +1043,8 @@ static void DropGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		                         to_string(graph_id) + ")");
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_schema_elements WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_schemas WHERE graph_id = " + to_string(graph_id));
-		GqlQuery(connection, "DELETE FROM gql_internal.graph_fanout_statistics WHERE graph_id = " + to_string(graph_id));
+		GqlQuery(connection,
+		         "DELETE FROM gql_internal.graph_fanout_statistics WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graph_storage WHERE graph_id = " + to_string(graph_id));
 		GqlQuery(connection, "DELETE FROM gql_internal.graphs WHERE graph_id = " + to_string(graph_id));
 		connection.Commit();
@@ -1142,7 +1143,7 @@ static bool PhysicalIndexExists(Connection &connection, const PropertyIndexTarge
 
 static void EmitPropertyIndexResult(DataChunk &output, SingleRowState &state, const PropertyIndexBindData &data,
                                     const string &property_name, const string &index_name) {
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(true));
 	output.SetValue(1, 0, Value(data.graph_name));
 	output.SetValue(2, 0, Value(property_name));
@@ -1277,7 +1278,7 @@ struct GraphRowsState : GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> GraphsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                           vector<string> &names) {
+                                           vector<Identifier> &names) {
 	names = {"graph_id", "graph_name", "graph_version", "vertex_count", "edge_count", "created_at"};
 	return_types = {LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::UBIGINT,
 	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::TIMESTAMP};
@@ -1289,7 +1290,7 @@ static unique_ptr<GlobalTableFunctionState> GraphsInit(ClientContext &, TableFun
 }
 
 static unique_ptr<FunctionData> PropertyIndexesBind(ClientContext &, TableFunctionBindInput &,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"graph_name", "property_name", "index_name", "catalog_name", "schema_name", "table_name", "column_name"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
@@ -1330,7 +1331,7 @@ static void PropertyIndexesFunction(ClientContext &context, TableFunctionInput &
 		output.SetValue(6, index, row.column_name);
 	}
 	state.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void LoadGraphRows(ClientContext &context, GraphRowsState &state) {
@@ -1379,7 +1380,7 @@ static void GraphsFunction(ClientContext &context, TableFunctionInput &input, Da
 		output.SetValue(5, index, row.created_at);
 	}
 	state.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction GqlCreateGraphFunction() {
@@ -1392,14 +1393,16 @@ TableFunction GqlCreateGraphFunction() {
 	                        LogicalType::LIST(LogicalType::UBIGINT), LogicalType::LIST(LogicalType::VARCHAR),
 	                        LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::BOOLEAN)},
 	                       CreateGraph);
-	function.arguments.insert(function.arguments.end(),
-	                          {LogicalType::BOOLEAN, LogicalType::LIST(LogicalType::VARCHAR),
-	                           LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
-	                           LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
-	                           LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
-	                           LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::UBIGINT),
-	                           LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
-	                           LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN});
+	for (const auto &type :
+	     vector<LogicalType> {LogicalType::BOOLEAN, LogicalType::LIST(LogicalType::VARCHAR),
+	                          LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                          LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                          LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                          LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::UBIGINT),
+	                          LogicalType::LIST(LogicalType::VARCHAR), LogicalType::LIST(LogicalType::VARCHAR),
+	                          LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BOOLEAN}) {
+		function.GetSignature().AddParameter(type);
+	}
 	function.bind = CreateGraphBind;
 	function.init_global = SingleRowInit;
 	return function;

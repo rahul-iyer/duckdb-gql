@@ -1,0 +1,35 @@
+# name: test/sql/gql_result_chunks.test
+# description: CSR streaming and vector output across multiple result chunks
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "id:int", 'Node' AS ":LABEL" FROM range(5000) r(i)) TO '__TEST_DIR__/chunk_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":START_ID", (i+1)::VARCHAR AS ":END_ID", 'NEXT' AS ":TYPE" FROM range(4999) r(i)) TO '__TEST_DIR__/chunk_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH result_chunks ANY
+
+statement ok
+COPY GRAPH result_chunks FROM (VERTICES '__TEST_DIR__/chunk_nodes.csv', EDGES '__TEST_DIR__/chunk_edges.csv') FORMAT GRAPH
+
+# Build the CSR through a stream larger than STANDARD_VECTOR_SIZE, then emit
+# several chunks from the algorithm's mutable output vectors.
+query III
+SELECT count(*), min(depth), max(depth) FROM system.algo.bfs('result_chunks', 1)
+----
+5000	0	4999
+
+# Typed keyword options must also work on the native table-function surface.
+query II
+SELECT count(*), max(depth) FROM system.algo.bfs('result_chunks', 1, max_depth := 3000)
+----
+3001	3000
+
+query III
+SELECT count(*), sum(out_degree), sum(in_degree) FROM system.algo.degree('result_chunks')
+----
+5000	4999	4999

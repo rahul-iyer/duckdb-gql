@@ -19,6 +19,8 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/query_node/update_query_node.hpp"
+#include "duckdb/parser/query_node/merge_query_node.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/statement/delete_statement.hpp"
 #include "duckdb/parser/statement/drop_statement.hpp"
@@ -37,11 +39,11 @@
 namespace duckdb {
 
 static unique_ptr<ParsedExpression> Column(const string &table, const string &column) {
-	return make_uniq<ColumnRefExpression>(column, table);
+	return make_uniq<ColumnRefExpression>(Identifier(column), Identifier(table));
 }
 
 static unique_ptr<ParsedExpression> Constant(Value value) {
-	return make_uniq<ConstantExpression>(std::move(value));
+	return ConstantExpression::FromValue(std::move(value));
 }
 
 static unique_ptr<ParsedExpression> Equal(unique_ptr<ParsedExpression> left, unique_ptr<ParsedExpression> right) {
@@ -62,7 +64,7 @@ static unique_ptr<ParsedExpression> Or(unique_ptr<ParsedExpression> left, unique
 }
 
 static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_ptr<ParsedExpression>> arguments) {
-	return make_uniq<FunctionExpression>(name, std::move(arguments));
+	return make_uniq<FunctionExpression>(Identifier(name), std::move(arguments));
 }
 
 static unique_ptr<ParsedExpression> Subtract(unique_ptr<ParsedExpression> left, unique_ptr<ParsedExpression> right) {
@@ -70,13 +72,13 @@ static unique_ptr<ParsedExpression> Subtract(unique_ptr<ParsedExpression> left, 
 	arguments.push_back(std::move(left));
 	arguments.push_back(std::move(right));
 	auto result = make_uniq<FunctionExpression>("-", std::move(arguments));
-	result->is_operator = true;
+	result->IsOperatorMutable() = true;
 	return std::move(result);
 }
 
 static void AppendStructField(vector<unique_ptr<ParsedExpression>> &fields, unique_ptr<ParsedExpression> expression,
                               const string &name) {
-	expression->SetAlias(name);
+	expression->SetAlias(Identifier(name));
 	fields.push_back(std::move(expression));
 }
 
@@ -106,28 +108,28 @@ static unique_ptr<ParsedExpression> AppendLabel(unique_ptr<ParsedExpression> lab
 	CaseCheck missing;
 	missing.when_expr = make_uniq<OperatorExpression>(ExpressionType::OPERATOR_IS_NULL, labels->Copy());
 	missing.then_expr = Constant(is_list ? LabelListValue({label}) : Value(label));
-	result->case_checks.push_back(std::move(missing));
+	result->CaseChecksMutable().push_back(std::move(missing));
 
 	CaseCheck present;
 	present.when_expr = HasLabel(labels->Copy(), label, is_list);
 	present.then_expr = labels->Copy();
-	result->case_checks.push_back(std::move(present));
+	result->CaseChecksMutable().push_back(std::move(present));
 
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(std::move(labels));
 	arguments.push_back(Constant(Value(label)));
 	if (is_list) {
-		result->else_expr = Function("list_append", std::move(arguments));
+		result->ElseMutable() = Function("list_append", std::move(arguments));
 	} else {
 		arguments.insert(arguments.begin() + 1, Constant(Value(";")));
-		result->else_expr = Function("concat", std::move(arguments));
+		result->ElseMutable() = Function("concat", std::move(arguments));
 	}
 	return std::move(result);
 }
 
 static unique_ptr<ParsedExpression> EraseLabel(unique_ptr<ParsedExpression> labels, const string &label, bool is_list) {
 	if (is_list) {
-		auto item = make_uniq<ColumnRefExpression>("gql_label_item");
+		auto item = make_uniq<ColumnRefExpression>(Identifier("gql_label_item"));
 		auto predicate =
 		    make_uniq<ComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, std::move(item), Constant(Value(label)));
 		vector<unique_ptr<ParsedExpression>> arguments;
@@ -182,8 +184,8 @@ static unique_ptr<TableRef> FunctionTable(const string &name, vector<Value> valu
 		arguments.push_back(Constant(std::move(value)));
 	}
 	auto result = make_uniq<TableFunctionRef>();
-	result->function = make_uniq<FunctionExpression>(name, std::move(arguments));
-	result->alias = alias;
+	result->function = make_uniq<FunctionExpression>(Identifier(name), std::move(arguments));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
@@ -203,8 +205,8 @@ static unique_ptr<TableRef> MutationGraph(const string &alias) {
 
 static unique_ptr<TableRef> Snapshot(const string &snapshot_name, const string &alias) {
 	auto result = make_uniq<BaseTableRef>();
-	result->table_name = snapshot_name;
-	result->alias = alias;
+	result->SetTable(Identifier(snapshot_name));
+	result->alias = Identifier(alias);
 	return std::move(result);
 }
 
@@ -224,7 +226,8 @@ static string ControlSnapshotName(const string &command_id) {
 
 static unique_ptr<SQLStatement> QuietBeginControlStatement(const string &command_id) {
 	auto create = make_uniq<CreateStatement>();
-	auto info = make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, ControlSnapshotName(command_id));
+	auto info = make_uniq<CreateTableInfo>(
+	    QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, Identifier(ControlSnapshotName(command_id))));
 	info->temporary = true;
 	auto select = make_uniq<SelectNode>();
 	select->from_table = FunctionTable("gql_mutation_control", {Value(command_id), Value(true)}, "gql_control");
@@ -240,7 +243,7 @@ static unique_ptr<SQLStatement> ResultStatement() {
 	auto select = make_uniq<SelectNode>();
 	select->from_table = make_uniq<EmptyTableRef>();
 	auto success = Constant(Value(true));
-	success->SetAlias("success");
+	success->SetAlias(Identifier("success"));
 	select->select_list.push_back(std::move(success));
 	auto statement = make_uniq<SelectStatement>();
 	statement->node = std::move(select);
@@ -297,13 +300,13 @@ static unique_ptr<ParsedExpression> InsertElementValue(const GqlTableGraphBindin
 		AppendStructField(fields, Column(element_alias, property.second), property.first);
 	}
 	auto value = Function("struct_pack", std::move(fields));
-	value->SetAlias(return_name);
+	value->SetAlias(Identifier(return_name));
 	return value;
 }
 
 static unique_ptr<SQLStatement> CreateSnapshot(const vector<GqlLogicalPlan> &plans, const string &snapshot_name) {
 	auto create = make_uniq<CreateStatement>();
-	auto info = make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, snapshot_name);
+	auto info = make_uniq<CreateTableInfo>(QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, Identifier(snapshot_name)));
 	info->temporary = true;
 	info->query = unique_ptr_cast<SQLStatement, SelectStatement>(GqlLowerSelect(plans));
 	create->info = std::move(info);
@@ -314,9 +317,7 @@ static unique_ptr<SQLStatement> DropSnapshot(const string &snapshot_name) {
 	auto drop = make_uniq<DropStatement>();
 	auto info = make_uniq<DropInfo>();
 	info->type = CatalogType::TABLE_ENTRY;
-	info->catalog = TEMP_CATALOG;
-	info->schema = DEFAULT_SCHEMA;
-	info->name = snapshot_name;
+	info->SetQualifiedName(Identifier(TEMP_CATALOG), Identifier(DEFAULT_SCHEMA), Identifier(snapshot_name));
 	drop->info = std::move(info);
 	return std::move(drop);
 }
@@ -324,13 +325,13 @@ static unique_ptr<SQLStatement> DropSnapshot(const string &snapshot_name) {
 static unique_ptr<SQLStatement> SetProperty(const string &snapshot_name, idx_t mutation_index,
                                             const GqlBoundMutation &mutation) {
 	auto update = make_uniq<UpdateStatement>();
-	update->table = MutationTarget(mutation, "PROPERTY", "gql_mutation_target");
-	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back(mutation.name);
-	update->set_info->expressions.push_back(Column("gql_mutation_match", ValueColumn(mutation_index)));
-	update->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
-	                                    Column("gql_mutation_match", TargetColumn(mutation_index)));
+	update->node->table = MutationTarget(mutation, "PROPERTY", "gql_mutation_target");
+	update->node->from_table = Snapshot(snapshot_name, "gql_mutation_match");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.emplace_back(mutation.name);
+	update->node->set_info->expressions.push_back(Column("gql_mutation_match", ValueColumn(mutation_index)));
+	update->node->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
+	                                          Column("gql_mutation_match", TargetColumn(mutation_index)));
 	return std::move(update);
 }
 
@@ -338,25 +339,25 @@ static unique_ptr<SQLStatement> SetLabel(const string &snapshot_name, idx_t muta
                                          const GqlBoundMutation &mutation) {
 	auto is_list = mutation.binding_type.id != GqlTypeId::EDGE;
 	auto update = make_uniq<UpdateStatement>();
-	update->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
-	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back(LabelColumn(mutation));
-	update->set_info->expressions.push_back(
+	update->node->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
+	update->node->from_table = Snapshot(snapshot_name, "gql_mutation_match");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.push_back(LabelColumn(mutation));
+	update->node->set_info->expressions.push_back(
 	    AppendLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list));
-	update->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
-	                                    Column("gql_mutation_match", TargetColumn(mutation_index)));
+	update->node->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
+	                                          Column("gql_mutation_match", TargetColumn(mutation_index)));
 	return std::move(update);
 }
 
 static unique_ptr<SQLStatement> ClearProperties(const string &snapshot_name, idx_t mutation_index,
                                                 const GqlBoundMutation &mutation) {
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target = MutationTarget(mutation, "DELETE", "gql_clear_target");
-	statement->source = FunctionTable(
+	statement->node->target = MutationTarget(mutation, "DELETE", "gql_clear_target");
+	statement->node->source = FunctionTable(
 	    "gql_clear_properties_source",
 	    {Value(ElementKind(mutation)), Value(snapshot_name), Value(TargetColumn(mutation_index))}, "gql_clear_source");
-	statement->join_condition =
+	statement->node->join_condition =
 	    Equal(Column("gql_clear_target", KeyColumn(mutation)), Column("gql_clear_source", KeyColumn(mutation)));
 
 	// The bind replacement exposes the key unchanged and every mapped property
@@ -367,20 +368,20 @@ static unique_ptr<SQLStatement> ClearProperties(const string &snapshot_name, idx
 	auto action = make_uniq<MergeIntoAction>();
 	action->action_type = MergeActionType::MERGE_UPDATE;
 	action->column_order = InsertColumnOrder::INSERT_BY_NAME;
-	statement->actions[MergeActionCondition::WHEN_MATCHED].push_back(std::move(action));
+	statement->node->actions[MergeActionCondition::WHEN_MATCHED].push_back(std::move(action));
 	return std::move(statement);
 }
 
 static unique_ptr<SQLStatement> RemoveProperty(const string &snapshot_name, idx_t mutation_index,
                                                const GqlBoundMutation &mutation) {
 	auto update = make_uniq<UpdateStatement>();
-	update->table = MutationTarget(mutation, "PROPERTY", "gql_mutation_target");
-	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back(mutation.name);
-	update->set_info->expressions.push_back(Constant(Value()));
-	update->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
-	                                    Column("gql_mutation_match", TargetColumn(mutation_index)));
+	update->node->table = MutationTarget(mutation, "PROPERTY", "gql_mutation_target");
+	update->node->from_table = Snapshot(snapshot_name, "gql_mutation_match");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.emplace_back(mutation.name);
+	update->node->set_info->expressions.push_back(Constant(Value()));
+	update->node->set_info->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
+	                                          Column("gql_mutation_match", TargetColumn(mutation_index)));
 	return std::move(update);
 }
 
@@ -388,16 +389,16 @@ static unique_ptr<SQLStatement> RemoveLabel(const string &snapshot_name, idx_t m
                                             const GqlBoundMutation &mutation) {
 	auto is_list = mutation.binding_type.id != GqlTypeId::EDGE;
 	auto update = make_uniq<UpdateStatement>();
-	update->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
-	update->from_table = Snapshot(snapshot_name, "gql_mutation_match");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back(LabelColumn(mutation));
-	update->set_info->expressions.push_back(
+	update->node->table = MutationTarget(mutation, "LABEL", "gql_mutation_target");
+	update->node->from_table = Snapshot(snapshot_name, "gql_mutation_match");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.push_back(LabelColumn(mutation));
+	update->node->set_info->expressions.push_back(
 	    EraseLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list));
 	auto target = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
 	                    Column("gql_mutation_match", TargetColumn(mutation_index)));
 	auto has_label = HasLabel(Column("gql_mutation_target", LabelColumn(mutation)), mutation.name, is_list);
-	update->set_info->condition = And(std::move(target), std::move(has_label));
+	update->node->set_info->condition = And(std::move(target), std::move(has_label));
 	return std::move(update);
 }
 
@@ -428,41 +429,40 @@ static unique_ptr<SQLStatement> RejectAttachedNodeDelete(const string &snapshot_
 
 static unique_ptr<SQLStatement> DeleteIncidentEdges(const string &snapshot_name, idx_t mutation_index) {
 	auto deletion = make_uniq<DeleteStatement>();
-	deletion->table = MutationEdgeTable("gql_mutation_edge");
-	deletion->using_clauses.push_back(Snapshot(snapshot_name, "gql_mutation_match"));
-	deletion->condition = Or(Equal(Column("gql_mutation_edge", "__gql_source_id"),
-	                               Column("gql_mutation_match", TargetColumn(mutation_index))),
-	                         Equal(Column("gql_mutation_edge", "__gql_target_id"),
-	                               Column("gql_mutation_match", TargetColumn(mutation_index))));
+	deletion->node->table = MutationEdgeTable("gql_mutation_edge");
+	deletion->node->using_clauses.push_back(Snapshot(snapshot_name, "gql_mutation_match"));
+	deletion->node->condition = Or(Equal(Column("gql_mutation_edge", "__gql_source_id"),
+	                                     Column("gql_mutation_match", TargetColumn(mutation_index))),
+	                               Equal(Column("gql_mutation_edge", "__gql_target_id"),
+	                                     Column("gql_mutation_match", TargetColumn(mutation_index))));
 	return std::move(deletion);
 }
 
 static unique_ptr<SQLStatement> DeleteElement(const string &snapshot_name, idx_t mutation_index,
                                               const GqlBoundMutation &mutation) {
 	auto deletion = make_uniq<DeleteStatement>();
-	deletion->table = MutationTarget(mutation, "DELETE", "gql_mutation_target");
-	deletion->using_clauses.push_back(Snapshot(snapshot_name, "gql_mutation_match"));
-	deletion->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
-	                            Column("gql_mutation_match", TargetColumn(mutation_index)));
+	deletion->node->table = MutationTarget(mutation, "DELETE", "gql_mutation_target");
+	deletion->node->using_clauses.push_back(Snapshot(snapshot_name, "gql_mutation_match"));
+	deletion->node->condition = Equal(Column("gql_mutation_target", KeyColumn(mutation)),
+	                                  Column("gql_mutation_match", TargetColumn(mutation_index)));
 	return std::move(deletion);
 }
 
 static unique_ptr<SQLStatement> UpdateGraphVersion(const string &snapshot_name, idx_t mutation_count = 0) {
 	auto update = make_uniq<UpdateStatement>();
 	auto graph_table = make_uniq<BaseTableRef>();
-	graph_table->schema_name = "gql_internal";
-	graph_table->table_name = "graphs";
-	graph_table->alias = "gql_mutation_graph_table";
-	update->table = std::move(graph_table);
-	update->from_table = MutationGraph("gql_mutation_graph");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back("graph_version");
+	graph_table->SetQualifiedName(Identifier(), Identifier("gql_internal"), Identifier("graphs"));
+	graph_table->alias = Identifier("gql_mutation_graph_table");
+	update->node->table = std::move(graph_table);
+	update->node->from_table = MutationGraph("gql_mutation_graph");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.push_back("graph_version");
 	vector<unique_ptr<ParsedExpression>> addition;
 	addition.push_back(Column("gql_mutation_graph_table", "graph_version"));
 	addition.push_back(Constant(Value::UBIGINT(1)));
 	auto increment = make_uniq<FunctionExpression>("+", std::move(addition));
-	increment->is_operator = true;
-	update->set_info->expressions.push_back(std::move(increment));
+	increment->IsOperatorMutable() = true;
+	update->node->set_info->expressions.push_back(std::move(increment));
 	auto graph_matches =
 	    Equal(Column("gql_mutation_graph_table", "graph_id"), Column("gql_mutation_graph", "graph_id"));
 	auto exists_select = make_uniq<SelectNode>();
@@ -480,29 +480,28 @@ static unique_ptr<SQLStatement> UpdateGraphVersion(const string &snapshot_name, 
 	auto exists_statement = make_uniq<SelectStatement>();
 	exists_statement->node = std::move(exists_select);
 	auto exists = make_uniq<SubqueryExpression>();
-	exists->subquery_type = SubqueryType::EXISTS;
-	exists->subquery = std::move(exists_statement);
-	update->set_info->condition = And(std::move(graph_matches), std::move(exists));
+	exists->GetSubqueryTypeMutable() = SubqueryType::EXISTS;
+	exists->SubqueryMutable() = std::move(exists_statement);
+	update->node->set_info->condition = And(std::move(graph_matches), std::move(exists));
 	return std::move(update);
 }
 
 static unique_ptr<SQLStatement> UpdateGraphVersionAlways() {
 	auto update = make_uniq<UpdateStatement>();
 	auto graph_table = make_uniq<BaseTableRef>();
-	graph_table->schema_name = "gql_internal";
-	graph_table->table_name = "graphs";
-	graph_table->alias = "gql_mutation_graph_table";
-	update->table = std::move(graph_table);
-	update->from_table = MutationGraph("gql_mutation_graph");
-	update->set_info = make_uniq<UpdateSetInfo>();
-	update->set_info->columns.push_back("graph_version");
+	graph_table->SetQualifiedName(Identifier(), Identifier("gql_internal"), Identifier("graphs"));
+	graph_table->alias = Identifier("gql_mutation_graph_table");
+	update->node->table = std::move(graph_table);
+	update->node->from_table = MutationGraph("gql_mutation_graph");
+	update->node->set_info = make_uniq<UpdateSetInfo>();
+	update->node->set_info->columns.push_back("graph_version");
 	vector<unique_ptr<ParsedExpression>> addition;
 	addition.push_back(Column("gql_mutation_graph_table", "graph_version"));
 	addition.push_back(Constant(Value::UBIGINT(1)));
 	auto increment = make_uniq<FunctionExpression>("+", std::move(addition));
-	increment->is_operator = true;
-	update->set_info->expressions.push_back(std::move(increment));
-	update->set_info->condition =
+	increment->IsOperatorMutable() = true;
+	update->node->set_info->expressions.push_back(std::move(increment));
+	update->node->set_info->condition =
 	    Equal(Column("gql_mutation_graph_table", "graph_id"), Column("gql_mutation_graph", "graph_id"));
 	return std::move(update);
 }
@@ -575,9 +574,8 @@ static unique_ptr<TableRef> MutationTargetBindReplace(ClientContext &context, Ta
 		throw BinderException("Invalid GQL mutation purpose '%s'", purpose);
 	}
 	auto result = make_uniq<BaseTableRef>();
-	result->catalog_name = table.catalog_name;
-	result->schema_name = table.schema_name;
-	result->table_name = table.table_name;
+	result->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+	                         Identifier(table.table_name));
 	return std::move(result);
 }
 
@@ -586,7 +584,7 @@ static unique_ptr<TableRef> MutationGraphBindReplace(ClientContext &context, Tab
 	auto select = make_uniq<SelectNode>();
 	select->from_table = make_uniq<EmptyTableRef>();
 	auto id = Constant(Value::UBIGINT(graph.graph_id));
-	id->SetAlias("graph_id");
+	id->SetAlias(Identifier("graph_id"));
 	select->select_list.push_back(std::move(id));
 	auto statement = make_uniq<SelectStatement>();
 	statement->node = std::move(select);
@@ -618,10 +616,9 @@ static unique_ptr<TableRef> ClearPropertiesSourceBindReplace(ClientContext &cont
 	}
 
 	auto target = make_uniq<BaseTableRef>();
-	target->catalog_name = table.catalog_name;
-	target->schema_name = table.schema_name;
-	target->table_name = table.table_name;
-	target->alias = "gql_clear_input";
+	target->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+	                         Identifier(table.table_name));
+	target->alias = Identifier("gql_clear_input");
 	auto snapshot = Snapshot(snapshot_name, "gql_clear_snapshot");
 	auto join = make_uniq<JoinRef>(JoinRefType::REGULAR);
 	join->left = std::move(target);
@@ -633,7 +630,7 @@ static unique_ptr<TableRef> ClearPropertiesSourceBindReplace(ClientContext &cont
 	select->from_table = std::move(join);
 	select->modifiers.push_back(make_uniq<DistinctModifier>());
 	auto key = Column("gql_clear_input", table.key_column);
-	key->SetAlias(table.key_column);
+	key->SetAlias(Identifier(table.key_column));
 	select->select_list.push_back(std::move(key));
 	case_insensitive_set_t physical_properties;
 	for (const auto &entry : table.property_columns) {
@@ -641,7 +638,7 @@ static unique_ptr<TableRef> ClearPropertiesSourceBindReplace(ClientContext &cont
 			continue;
 		}
 		auto value = Constant(Value());
-		value->SetAlias(entry.second);
+		value->SetAlias(Identifier(entry.second));
 		select->select_list.push_back(std::move(value));
 	}
 	auto statement = make_uniq<SelectStatement>();
@@ -699,9 +696,8 @@ static unique_ptr<TableRef> InsertTargetBindReplace(ClientContext &context, Tabl
 		}
 	}
 	auto result = make_uniq<BaseTableRef>();
-	result->catalog_name = table.catalog_name;
-	result->schema_name = table.schema_name;
-	result->table_name = table.table_name;
+	result->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+	                         Identifier(table.table_name));
 	return std::move(result);
 }
 
@@ -768,10 +764,9 @@ static unique_ptr<TableRef> InsertResultBindReplace(ClientContext &context, Tabl
 		const auto &table = element_type == GqlPatternElementType::VERTEX ? graph.vertex : graph.edge;
 		auto element_alias = "gql_insert_return_element_" + to_string(projection_index);
 		auto element = make_uniq<BaseTableRef>();
-		element->catalog_name = table.catalog_name;
-		element->schema_name = table.schema_name;
-		element->table_name = table.table_name;
-		element->alias = element_alias;
+		element->SetQualifiedName(Identifier(table.catalog_name), Identifier(table.schema_name),
+		                          Identifier(table.table_name));
+		element->alias = Identifier(element_alias);
 
 		vector<unique_ptr<ParsedExpression>> sequence_arguments;
 		auto sequence_suffix = element_type == GqlPatternElementType::VERTEX ? "_vertex_id_seq" : "_edge_id_seq";
@@ -813,7 +808,7 @@ static unique_ptr<TableRef> InsertIdsBindReplace(ClientContext &context, TableFu
 			vector<unique_ptr<ParsedExpression>> arguments;
 			arguments.push_back(Constant(Value("gql_internal.graph_" + to_string(graph.graph_id) + sequence_suffix)));
 			auto next_id = make_uniq<FunctionExpression>("nextval", std::move(arguments));
-			next_id->SetAlias(column_prefix + to_string(index));
+			next_id->SetAlias(Identifier(column_prefix + to_string(index)));
 			select->select_list.push_back(std::move(next_id));
 		}
 	};
@@ -858,8 +853,8 @@ static unique_ptr<TableRef> MatchInsertIdsBindReplace(ClientContext &context, Ta
 	auto edge_count = input.inputs[2].GetValue<uint64_t>();
 	auto select = make_uniq<SelectNode>();
 	auto source = make_uniq<BaseTableRef>();
-	source->table_name = snapshot_name;
-	source->alias = "gql_match_insert_input";
+	source->SetTable(Identifier(snapshot_name));
+	source->alias = Identifier("gql_match_insert_input");
 	select->from_table = std::move(source);
 	select->select_list.push_back(make_uniq<StarExpression>());
 	auto add_ids = [&](const string &sequence_suffix, const string &column_prefix, uint64_t count) {
@@ -867,7 +862,7 @@ static unique_ptr<TableRef> MatchInsertIdsBindReplace(ClientContext &context, Ta
 			vector<unique_ptr<ParsedExpression>> arguments;
 			arguments.push_back(Constant(Value("gql_internal.graph_" + to_string(graph.graph_id) + sequence_suffix)));
 			auto next_id = make_uniq<FunctionExpression>("nextval", std::move(arguments));
-			next_id->SetAlias(column_prefix + to_string(index));
+			next_id->SetAlias(Identifier(column_prefix + to_string(index)));
 			select->select_list.push_back(std::move(next_id));
 		}
 	};
@@ -908,9 +903,8 @@ static unique_ptr<TableRef> MergeTargetBindReplace(ClientContext &context, Table
 		}
 	}
 	auto result = make_uniq<BaseTableRef>();
-	result->catalog_name = graph.vertex.catalog_name;
-	result->schema_name = graph.vertex.schema_name;
-	result->table_name = graph.vertex.table_name;
+	result->SetQualifiedName(Identifier(graph.vertex.catalog_name), Identifier(graph.vertex.schema_name),
+	                         Identifier(graph.vertex.table_name));
 	return std::move(result);
 }
 
@@ -919,7 +913,7 @@ static unique_ptr<TableRef> MergeIdBindReplace(ClientContext &context, TableFunc
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(Constant(Value("gql_internal.graph_" + to_string(graph.graph_id) + "_vertex_id_seq")));
 	auto next_id = make_uniq<FunctionExpression>("nextval", std::move(arguments));
-	next_id->SetAlias("__gql_new_id");
+	next_id->SetAlias(Identifier("__gql_new_id"));
 	auto select = make_uniq<SelectNode>();
 	select->from_table = make_uniq<EmptyTableRef>();
 	select->select_list.push_back(std::move(next_id));
@@ -982,7 +976,7 @@ static unique_ptr<TableRef> InsertTarget(const char *kind, const GqlInsertElemen
 
 static unique_ptr<SQLStatement> CreateInsertIds(const string &snapshot_name, idx_t vertex_count, idx_t edge_count) {
 	auto create = make_uniq<CreateStatement>();
-	auto info = make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, snapshot_name);
+	auto info = make_uniq<CreateTableInfo>(QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, Identifier(snapshot_name)));
 	info->temporary = true;
 	auto select = make_uniq<SelectNode>();
 	select->from_table =
@@ -1022,7 +1016,7 @@ static unique_ptr<ParsedExpression> InsertScalarLabels(const GqlInsertElement &e
 
 static void AddInsertProperties(MergeIntoAction &action, const GqlInsertElement &element) {
 	for (const auto &property : element.properties) {
-		action.insert_columns.push_back(property.name.value);
+		action.insert_columns.emplace_back(property.name.value);
 		action.expressions.push_back(Constant(InsertLiteralValue(property.value)));
 	}
 }
@@ -1030,9 +1024,9 @@ static void AddInsertProperties(MergeIntoAction &action, const GqlInsertElement 
 static unique_ptr<SQLStatement> LowerInsertVertex(const string &snapshot_name, idx_t vertex_index,
                                                   const GqlInsertElement &vertex) {
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target = InsertTarget("VERTEX", vertex, "gql_insert_target");
-	statement->source = Snapshot(snapshot_name, "gql_insert_source");
-	statement->join_condition = Constant(Value(false));
+	statement->node->target = InsertTarget("VERTEX", vertex, "gql_insert_target");
+	statement->node->source = Snapshot(snapshot_name, "gql_insert_source");
+	statement->node->join_condition = Constant(Value(false));
 
 	auto action = make_uniq<MergeIntoAction>();
 	action->action_type = MergeActionType::MERGE_INSERT;
@@ -1041,16 +1035,16 @@ static unique_ptr<SQLStatement> LowerInsertVertex(const string &snapshot_name, i
 	action->expressions.push_back(Column("gql_insert_source", id_column));
 	action->expressions.push_back(InsertLabels(vertex));
 	AddInsertProperties(*action, vertex);
-	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
+	statement->node->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
 }
 
 static unique_ptr<SQLStatement> LowerInsertEdge(const string &snapshot_name, idx_t edge_index,
                                                 const GqlInsertEdge &edge) {
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target = InsertTarget("EDGE", edge, "gql_insert_target");
-	statement->source = Snapshot(snapshot_name, "gql_insert_source");
-	statement->join_condition = Constant(Value(false));
+	statement->node->target = InsertTarget("EDGE", edge, "gql_insert_target");
+	statement->node->source = Snapshot(snapshot_name, "gql_insert_source");
+	statement->node->join_condition = Constant(Value(false));
 
 	auto action = make_uniq<MergeIntoAction>();
 	action->action_type = MergeActionType::MERGE_INSERT;
@@ -1060,7 +1054,7 @@ static unique_ptr<SQLStatement> LowerInsertEdge(const string &snapshot_name, idx
 	action->expressions.push_back(Column("gql_insert_source", "vertex_id_" + to_string(edge.target_vertex)));
 	action->expressions.push_back(InsertScalarLabels(edge));
 	AddInsertProperties(*action, edge);
-	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
+	statement->node->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
 }
 
@@ -1146,7 +1140,7 @@ static unique_ptr<TableRef> MatchInsertTarget(const char *kind, const vector<Gql
 static unique_ptr<SQLStatement> CreateMatchInsertIds(const string &source_snapshot, const string &ids_snapshot,
                                                      idx_t vertex_count, idx_t edge_count) {
 	auto create = make_uniq<CreateStatement>();
-	auto info = make_uniq<CreateTableInfo>(TEMP_CATALOG, DEFAULT_SCHEMA, ids_snapshot);
+	auto info = make_uniq<CreateTableInfo>(QualifiedName(TEMP_CATALOG, DEFAULT_SCHEMA, Identifier(ids_snapshot)));
 	info->temporary = true;
 	auto select = make_uniq<SelectNode>();
 	select->from_table = FunctionTable(
@@ -1187,7 +1181,7 @@ static unique_ptr<ParsedExpression> MatchInsertScalarLabels(const vector<string>
 
 static void AddMatchInsertProperties(MergeIntoAction &action, const vector<GqlBoundInsertProperty> &properties) {
 	for (const auto &property : properties) {
-		action.insert_columns.push_back(property.name);
+		action.insert_columns.emplace_back(property.name);
 		action.expressions.push_back(Column("gql_match_insert_source", property.value_column));
 	}
 }
@@ -1198,9 +1192,9 @@ static string MatchInsertVertexIdColumn(const GqlBoundInsertVertex &vertex) {
 
 static unique_ptr<SQLStatement> LowerMatchInsertVertex(const string &ids_snapshot, const GqlBoundInsertVertex &vertex) {
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target = MatchInsertTarget("VERTEX", vertex.properties, "gql_insert_target");
-	statement->source = Snapshot(ids_snapshot, "gql_match_insert_source");
-	statement->join_condition = Constant(Value(false));
+	statement->node->target = MatchInsertTarget("VERTEX", vertex.properties, "gql_insert_target");
+	statement->node->source = Snapshot(ids_snapshot, "gql_match_insert_source");
+	statement->node->join_condition = Constant(Value(false));
 
 	auto action = make_uniq<MergeIntoAction>();
 	action->action_type = MergeActionType::MERGE_INSERT;
@@ -1209,16 +1203,16 @@ static unique_ptr<SQLStatement> LowerMatchInsertVertex(const string &ids_snapsho
 	action->expressions.push_back(Column("gql_match_insert_source", id_column));
 	action->expressions.push_back(MatchInsertLabels(vertex.labels));
 	AddMatchInsertProperties(*action, vertex.properties);
-	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
+	statement->node->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
 }
 
 static unique_ptr<SQLStatement> LowerMatchInsertEdge(const string &ids_snapshot, const GqlBoundInsert &insert,
                                                      const GqlBoundInsertEdge &edge) {
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target = MatchInsertTarget("EDGE", edge.properties, "gql_insert_target");
-	statement->source = Snapshot(ids_snapshot, "gql_match_insert_source");
-	statement->join_condition = Constant(Value(false));
+	statement->node->target = MatchInsertTarget("EDGE", edge.properties, "gql_insert_target");
+	statement->node->source = Snapshot(ids_snapshot, "gql_match_insert_source");
+	statement->node->join_condition = Constant(Value(false));
 
 	auto action = make_uniq<MergeIntoAction>();
 	action->action_type = MergeActionType::MERGE_INSERT;
@@ -1230,7 +1224,7 @@ static unique_ptr<SQLStatement> LowerMatchInsertEdge(const string &ids_snapshot,
 	    Column("gql_match_insert_source", MatchInsertVertexIdColumn(insert.vertices[edge.target_vertex])));
 	action->expressions.push_back(MatchInsertScalarLabels(edge.labels));
 	AddMatchInsertProperties(*action, edge.properties);
-	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
+	statement->node->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(action));
 	return std::move(statement);
 }
 
@@ -1272,9 +1266,9 @@ static unique_ptr<SQLStatement> LowerMergeStatement(const GqlMergeStatement &mer
 	}
 
 	auto statement = make_uniq<MergeIntoStatement>();
-	statement->target =
+	statement->node->target =
 	    FunctionTable("gql_merge_target", {Value::LIST(LogicalType::VARCHAR, property_names)}, "gql_merge_target");
-	statement->source = FunctionTable("gql_merge_id", {}, "gql_merge_source");
+	statement->node->source = FunctionTable("gql_merge_id", {}, "gql_merge_source");
 
 	unique_ptr<ParsedExpression> condition;
 	for (const auto &label : merge.vertex.labels) {
@@ -1289,7 +1283,7 @@ static unique_ptr<SQLStatement> LowerMergeStatement(const GqlMergeStatement &mer
 	if (!condition) {
 		throw InternalException("MERGE lowering requires a match condition");
 	}
-	statement->join_condition = std::move(condition);
+	statement->node->join_condition = std::move(condition);
 
 	auto insert = make_uniq<MergeIntoAction>();
 	insert->action_type = MergeActionType::MERGE_INSERT;
@@ -1301,10 +1295,10 @@ static unique_ptr<SQLStatement> LowerMergeStatement(const GqlMergeStatement &mer
 	}
 	insert->expressions.push_back(Constant(LabelListValue(labels)));
 	for (const auto &property : merge.vertex.properties) {
-		insert->insert_columns.push_back(property.name.value);
+		insert->insert_columns.emplace_back(property.name.value);
 		insert->expressions.push_back(Constant(MergeLiteralValue(property.value)));
 	}
-	statement->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(insert));
+	statement->node->actions[MergeActionCondition::WHEN_NOT_MATCHED_BY_TARGET].push_back(std::move(insert));
 	return std::move(statement);
 }
 

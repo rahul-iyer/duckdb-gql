@@ -15,6 +15,8 @@ import statistics
 import subprocess
 from pathlib import Path
 
+from duckdb_profile import normalize_profile
+
 
 def literal(value):
     return "'" + str(value).replace("'", "''") + "'"
@@ -170,7 +172,7 @@ RETURN count(*);"""
                 script += f".output {result}\n{query}\n.output /dev/null\nPRAGMA disable_profiling;\n"
             run(cli, script)
             for name in queries:
-                profile = json.loads((directory / f"{variant}_{round_id}_{name}.json").read_text())
+                profile = normalize_profile(json.loads((directory / f"{variant}_{round_id}_{name}.json").read_text()))
                 samples[name][variant].append(profile["latency"])
                 result = (directory / f"{variant}_{round_id}_{name}.csv").read_text()
                 if name in results and results[name] != result:

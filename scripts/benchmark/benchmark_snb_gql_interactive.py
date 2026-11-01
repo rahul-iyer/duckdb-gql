@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from duckdb_profile import normalize_profile
+
 
 EXPECTED_VERTICES = 29_987_835
 EXPECTED_EDGES = 178_561_949
@@ -566,6 +568,7 @@ def parse_profiles(stderr: str) -> list[dict[str, Any]]:
             break
         try:
             value, end = decoder.raw_decode(stderr, start)
+            value = normalize_profile(value)
         except json.JSONDecodeError:
             offset = start + 1
             continue

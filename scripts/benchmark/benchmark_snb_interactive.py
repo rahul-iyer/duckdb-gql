@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from duckdb_profile import normalize_profile
+
 
 TIMER_RE = re.compile(r"Run Time \(s\): real ([0-9.]+)")
 
@@ -510,6 +512,7 @@ def profile_query(
             break
         try:
             value, end = decoder.raw_decode(completed.stderr, start)
+            value = normalize_profile(value)
         except json.JSONDecodeError:
             offset = start + 1
             continue

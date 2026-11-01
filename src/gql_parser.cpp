@@ -1,4 +1,5 @@
 #include "gql_parser.hpp"
+#include "duckdb/parser/statement/extension_statement.hpp"
 
 #include "GQLLexer.h"
 #include "GQLParser.h"
@@ -254,9 +255,9 @@ static bool StartsWithGqlCommand(const string &query) {
 	       StartsWithGqlKeywords(query, {"SESSION", "SET", "PROPERTY", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "GRAPH"}) ||
 	       StartsWithGqlKeywords(query, {"SESSION", "RESET", "PROPERTY", "GRAPH"}) ||
-	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) ||
-	       StartsWithGqlKeywords(query, {"ANALYZE", "GRAPH"}) || StartsWithMergePattern(query) ||
-	       StartsWithGqlKeywords(query, {"MATCH"}) || StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) ||
+	       StartsWithGqlKeywords(query, {"COPY", "GRAPH"}) || StartsWithGqlKeywords(query, {"ANALYZE", "GRAPH"}) ||
+	       StartsWithMergePattern(query) || StartsWithGqlKeywords(query, {"MATCH"}) ||
+	       StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) ||
 	       StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') || StartsWithAlgorithmCall(query);
 }
 
@@ -1740,8 +1741,7 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 		parse_data->statement = std::move(statement);
 		return ParserExtensionParseResult(std::move(parse_data));
 	}
-	if (StartsWithGqlKeywords(gql_query, {"COPY", "GRAPH"}) ||
-	    StartsWithGqlKeywords(gql_query, {"ANALYZE", "GRAPH"})) {
+	if (StartsWithGqlKeywords(gql_query, {"COPY", "GRAPH"}) || StartsWithGqlKeywords(gql_query, {"ANALYZE", "GRAPH"})) {
 		auto parse_data = make_uniq<GqlParseData>();
 		parse_data->query = gql_query;
 		parse_data->statement = GraphMaintenanceParser(gql_query).Parse();
@@ -1896,7 +1896,7 @@ static string LowerAlgorithmCall(const GqlCallStatement &call) {
 struct GqlExplainInput {
 	string query;
 	ExplainType type = ExplainType::EXPLAIN_STANDARD;
-	ExplainFormat format = ExplainFormat::DEFAULT;
+	ProfilerPrintFormat format = ProfilerPrintFormat::Default();
 };
 
 static idx_t SkipWhitespace(const string &query, idx_t offset) {
@@ -1998,7 +1998,7 @@ static bool TryParseGqlExplain(const string &query, ParserOptions &options, GqlE
 	auto &explain = parser.statements[0]->Cast<ExplainStatement>();
 	result.query = std::move(inner_query);
 	result.type = explain.explain_type;
-	result.format = explain.explain_format;
+	result.format = explain.format;
 	return true;
 }
 
@@ -2186,7 +2186,19 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			}
 			return ParserOverrideResult(std::move(statements));
 		} catch (std::exception &error) {
-			return ParserOverrideResult(error);
+			throw;
+		}
+	}
+
+	// These prefixes also name valid SQL commands on a table called "graph".
+	// Preserve native SQL dispatch before claiming the raw query as GQL.
+	if (StartsWithGqlKeywords(query, {"ANALYZE", "GRAPH"}) || StartsWithGqlKeywords(query, {"COPY", "GRAPH"})) {
+		try {
+			auto parser = Parser::GetBuiltinParser();
+			parser.ParseQuery(query);
+			return ParserOverrideResult();
+		} catch (const ParserException &) {
+			// A graph lifecycle command has an additional graph name or FROM clause.
 		}
 	}
 
@@ -2204,13 +2216,12 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			auto statement =
 			    make_uniq<ExplainStatement>(std::move(lowered.statements[0]), explain.type, explain.format);
 			statement->query = query;
-			statement->stmt_location = 0;
-			statement->stmt_length = query.size();
+			statement->stmt_location = QueryLocation(0, query.size());
 			statements.push_back(std::move(statement));
 			return ParserOverrideResult(std::move(statements));
 		}
 	} catch (std::exception &error) {
-		return ParserOverrideResult(error);
+		throw;
 	}
 
 	string rewritten;
@@ -2219,17 +2230,17 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 		parser.ParseQuery(rewritten);
 		for (auto &statement : parser.statements) {
 			statement->query = query;
-			statement->stmt_location = 0;
-			statement->stmt_length = query.size();
+			statement->stmt_location = QueryLocation(0, query.size());
 		}
 		return ParserOverrideResult(std::move(parser.statements));
 	}
-	if (!StartsWithMergePattern(query) && !StartsWithGqlKeywordsAndCharacter(query, {"INSERT"}, '(') &&
-	    !StartsWithGqlKeywords(query, {"MATCH"}) && !StartsWithGqlKeywords(query, {"OPTIONAL", "MATCH"}) &&
-	    !StartsWithAlgorithmCall(query)) {
+	if (!StartsWithGqlCommand(query)) {
 		return ParserOverrideResult();
 	}
 	auto parsed = GqlParse(nullptr, query);
+	if (parsed.type == ParserExtensionResultType::DISPLAY_EXTENSION_ERROR) {
+		throw ParserException::SyntaxError(query, parsed.error, parsed.error_location);
+	}
 	if (parsed.type != ParserExtensionResultType::PARSE_SUCCESSFUL) {
 		return ParserOverrideResult();
 	}
@@ -2243,8 +2254,7 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			auto statements = GqlLowerInsert(gql_ptr->statement->Cast<GqlInsertStatement>());
 			for (auto &statement : statements) {
 				statement->query = query;
-				statement->stmt_location = 0;
-				statement->stmt_length = query.size();
+				statement->stmt_location = QueryLocation(0, query.size());
 			}
 			return ParserOverrideResult(std::move(statements));
 		}
@@ -2252,8 +2262,7 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			auto statements = GqlLowerMerge(gql_ptr->statement->Cast<GqlMergeStatement>());
 			for (auto &statement : statements) {
 				statement->query = query;
-				statement->stmt_location = 0;
-				statement->stmt_length = query.size();
+				statement->stmt_location = QueryLocation(0, query.size());
 			}
 			return ParserOverrideResult(std::move(statements));
 		}
@@ -2263,13 +2272,17 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			parser.ParseQuery(LowerAlgorithmCall(call));
 			for (auto &statement : parser.statements) {
 				statement->query = query;
-				statement->stmt_location = 0;
-				statement->stmt_length = query.size();
+				statement->stmt_location = QueryLocation(0, query.size());
 			}
 			return ParserOverrideResult(std::move(parser.statements));
 		}
 		if (gql_ptr->statement->type != GqlStatementType::MATCH) {
-			return ParserOverrideResult();
+			vector<unique_ptr<SQLStatement>> statements;
+			auto statement = make_uniq<ExtensionStatement>(GqlParserExtension(), std::move(parsed.parse_data));
+			statement->query = query;
+			statement->stmt_location = QueryLocation(0, query.size());
+			statements.push_back(std::move(statement));
+			return ParserOverrideResult(std::move(statements));
 		}
 		GqlBinder binder;
 		auto &match = gql_ptr->statement->Cast<GqlMatchStatement>();
@@ -2282,17 +2295,17 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 		}
 		for (auto &statement : statements) {
 			statement->query = query;
-			statement->stmt_location = 0;
-			statement->stmt_length = query.size();
+			statement->stmt_location = QueryLocation(0, query.size());
 		}
 		return ParserOverrideResult(std::move(statements));
 	} catch (std::exception &error) {
-		return ParserOverrideResult(error);
+		throw;
 	}
 }
 
 GqlParserExtension::GqlParserExtension() : ParserExtension() {
-	parse_function = GqlParse;
+	// Use the raw-query override to preserve GQL whitespace, comments and operators.
+	// DuckDB 2.0's parse_function receives only SQL-tokenized input.
 	plan_function = GqlPlan;
 	parser_override = GqlParserOverride;
 	parser_info = make_shared_ptr<GqlParserExtensionInfo>();

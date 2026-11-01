@@ -42,7 +42,7 @@ statement ok
 UPDATE gql_data.graph_1_vertices SET score = 7
 
 query I
-SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+SELECT (stats(score).approx_unique)::BIGINT = 1 FROM gql_data.graph_1_vertices LIMIT 1
 ----
 false
 
@@ -55,12 +55,12 @@ analyze /* stats */ graph REFRESH_STATS
 true	refresh_stats	2
 
 query I
-SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+SELECT (stats(score).approx_unique)::BIGINT = 1 FROM gql_data.graph_1_vertices LIMIT 1
 ----
 true
 
 query I
-SELECT contains(stats(__gql_source_id), '[Approx Unique: 1]') FROM gql_data.graph_1_edges LIMIT 1
+SELECT (stats(__gql_source_id).approx_unique)::BIGINT = 1 FROM gql_data.graph_1_edges LIMIT 1
 ----
 true
 
@@ -70,7 +70,7 @@ statement ok
 ANALYZE GRAPH refresh_stats
 
 query I
-SELECT contains(stats(score), '[Approx Unique: 1]') FROM gql_data.graph_1_vertices LIMIT 1
+SELECT (stats(score).approx_unique)::BIGINT = 1 FROM gql_data.graph_1_vertices LIMIT 1
 ----
 true
 
@@ -93,6 +93,17 @@ CREATE TABLE graph (i INTEGER)
 
 statement ok
 ANALYZE graph
+
+statement ok
+INSERT INTO graph VALUES (42)
+
+statement ok
+COPY graph TO '__TEST_DIR__/native_graph_table.csv' (HEADER)
+
+query I
+SELECT i FROM read_csv('__TEST_DIR__/native_graph_table.csv')
+----
+42
 
 statement ok
 BEGIN

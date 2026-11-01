@@ -28,7 +28,8 @@
 namespace duckdb {
 
 static void ObserveTableWrite(ClientContext &context, TableCatalogEntry &table) {
-	GqlNotifyCsrTableWritePlanned(context, table.catalog.GetName(), table.schema.name, table.name);
+	GqlNotifyCsrTableWritePlanned(context, table.catalog.GetName().GetIdentifierName(),
+	                              table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
 }
 
 static void ObserveWrites(ClientContext &context, const LogicalOperator &operation) {
@@ -70,14 +71,14 @@ static void RegisterAlgorithmFunctions(ExtensionLoader &loader) {
 	auto &catalog = Catalog::GetSystemCatalog(database);
 	auto transaction = CatalogTransaction::GetSystemTransaction(database);
 	CreateSchemaInfo schema;
-	schema.schema = "algo";
+	schema.SetSchema("algo");
 	schema.internal = true;
 	schema.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 	catalog.CreateSchema(transaction, schema);
 
 	auto register_function = [&](TableFunction function) {
 		CreateTableFunctionInfo info(std::move(function));
-		info.schema = "algo";
+		info.SetSchema("algo");
 		info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 		loader.RegisterFunction(std::move(info));
 	};

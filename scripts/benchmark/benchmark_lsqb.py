@@ -16,6 +16,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from duckdb_profile import normalize_profile
+
 ROOT = Path(__file__).resolve().parents[2]
 VERTICES = ['Company', 'University', 'Continent', 'Country', 'City', 'Forum',
             'Comment', 'Post', 'Person', 'Tag', 'TagClass']
@@ -209,7 +211,7 @@ def main():
                             entry['status'] = 'mismatch'
                             entry['actual_rows'] = rows
                             raise ValueError(f'expected {expected[index]}, got {rows}')
-                        profile = json.loads(Path(str(stem) + f'-{sample}.json').read_text())
+                        profile = normalize_profile(json.loads(Path(str(stem) + f'-{sample}.json').read_text()))
                         entry['seconds'].append(profile['latency'])
                     entry['status'] = 'verified'
                     entry['median_ms'] = statistics.median(entry['seconds']) * 1000

@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from duckdb_profile import normalize_profile
+
 
 RSS_RE = re.compile(r"^\s*(\d+)\s+maximum resident set size\s*$", re.MULTILINE)
 GNU_RSS_RE = re.compile(r"Maximum resident set size \(kbytes\):\s*(\d+)")
@@ -51,6 +53,7 @@ def parse_profiles(stderr: str, query_prefix: str) -> list[dict[str, Any]]:
             break
         try:
             value, end = decoder.raw_decode(stderr, start)
+            value = normalize_profile(value)
         except json.JSONDecodeError:
             offset = start + 1
             continue

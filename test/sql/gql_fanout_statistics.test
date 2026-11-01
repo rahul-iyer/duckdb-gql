@@ -68,7 +68,7 @@ statement ok
 PRAGMA disable_profiling
 
 query I
-SELECT regexp_matches(content, '"Conditions":\s*\[\s*"__gql_id = __gql_target_id"[^}]*"Delim Index"|"Delim Index"[^}]*"Conditions":\s*\[\s*"__gql_id = __gql_target_id"') FROM read_text('__TEST_DIR__/fanout_direction.json')
+SELECT regexp_matches(content, '"Dynamic Filters":[^}]*__gql_target_id = 2') FROM read_text('__TEST_DIR__/fanout_direction.json')
 ----
 1
 
@@ -99,7 +99,7 @@ statement ok
 PRAGMA disable_profiling
 
 query I
-SELECT regexp_matches(content, '"Conditions":\s*\[\s*"__gql_id = __gql_source_id"[^}]*"Delim Index"|"Delim Index"[^}]*"Conditions":\s*\[\s*"__gql_id = __gql_source_id"') FROM read_text('__TEST_DIR__/fanout_no_statistics.json')
+SELECT regexp_matches(content, '"Dynamic Filters":[^}]*__gql_source_id = 1') FROM read_text('__TEST_DIR__/fanout_no_statistics.json')
 ----
 1
 

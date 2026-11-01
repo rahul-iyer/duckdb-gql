@@ -46,7 +46,7 @@ LOAD duckgql;
 
 ## Build from source
 
-DuckGQL currently targets DuckDB `v1.5.5` and uses ANTLR `4.13.2`.
+DuckGQL currently targets DuckDB `v2.0.0` and uses ANTLR `4.13.2`.
 
 Prerequisites:
 
@@ -83,7 +83,7 @@ The locally built DuckDB shell has DuckGQL preloaded:
 
 The GitHub Actions distribution workflow builds platform-specific extension
 artifacts. DuckDB extensions are tied to both a DuckDB version and a target
-platform, so download the artifact matching DuckDB `v1.5.5` and your operating
+platform, so download the artifact matching DuckDB `v2.0.0` and your operating
 system architecture.
 
 Development artifacts are unsigned. Start a matching DuckDB CLI with unsigned

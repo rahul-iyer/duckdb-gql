@@ -57,7 +57,7 @@ statement ok
 PRAGMA disable_profiling
 
 query I
-SELECT CAST(regexp_extract(content, '"cumulative_cardinality"\s*:\s*([0-9]+)', 1) AS BIGINT) < 20000
+SELECT CAST(regexp_extract(content, '"total_intermediate_rows"\s*:\s*([0-9]+)', 1) AS BIGINT) < 20000
 FROM read_text('__TEST_DIR__/distinct_fetch.json')
 ----
 true

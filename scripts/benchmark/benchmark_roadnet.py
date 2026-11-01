@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from duckdb_profile import normalize_profile
+
 
 PHASE_MARKER = "__GQL_BENCH_PHASE__"
 RESULT_MARKER = "__GQL_BENCH_RESULT__"
@@ -377,6 +379,7 @@ def parse_profiles(stderr: str, query_prefix: str) -> list[dict[str, Any]]:
             break
         try:
             value, end = decoder.raw_decode(stderr, start)
+            value = normalize_profile(value)
         except json.JSONDecodeError:
             offset = start + 1
             continue
