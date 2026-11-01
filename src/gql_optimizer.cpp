@@ -5,6 +5,19 @@
 #include "gql_import.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_state.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/storage/statistics/base_statistics.hpp"
+#include "duckdb/storage/statistics/numeric_stats.hpp"
+#include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/storage/table_storage_info.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 namespace duckdb {
 
@@ -411,11 +424,6 @@ static idx_t LabelPostingCardinality(const GqlCsrSnapshot &snapshot, const strin
 	return NumericCast<idx_t>(end - start);
 }
 
-static bool LabelPostingBeatsScan(const GqlCsrSnapshot &snapshot, const string &label) {
-	auto threshold = MaxValue<idx_t>(1024, snapshot.vertex_ids.size() / 16);
-	return LabelPostingCardinality(snapshot, label) <= threshold;
-}
-
 static bool ContainsLabel(const vector<string> &labels, const string &candidate) {
 	for (const auto &label : labels) {
 		if (StringUtil::CIEquals(label, candidate)) {
@@ -452,7 +460,9 @@ static idx_t EstimateFixedExpansionRows(const GqlFanoutStatistics &statistics, c
 		return 0;
 	}
 	auto estimate = static_cast<long double>(seed_rows) * stats->edge_count / active_vertices;
-	return MinValue<idx_t>(ClampCardinality(estimate), NumericCast<idx_t>(stats->edge_count));
+	// A bag of seeds may visit the same edge many times. Edge count is not
+	// an upper bound unless seed uniqueness has been proved.
+	return ClampCardinality(estimate);
 }
 
 static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, const GqlBindingAccessPath &path,
@@ -475,8 +485,12 @@ static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, cons
 		// conservative small-frontier estimate; it affects only the choice
 		// between direct row fetch and bulk scan, never query semantics.
 		auto estimate = static_cast<long double>(seed_rows) * 4;
-		return MinValue<idx_t>(ClampCardinality(estimate), NumericCast<idx_t>(stats->edge_count + seed_rows));
+		return ClampCardinality(estimate);
 	}
+	// Cost estimation must have bounded planning work even for a very large
+	// user-supplied repetition bound. This does not restrict execution semantics.
+	if (path.maximum_repetitions > 64)
+		return DConstants::INVALID_INDEX;
 	idx_t frontier = seed_rows;
 	idx_t result = 0;
 	for (idx_t depth = 1; depth <= path.maximum_repetitions; depth++) {
@@ -491,39 +505,206 @@ static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, cons
 	return result;
 }
 
-static constexpr idx_t GQL_BATCHED_ELEMENT_FETCH_THRESHOLD = 4096;
-
-static bool BatchedElementFetchBeatsScan(idx_t frontier_rows) {
-	return frontier_rows != DConstants::INVALID_INDEX && frontier_rows <= GQL_BATCHED_ELEMENT_FETCH_THRESHOLD;
-}
-
-static bool CsrFrontierBeatsBulkScan(const GqlFanoutStatistics &statistics, const string &label, idx_t frontier_rows) {
-	auto stats = TryEdgeLabelStats(statistics, label);
-	if (!stats || frontier_rows == DConstants::INVALID_INDEX) {
-		return false;
+// Statistics are read through the caller's catalog/transaction, never by
+// executing aggregate queries while binding. Referenced relations without a
+// single native table deliberately retain an unknown estimate.
+class GqlNativeStatistics {
+public:
+	GqlNativeStatistics(ClientContext &context_p, const GqlElementTableBinding &binding) : context(context_p) {
+		if (!binding.relation_sql.empty())
+			return;
+		auto &catalog = Catalog::GetCatalog(context, Identifier(binding.catalog_name));
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(binding.schema_name),
+		                              Identifier(binding.table_name), OnEntryNotFound::RETURN_NULL);
+		if (!entry || !entry->Cast<TableCatalogEntry>().IsDuckTable())
+			return;
+		table = &entry->Cast<TableCatalogEntry>();
+		auto info = table->GetStorageInfo(context);
+		if (info.cardinality.IsValid())
+			rows = info.cardinality.GetIndex();
+		for (const auto &index : info.index_info) {
+			if (index.column_set.size() == 1) {
+				auto column = *index.column_set.begin();
+				indexed.insert(column);
+				if (index.is_unique)
+					unique.insert(column);
+			}
+		}
 	}
-	auto threshold = MaxValue<idx_t>(1024, NumericCast<idx_t>(stats->edge_count / 64));
-	return frontier_rows <= threshold;
-}
 
-static bool CsrAvailableSeedBeatsBulkScan(const GqlFanoutStatistics &statistics, const string &label,
-                                          const string &direction) {
-	auto stats = TryEdgeLabelStats(statistics, label);
-	if (!stats) {
-		return false;
+	bool HasIndex(const string &column, bool require_unique = false) const {
+		if (!table || !table->ColumnExists(Identifier(column)))
+			return false;
+		auto physical = table->GetColumn(Identifier(column)).StorageOid();
+		return (require_unique ? unique : indexed).count(physical) > 0;
 	}
-	auto maximum_degree = direction == "out" ? stats->max_outgoing_degree : stats->max_incoming_degree;
-	auto threshold = MaxValue<uint64_t>(1024, stats->edge_count / 64);
-	return maximum_degree <= threshold;
+
+	idx_t Distinct(const string &column) {
+		auto key = StringUtil::Lower(column);
+		auto found = distinct.find(key);
+		if (found != distinct.end())
+			return found->second;
+		idx_t count = DConstants::INVALID_INDEX;
+		if (table && table->ColumnExists(Identifier(column))) {
+			auto &definition = table->GetColumn(Identifier(column));
+			auto stats = table->GetStatistics(context, definition.Logical().index);
+			if (stats && stats->GetDistinctCount() > 0)
+				count = stats->GetDistinctCount();
+		}
+		distinct[key] = count;
+		return count;
+	}
+
+	double Selectivity(const GqlExpressionProgram &program, idx_t node, idx_t binding,
+	                   const GqlElementTableBinding &mapping) {
+		if (!table || node >= program.node_types.size() ||
+		    static_cast<GqlExpressionType>(program.node_types[node]) != GqlExpressionType::BINARY)
+			return 1;
+		auto op = static_cast<GqlBinaryOperator>(program.operators[node]);
+		auto left = node + 1, right = AccessExpressionEnd(program, left);
+		if (op == GqlBinaryOperator::AND) {
+			// Without joint distributions, avoid multiplying correlated predicates.
+			return MinValue<double>(Selectivity(program, left, binding, mapping),
+			                        Selectivity(program, right, binding, mapping));
+		}
+		auto property = [&](idx_t index) {
+			return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::PROPERTY_REFERENCE &&
+			       program.binding_indices[index] == binding;
+		};
+		auto literal = [&](idx_t index) {
+			return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::LITERAL;
+		};
+		bool reversed = false;
+		if (!(property(left) && literal(right))) {
+			if (!(literal(left) && property(right)))
+				return 1;
+			std::swap(left, right);
+			reversed = true;
+		}
+		string column;
+		if (!TryFindCaseInsensitive(mapping.property_columns, program.properties[left], column) ||
+		    !table->ColumnExists(Identifier(column)))
+			return 1;
+		if (op == GqlBinaryOperator::EQUAL) {
+			auto ndv = Distinct(column);
+			return ndv == DConstants::INVALID_INDEX ? 1 : 1.0 / MaxValue<idx_t>(1, ndv);
+		}
+		if (op != GqlBinaryOperator::LESS_THAN && op != GqlBinaryOperator::LESS_THAN_OR_EQUAL &&
+		    op != GqlBinaryOperator::GREATER_THAN && op != GqlBinaryOperator::GREATER_THAN_OR_EQUAL)
+			return 1;
+		auto &definition = table->GetColumn(Identifier(column));
+		auto stats = table->GetStatistics(context, definition.Logical().index);
+		if (!stats || stats->GetStatsType() != StatisticsType::NUMERIC_STATS || !NumericStats::HasMinMax(*stats))
+			return 1;
+		auto numeric = [](Value value) {
+			switch (value.type().id()) {
+			case LogicalTypeId::DATE:
+			case LogicalTypeId::TIMESTAMP:
+			case LogicalTypeId::TIMESTAMP_SEC:
+			case LogicalTypeId::TIMESTAMP_MS:
+			case LogicalTypeId::TIMESTAMP_NS:
+			case LogicalTypeId::TIMESTAMP_TZ:
+				return static_cast<double>(value.DefaultCastAs(LogicalType::TIMESTAMP).GetValue<timestamp_t>().value);
+			default:
+				return value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+			}
+		};
+		// Unsupported casts and nonnumeric predicates retain an unknown selectivity.
+		// The ordinary binder still checks and reports invalid user expressions.
+		try {
+			auto value = numeric(Value(program.values[right]).DefaultCastAs(definition.Type()));
+			auto low = numeric(NumericStats::Min(*stats)), high = numeric(NumericStats::Max(*stats));
+			if (!std::isfinite(value) || !std::isfinite(low) || !std::isfinite(high) || high <= low)
+				return 1;
+			auto fraction = std::max(0.0, std::min(1.0, (value - low) / (high - low)));
+			bool less = op == GqlBinaryOperator::LESS_THAN || op == GqlBinaryOperator::LESS_THAN_OR_EQUAL;
+			if (reversed)
+				less = !less;
+			return less ? fraction : 1 - fraction;
+		} catch (const Exception &) {
+			return 1;
+		}
+	}
+
+	idx_t Width(const vector<string> &columns) const {
+		idx_t width = 0;
+		if (table) {
+			for (const auto &column : table->GetColumns().Logical()) {
+				if (!columns.empty() && std::none_of(columns.begin(), columns.end(), [&](const string &name) {
+					    return StringUtil::CIEquals(name, column.Name().GetIdentifierName());
+				    }))
+					continue;
+				switch (column.Type().id()) {
+				case LogicalTypeId::VARCHAR:
+					width += 32;
+					break;
+				case LogicalTypeId::LIST:
+				case LogicalTypeId::STRUCT:
+					width += 64;
+					break;
+				default:
+					width += 8;
+					break;
+				}
+			}
+		}
+		return MaxValue<idx_t>(8, width ? width : (columns.empty() ? 64 : columns.size() * 16));
+	}
+
+	idx_t rows = DConstants::INVALID_INDEX;
+
+private:
+	ClientContext &context;
+	optional_ptr<TableCatalogEntry> table;
+	unordered_map<string, idx_t> distinct;
+	unordered_set<column_t> indexed;
+	unordered_set<column_t> unique;
+};
+
+static GqlPlanCost AccessCost(const GqlCostModel &cost_model, const GqlBindingAccessPath &path, idx_t total_rows) {
+	auto scan = cost_model.Scan(total_rows, path.cardinality.rows, path.cardinality.row_width);
+	if (path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+		return cost_model.Fetch(path.candidate_rows, path.cardinality.row_width);
+	}
+
+	if (path.type == GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
+		// The candidate relation guarantees its point predicate before traversal.
+		// DuckDB may implement it with either ART or a scan; both are legal costs.
+		auto lookup = cost_model.Lookup(total_rows, path.candidate_rows, path.cardinality.row_width);
+		auto candidate_scan = cost_model.Scan(total_rows, path.candidate_rows, path.cardinality.row_width);
+		auto result = lookup.Total() < candidate_scan.Total() ? lookup : candidate_scan;
+		if (path.candidate_rows != DConstants::INVALID_INDEX) {
+			result.join += static_cast<double>(path.candidate_rows) * 0.05;
+			result.peak_memory_bytes = MaxValue<idx_t>(
+			    result.peak_memory_bytes,
+			    ClampCardinality(static_cast<long double>(path.candidate_rows) * path.cardinality.row_width));
+		}
+		return result;
+	}
+	if (path.native_index_filter) {
+		auto lookup = cost_model.Lookup(total_rows, path.cardinality.rows, path.cardinality.row_width);
+		return lookup.Total() < scan.Total() ? lookup : scan;
+	}
+	return scan;
 }
 
-GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
-                                         const GqlTableGraphBinding &graph, const GqlAccessPathInput &input) {
+static void PublishAccessPlan(ClientContext &context, const string &graph_name, const GqlAccessPathPlan &plan);
+
+GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const string &graph_name,
+                                               const GqlTableGraphBinding &graph, const GqlAccessPathInput &input);
+
+static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, const string &graph_name,
+                                                    const GqlTableGraphBinding &graph,
+                                                    const GqlAccessPathInput &input) {
 	if (input.root >= input.nodes.size() || input.binding_types.empty() || input.match_stages.empty()) {
 		throw InternalException("Cannot optimize empty GQL graph access paths");
 	}
 
 	auto snapshot = GqlTryGetCsrSnapshot(context, graph_name);
+	if (snapshot && graph.cached_reference_ids && snapshot->source_snapshot_id != graph.source_snapshot_id)
+		snapshot.reset();
+	const bool can_fetch_referenced = snapshot && graph.cached_reference_ids;
+
 	GqlFanoutStatistics statistics;
 	// A valid CSR reflects table-write invalidation too, so prefer its fresh
 	// statistics when available (including after direct SQL writes).
@@ -585,15 +766,53 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 		}
 	}
 
+	GqlCostModel cost_model(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	GqlNativeStatistics vertex_statistics(context, graph.vertex);
+	GqlNativeStatistics edge_statistics(context, graph.edge);
+	const auto vertex_count = snapshot ? snapshot->vertex_ids.size() : vertex_statistics.rows;
+	const auto edge_count = snapshot ? snapshot->edge_count : edge_statistics.rows;
+
+	vector<double> predicate_selectivity(input.binding_types.size(), 1);
+	for (idx_t binding = 0; binding < input.binding_types.size(); binding++) {
+		bool vertex = input.binding_types[binding] == GqlPatternElementType::VERTEX;
+		for (const auto &program : input.predicates) {
+			auto fraction = (vertex ? vertex_statistics : edge_statistics)
+			                    .Selectivity(program, 0, binding, vertex ? graph.vertex : graph.edge);
+			predicate_selectivity[binding] = MinValue<double>(predicate_selectivity[binding], fraction);
+		}
+	}
+
+	GqlAccessPathPlan compatibility_plan;
+	if (std::any_of(input.nodes.begin(), input.nodes.end(), [](const GqlAccessLogicalNode &node) {
+		    return node.type == GqlLogicalOperatorType::LEFT_APPLY || node.type == GqlLogicalOperatorType::INNER_APPLY;
+	    })) {
+		compatibility_plan = GqlOptimizeAccessPathsLegacy(context, graph_name, graph, input);
+	}
+
 	GqlAccessPathPlan result;
 	result.stages.resize(input.match_stages.size());
 	vector<bool> stage_planned(input.match_stages.size(), false);
-	vector<idx_t> propagated_estimated_rows(input.binding_types.size(), DConstants::INVALID_INDEX);
+	vector<GqlCardinalityEstimate> propagated_cardinality(input.binding_types.size());
+	const auto memory_budget = BufferManager::GetBufferManager(context).GetMaxMemory();
 	auto optimize_stage = [&](idx_t stage_index, const vector<bool> &available) {
 		if (stage_index >= input.match_stages.size() || stage_planned[stage_index]) {
 			throw InternalException("Invalid GQL access-path stage");
 		}
 		stage_planned[stage_index] = true;
+		// The current lowering nests correlated sources as lateral trees. Their
+		// actual invocation domain is not yet represented by our single-binding
+		// cardinalities. Keep the established planner for these regions instead of
+		// pretending that independent average fanouts cost their repeated execution.
+		if (std::any_of(available.begin(), available.end(), [](bool value) { return value; })) {
+			auto &fallback = result.stages[stage_index];
+			fallback = compatibility_plan.stages[stage_index];
+			for (idx_t binding = 0; binding < fallback.introduced.size(); binding++) {
+				if (fallback.introduced[binding])
+					propagated_cardinality[binding] = fallback.bindings[binding].cardinality;
+			}
+			return fallback.introduced;
+		}
+
 		const auto &stage = input.match_stages[stage_index];
 		const bool stage_allows_element_fetch = stage.patterns.size() == 1;
 		auto &stage_plan = result.stages[stage_index];
@@ -601,7 +820,7 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 		stage_plan.bindings.resize(input.binding_types.size());
 		for (idx_t binding_index = 0; binding_index < available.size(); binding_index++) {
 			if (available[binding_index]) {
-				stage_plan.bindings[binding_index].estimated_rows = propagated_estimated_rows[binding_index];
+				stage_plan.bindings[binding_index].cardinality = propagated_cardinality[binding_index];
 			}
 		}
 		for (const auto &pattern : stage.patterns) {
@@ -610,6 +829,61 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 					stage_plan.introduced[element.binding_index] = true;
 				}
 			}
+		}
+
+		// Estimate scans and predicates independently of which physical access wins.
+		// NDV is an estimate, never a uniqueness claim or a semantic row limit.
+		for (idx_t binding = 0; binding < input.binding_types.size(); binding++) {
+			auto &path = stage_plan.bindings[binding];
+			auto is_vertex = input.binding_types[binding] == GqlPatternElementType::VERTEX;
+			auto &native = is_vertex ? vertex_statistics : edge_statistics;
+			path.cardinality.row_width = native.Width(is_vertex && binding < input.vertex_fetch_columns.size()
+			                                              ? input.vertex_fetch_columns[binding]
+			                                              : vector<string>());
+			if (available[binding])
+				continue;
+			path.cardinality.rows = is_vertex ? vertex_count : edge_count;
+			path.cardinality.from_statistics = path.cardinality.rows != DConstants::INVALID_INDEX;
+			if (is_vertex) {
+				for (const auto &equality : vertex_literal_equalities[binding]) {
+					string column;
+					if (!TryFindCaseInsensitive(graph.vertex.property_columns, equality.property_name, column))
+						continue;
+					path.native_index_filter |= native.HasIndex(column);
+					if (can_fetch_referenced && GqlReferencedKeyIsUnique(graph.vertex, equality.property_name))
+						path.cardinality.rows = 1;
+					if (native.HasIndex(column, true))
+						path.cardinality.rows = MinValue<idx_t>(path.cardinality.rows, 1);
+				}
+			}
+			for (const auto &pattern : stage.patterns) {
+				for (const auto &element : pattern.elements) {
+					if (element.binding_index != binding)
+						continue;
+					if (is_vertex && can_use_vertex_postings) {
+						for (const auto &label : StringUtil::Split(element.label, ';')) {
+							if (!label.empty())
+								path.cardinality.rows =
+								    MinValue<idx_t>(path.cardinality.rows, LabelPostingCardinality(*snapshot, label));
+						}
+					} else if (!is_vertex) {
+						path.edge_label = element.label;
+						auto stats = TryEdgeLabelStats(statistics, element.label);
+						if (stats)
+							path.cardinality.rows = stats->edge_count;
+					}
+				}
+			}
+			if (predicate_selectivity[binding] < 1 && path.cardinality.rows != DConstants::INVALID_INDEX) {
+				auto total = path.cardinality.rows;
+				if (total != DConstants::INVALID_INDEX) {
+					path.cardinality.rows =
+					    MinValue<idx_t>(path.cardinality.rows, ClampCardinality(static_cast<long double>(total) *
+					                                                            predicate_selectivity[binding]));
+				}
+			}
+
+			path.cardinality.distinct_ids = path.cardinality.rows;
 		}
 
 		for (idx_t binding_index = 0; binding_index < input.binding_types.size(); binding_index++) {
@@ -625,21 +899,31 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 					continue;
 				}
 				auto &path = stage_plan.bindings[binding_index];
-				path.type = GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP;
-				path.property_name = equality.property_name;
-				path.property_column = std::move(property_column);
-				path.property_index_name = std::move(index_name);
-				path.literal_type = equality.literal_type;
-				path.literal_value = equality.literal_value;
-				path.estimated_rows = 1;
-				break;
+				auto candidate = path;
+				candidate.type = GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP;
+				candidate.property_name = equality.property_name;
+				candidate.property_column = property_column;
+				candidate.property_index_name = index_name;
+				candidate.literal_type = equality.literal_type;
+				candidate.literal_value = equality.literal_value;
+				auto ndv = vertex_statistics.Distinct(property_column);
+				candidate.candidate_rows =
+				    vertex_statistics.HasIndex(property_column, true) ? 1
+				    : vertex_count == DConstants::INVALID_INDEX || ndv == DConstants::INVALID_INDEX
+				        ? vertex_count
+				        : ClampCardinality(static_cast<long double>(vertex_count) / MaxValue<idx_t>(1, ndv));
+				if (path.type != GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP ||
+				    AccessCost(cost_model, candidate, vertex_count).Total() <
+				        AccessCost(cost_model, path, vertex_count).Total()) {
+					path = std::move(candidate);
+				}
 			}
 		}
 
 		bool has_literal_seed = false;
 		for (idx_t binding_index = 0; binding_index < stage_plan.introduced.size(); binding_index++) {
-			has_literal_seed |= stage_plan.introduced[binding_index] &&
-			                    !vertex_literal_equalities[binding_index].empty();
+			has_literal_seed |=
+			    stage_plan.introduced[binding_index] && !vertex_literal_equalities[binding_index].empty();
 		}
 		if (can_use_vertex_postings) {
 			for (const auto &pattern : stage.patterns) {
@@ -663,241 +947,360 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 							// frontier; fetch its requested columns, not the table.
 							if (can_fetch_vertices && element.binding_index < input.vertex_fetch_columns.size() &&
 							    !input.vertex_fetch_columns[element.binding_index].empty() &&
-							    cardinality <= MinValue<idx_t>(GQL_BATCHED_ELEMENT_FETCH_THRESHOLD,
-							                                   snapshot->vertex_ids.size() / 64) &&
+							    cost_model.Fetch(cardinality, path.cardinality.row_width).Total() <
+							        AccessCost(cost_model, path, vertex_count).Total() &&
 							    (path.type != GqlBindingAccessPathType::LABEL_POSTING_FETCH ||
-							     cardinality < path.estimated_rows)) {
+							     cardinality < path.candidate_rows)) {
 								path.type = GqlBindingAccessPathType::LABEL_POSTING_FETCH;
 								path.label_postings = {label};
-								path.estimated_rows = cardinality;
+								path.candidate_rows = cardinality;
 								path.fetch_columns = input.vertex_fetch_columns[element.binding_index];
 							}
 							continue;
 						}
-						if (!LabelPostingBeatsScan(*snapshot, label) || ContainsLabel(path.label_postings, label)) {
+						if (cost_model.Fetch(LabelPostingCardinality(*snapshot, label), 8).Total() >=
+						        AccessCost(cost_model, path, vertex_count).Total() ||
+						    ContainsLabel(path.label_postings, label)) {
 							continue;
 						}
 						path.label_postings.push_back(label);
 						auto cardinality = LabelPostingCardinality(*snapshot, label);
-						if (path.estimated_rows == DConstants::INVALID_INDEX || cardinality < path.estimated_rows) {
-							path.estimated_rows = cardinality;
+						if (path.cardinality.rows == DConstants::INVALID_INDEX || cardinality < path.cardinality.rows) {
+							path.cardinality.rows = cardinality;
 						}
 					}
 				}
 			}
 		}
 
-		auto reachable = available;
-		vector<bool> reached_by_expansion(input.binding_types.size(), false);
-		vector<bool> source_scheduled(input.binding_types.size(), false);
-		auto schedule_source = [&](idx_t binding_index) {
-			if (stage_plan.introduced[binding_index] && !source_scheduled[binding_index]) {
-				stage_plan.source_order.push_back(binding_index);
-				source_scheduled[binding_index] = true;
+		// Search physical alternatives within this MATCH region. Correlation and
+		// OPTIONAL boundaries are fixed by optimize_pipeline, not reordered here.
+		struct SearchState {
+			GqlStageAccessPlan plan;
+			vector<bool> reachable;
+			vector<bool> scheduled;
+			vector<bool> completed;
+		};
+		struct SearchEdge {
+			GqlAccessPatternElement left;
+			GqlAccessPatternElement edge;
+			GqlAccessPatternElement right;
+			bool expand_allowed;
+		};
+		vector<SearchEdge> edges;
+		vector<bool> seen_edge(input.binding_types.size(), false);
+		for (const auto &pattern : stage.patterns) {
+			for (idx_t part = 1; part < pattern.elements.size(); part += 2) {
+				const auto &edge = pattern.elements[part];
+				if (seen_edge[edge.binding_index] || !stage_plan.introduced[edge.binding_index])
+					continue;
+				seen_edge[edge.binding_index] = true;
+				// Quantified factors with sibling edges retain their established lowering;
+				// enumerating them requires a path identity contract for TRAIL checks.
+				const bool supported = !edge.label.empty() && edge.label.find(';') == string::npos &&
+				                       (!edge.quantified || pattern.elements.size() == 3);
+				edges.push_back({pattern.elements[part - 1], edge, pattern.elements[part + 1], supported});
+			}
+		}
+		SearchState initial {stage_plan, available, vector<bool>(input.binding_types.size(), false),
+		                     vector<bool>(edges.size(), false)};
+		auto schedule = [&](SearchState &state, idx_t binding) {
+			if (state.plan.introduced[binding] && !state.scheduled[binding]) {
+				state.plan.source_order.push_back(binding);
+				state.scheduled[binding] = true;
 			}
 		};
-		for (idx_t binding_index = 0; binding_index < stage_plan.bindings.size(); binding_index++) {
-			if (stage_plan.bindings[binding_index].type != GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP &&
-			    stage_plan.bindings[binding_index].type != GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
-				continue;
+		auto seed = [&](SearchState &state, idx_t binding) {
+			if (state.reachable[binding])
+				return;
+			auto &path = state.plan.bindings[binding];
+			path.cost = AccessCost(cost_model, path, vertex_count);
+			path.cost.ApplyMemoryBudget(memory_budget);
+			state.plan.cost.Add(path.cost);
+			schedule(state, binding);
+			state.reachable[binding] = true;
+		};
+		auto attach_vertex = [&](SearchState &state, idx_t binding, const SearchEdge &entry, idx_t fetch_rows) {
+			if (state.reachable[binding])
+				return;
+			auto &path = state.plan.bindings[binding];
+			auto fetch = cost_model.Fetch(fetch_rows, path.cardinality.row_width);
+			auto scan = AccessCost(cost_model, path, vertex_count);
+			if ((can_fetch_vertices || can_fetch_referenced) &&
+			    (path.type == GqlBindingAccessPathType::TABLE_SCAN ||
+			     path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) &&
+			    binding < input.vertex_fetch_columns.size() && !input.vertex_fetch_columns[binding].empty() &&
+			    fetch.Total() < scan.Total()) {
+				path.type = can_fetch_referenced ? GqlBindingAccessPathType::REFERENCED_ELEMENT_FETCH
+				                                 : GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH;
+				path.label_postings.clear();
+				path.fetch_columns = input.vertex_fetch_columns[binding];
+				path.fetch_id_binding = entry.edge.binding_index;
+				bool native =
+				    state.plan.bindings[entry.edge.binding_index].type == GqlBindingAccessPathType::TABLE_SCAN;
+				auto source_column = native ? graph.edge_source_column : "__gql_source_id";
+				auto target_column = native ? graph.edge_target_column : "__gql_target_id";
+				path.fetch_id_column = binding == entry.left.binding_index
+				                           ? (entry.edge.reverse ? target_column : source_column)
+				                           : (entry.edge.reverse ? source_column : target_column);
+				path.cost = fetch;
+				state.plan.cost.Add(fetch);
+				schedule(state, binding);
+				state.reachable[binding] = true;
+			} else {
+				seed(state, binding);
 			}
-			reachable[binding_index] = true;
-			schedule_source(binding_index);
+		};
+
+		// Access alternatives are seeded on demand. Eagerly scheduling all label
+		// postings would expand entire labels even when a connected point frontier
+		// can reach the same bindings much more cheaply.
+
+		for (idx_t binding = 0; binding < initial.plan.bindings.size(); binding++) {
+			if (initial.plan.bindings[binding].type == GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP)
+				seed(initial, binding);
 		}
-		for (const auto &pattern : stage.patterns) {
-			if (pattern.elements.size() != 3 || !pattern.elements[1].quantified) {
-				continue;
+
+		auto distinct_endpoints = [&](idx_t binding) {
+			if (!input.duplicate_insensitive)
+				return false;
+			idx_t occurrences = 0;
+			for (const auto &other_stage : input.match_stages) {
+				for (const auto &pattern : other_stage.patterns) {
+					for (const auto &element : pattern.elements)
+						occurrences += element.binding_index == binding;
+				}
 			}
-			const auto &left = pattern.elements[0];
-			const auto &right = pattern.elements[2];
-			if (!reachable[left.binding_index] && !reachable[right.binding_index]) {
-				// A quantified path needs one endpoint as its correlated seed. If
-				// no selective lookup or prior MATCH binding supplies one, retain
-				// generic semantics by scanning the left endpoint first.
-				reachable[left.binding_index] = true;
-				schedule_source(left.binding_index);
+			if (occurrences != 1)
+				return false;
+			for (const auto &programs : {&input.projections, &input.predicates}) {
+				for (const auto &program : *programs) {
+					for (const auto index : program.binding_indices)
+						if (index == binding)
+							return false;
+				}
 			}
-		}
-		bool expanded = true;
-		while (expanded) {
-			expanded = false;
-			idx_t selected_pattern = DConstants::INVALID_INDEX;
-			bool selected_expand_from_left = true;
-			idx_t selected_estimated_rows = DConstants::INVALID_INDEX;
-			uint8_t selected_priority = NumericLimits<uint8_t>::Maximum();
-			for (idx_t pattern_index = 0; pattern_index < stage.patterns.size(); pattern_index++) {
-				const auto &pattern = stage.patterns[pattern_index];
-				if (pattern.elements.size() != 3) {
-					continue;
-				}
-				const auto &left = pattern.elements[0];
-				const auto &edge = pattern.elements[1];
-				const auto &right = pattern.elements[2];
-				auto &edge_path = stage_plan.bindings[edge.binding_index];
-				if (edge_path.type == GqlBindingAccessPathType::CSR_EXPANSION ||
-				    edge_path.type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION ||
-				    edge_path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION ||
-				    edge_path.type == GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION ||
-				    !stage_plan.introduced[edge.binding_index] ||
-				    (!edge.quantified && !edge_expandable[edge.binding_index]) ||
-				    (edge.quantified && edge.unbounded && !can_use_edge_expansion) ||
-				    (!reachable[left.binding_index] && !reachable[right.binding_index]) || edge.label.empty() ||
-				    edge.label.find(';') != string::npos) {
-					continue;
-				}
-				bool expand_from_left = reachable[left.binding_index];
-				if (expand_from_left && reachable[right.binding_index]) {
-					const auto left_rows = stage_plan.bindings[left.binding_index].estimated_rows;
-					const auto right_rows = stage_plan.bindings[right.binding_index].estimated_rows;
-					const auto left_cost =
-					    EstimateFixedExpansionRows(statistics, edge.label, edge.reverse ? "in" : "out", left_rows);
-					const auto right_cost =
-					    EstimateFixedExpansionRows(statistics, edge.label, edge.reverse ? "out" : "in", right_rows);
-					if ((right_cost != DConstants::INVALID_INDEX && right_cost < left_cost) ||
-					    (right_cost == left_cost && right_rows != DConstants::INVALID_INDEX &&
-					     (left_rows == DConstants::INVALID_INDEX || right_rows < left_rows))) {
-						expand_from_left = false;
-					} else if (left_rows == DConstants::INVALID_INDEX && right_rows == DConstants::INVALID_INDEX &&
-					           available[right.binding_index] && !available[left.binding_index]) {
-						expand_from_left = false;
-					}
-				}
-				const auto expansion_vertex_binding = expand_from_left ? left.binding_index : right.binding_index;
-				const auto expansion_direction =
-				    expand_from_left ? (edge.reverse ? "in" : "out") : (edge.reverse ? "out" : "in");
-				const auto seed_rows = stage_plan.bindings[expansion_vertex_binding].estimated_rows;
-				if (!edge.quantified && reached_by_expansion[expansion_vertex_binding] &&
-				    !available[expansion_vertex_binding] &&
-				    (stage_plan.bindings[expansion_vertex_binding].type ==
-				         GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH ||
-				     !CsrFrontierBeatsBulkScan(statistics, edge.label, seed_rows))) {
-					// A correlated CSR expansion should beat scanning this edge
-					// relation by a meaningful margin. This applies equally to
-					// topology-only and property-bearing hybrid expansions.
-					continue;
-				}
-				const auto seed_is_independent =
-				    available[expansion_vertex_binding] ||
-				    stage_plan.bindings[expansion_vertex_binding].type ==
-				        GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP ||
-				    stage_plan.bindings[expansion_vertex_binding].type == GqlBindingAccessPathType::LABEL_POSTING_FETCH;
-				const auto priority =
-				    edge.quantified ? uint8_t(0)
-				                    : (seed_is_independent && CsrAvailableSeedBeatsBulkScan(statistics, edge.label,
-				                                                                            expansion_direction)
-				                           ? uint8_t(1)
-				                           : uint8_t(2));
-				idx_t estimated_rows = DConstants::INVALID_INDEX;
-				if (!statistics.empty()) {
-					if (edge.quantified) {
-						GqlBindingAccessPath estimate_path;
-						estimate_path.edge_label = edge.label;
-						estimate_path.expansion_direction = expansion_direction;
-						estimate_path.minimum_repetitions = edge.minimum_repetitions;
-						estimate_path.maximum_repetitions = edge.maximum_repetitions;
-						estimate_path.unbounded = edge.unbounded;
-						estimated_rows = EstimateBoundedPathRows(statistics, estimate_path, seed_rows);
-					} else {
-						estimated_rows =
-						    EstimateFixedExpansionRows(statistics, edge.label, expansion_direction, seed_rows);
-					}
-				}
-				if (selected_pattern != DConstants::INVALID_INDEX) {
-					// Keep bounded paths first. For fixed expansions, an independent
-					// seed is only a tie-breaker: it can still have a huge fanout.
-					auto selected_is_path = selected_priority == 0;
-					if ((!edge.quantified && selected_is_path) ||
-					    (edge.quantified == selected_is_path &&
-					     (estimated_rows > selected_estimated_rows ||
-					      (estimated_rows == selected_estimated_rows && priority >= selected_priority)))) {
+			return true;
+		};
+		// Known cardinalities precede unknown estimates only through cost; a missing
+		// statistic is never interpreted as an empty graph or an unavailable path.
+		constexpr idx_t BEAM_WIDTH = 16;
+		constexpr idx_t SEARCH_BUDGET = 8192;
+		idx_t considered = 0;
+		bool bounded = false;
+		vector<SearchState> beam;
+		beam.push_back(std::move(initial));
+		for (idx_t step = 0; step < edges.size(); step++) {
+			vector<SearchState> next;
+			for (const auto &state : beam) {
+				bool greedy = considered >= SEARCH_BUDGET;
+				for (idx_t index = 0; index < edges.size(); index++) {
+					if (state.completed[index])
 						continue;
+					const auto &entry = edges[index];
+					const auto &edge = entry.edge;
+					const auto edge_binding = edge.binding_index;
+					auto emit = [&](SearchState candidate) {
+						candidate.completed[index] = true;
+						auto &selected = candidate.plan.bindings[edge_binding];
+						if (selected.cardinality.distinct_ids != DConstants::INVALID_INDEX) {
+							selected.cardinality.distinct_ids =
+							    MinValue<idx_t>(selected.cardinality.distinct_ids, selected.cardinality.rows);
+						}
+						next.push_back(std::move(candidate));
+						considered++;
+						std::stable_sort(
+						    next.begin(), next.end(), [](const SearchState &left, const SearchState &right) {
+							    auto a = left.plan.cost.Total(), b = right.plan.cost.Total();
+							    return a < b ||
+							           (a == b && left.plan.cost.peak_memory_bytes < right.plan.cost.peak_memory_bytes);
+						    });
+						auto width = considered >= SEARCH_BUDGET ? idx_t(1) : BEAM_WIDTH;
+						if (next.size() > width) {
+							bounded = true;
+							next.resize(width);
+						}
+					};
+					// A fixed edge can always remain a native relational scan. Quantified
+					// factors require path enumeration and have no single-edge scan substitute.
+					if (!edge.quantified) {
+						auto candidate = state;
+						auto &path = candidate.plan.bindings[edge_binding];
+						auto scan_rows = path.cardinality.rows;
+						auto stats = TryEdgeLabelStats(statistics, edge.label);
+						auto filtered_rows = scan_rows;
+						if (stats && scan_rows != DConstants::INVALID_INDEX) {
+							const auto &left = candidate.plan.bindings[entry.left.binding_index];
+							const auto &right = candidate.plan.bindings[entry.right.binding_index];
+							auto ratio = [](const GqlBindingAccessPath &binding, idx_t domain) {
+								auto ndv = binding.cardinality.distinct_ids;
+								if (ndv == DConstants::INVALID_INDEX ||
+								    binding.cardinality.rows == DConstants::INVALID_INDEX)
+									return 1.0;
+								auto participation =
+								    MinValue<double>(1, static_cast<double>(ndv) / MaxValue<idx_t>(1, domain));
+								auto multiplicity =
+								    ndv ? MaxValue<double>(1, static_cast<double>(binding.cardinality.rows) / ndv) : 1;
+								return participation * multiplicity;
+							};
+							filtered_rows = ClampCardinality(static_cast<long double>(scan_rows) *
+							                                 ratio(left, edge.reverse ? stats->incoming_vertex_count
+							                                                          : stats->outgoing_vertex_count) *
+							                                 ratio(right, edge.reverse ? stats->outgoing_vertex_count
+							                                                           : stats->incoming_vertex_count));
+						}
+						schedule(candidate, edge_binding);
+						attach_vertex(candidate, entry.left.binding_index, entry, scan_rows);
+						attach_vertex(candidate, entry.right.binding_index, entry, scan_rows);
+						path.cost = cost_model.Scan(edge_count, scan_rows, path.cardinality.row_width);
+						path.cost.Add(
+						    cost_model.Join(candidate.plan.bindings[entry.left.binding_index].cardinality.rows,
+						                    scan_rows, scan_rows, path.cardinality.row_width));
+						path.cost.ApplyMemoryBudget(memory_budget);
+						candidate.plan.cost.Add(path.cost);
+						path.cardinality.rows = filtered_rows;
+						for (auto binding : {entry.left.binding_index, entry.right.binding_index}) {
+							if (state.reachable[binding])
+								continue;
+							auto &neighbor = candidate.plan.bindings[binding];
+							auto domain = stats ? (binding == entry.left.binding_index
+							                           ? (edge.reverse ? stats->incoming_vertex_count
+							                                           : stats->outgoing_vertex_count)
+							                           : (edge.reverse ? stats->outgoing_vertex_count
+							                                           : stats->incoming_vertex_count))
+							                    : DConstants::INVALID_INDEX;
+							neighbor.cardinality.distinct_ids = MinValue<idx_t>(neighbor.cardinality.distinct_ids,
+							                                                    MinValue<idx_t>(filtered_rows, domain));
+							neighbor.cardinality.rows = filtered_rows;
+							neighbor.cardinality.rows = filtered_rows;
+						}
+						schedule(candidate, edge_binding);
+						emit(std::move(candidate));
 					}
-				}
-				selected_pattern = pattern_index;
-				selected_expand_from_left = expand_from_left;
-				selected_estimated_rows = estimated_rows;
-				selected_priority = priority;
-			}
-			if (selected_pattern != DConstants::INVALID_INDEX) {
-				const auto &pattern = stage.patterns[selected_pattern];
-				const auto &left = pattern.elements[0];
-				const auto &edge = pattern.elements[1];
-				const auto &right = pattern.elements[2];
-				auto &edge_path = stage_plan.bindings[edge.binding_index];
-				edge_path.type = edge.quantified
-				                     ? (can_use_edge_expansion ? GqlBindingAccessPathType::CSR_PATH_EXPANSION
-				                                               : GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION)
-				                     : (edge_requires_table[edge.binding_index]
-				                            ? GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION
-				                            : GqlBindingAccessPathType::CSR_EXPANSION);
-				edge_path.expansion_vertex_binding =
-				    selected_expand_from_left ? left.binding_index : right.binding_index;
-				edge_path.expansion_direction =
-				    selected_expand_from_left ? (edge.reverse ? "in" : "out") : (edge.reverse ? "out" : "in");
-				edge_path.edge_label = edge.label;
-				edge_path.minimum_repetitions = edge.minimum_repetitions;
-				edge_path.maximum_repetitions = edge.maximum_repetitions;
-				edge_path.unbounded = edge.unbounded;
-				if (input.duplicate_insensitive && edge_path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION) {
-					idx_t occurrences = 0;
-					bool edge_observed = false;
-					for (const auto &other_stage : input.match_stages) {
-						for (const auto &other_pattern : other_stage.patterns) {
-							for (const auto &element : other_pattern.elements) {
-								occurrences += element.binding_index == edge.binding_index;
+					bool csr = can_use_edge_expansion && (edge.quantified || edge_expandable[edge_binding]);
+					if (entry.expand_allowed && (csr || (edge.quantified && !edge.unbounded))) {
+						for (const bool from_left : {true, false}) {
+							auto candidate = state;
+							auto seed_binding = from_left ? entry.left.binding_index : entry.right.binding_index;
+							auto neighbor_binding = from_left ? entry.right.binding_index : entry.left.binding_index;
+							seed(candidate, seed_binding);
+							auto seed_rows = candidate.plan.bindings[seed_binding].cardinality.rows;
+							auto &path = candidate.plan.bindings[edge_binding];
+							path.type = edge.quantified ? (csr ? GqlBindingAccessPathType::CSR_PATH_EXPANSION
+							                                   : GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION)
+							                            : (edge_requires_table[edge_binding]
+							                                   ? GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION
+							                                   : GqlBindingAccessPathType::CSR_EXPANSION);
+							path.expansion_vertex_binding = seed_binding;
+							path.expansion_direction =
+							    from_left ? (edge.reverse ? "in" : "out") : (edge.reverse ? "out" : "in");
+							path.edge_label = edge.label;
+							path.minimum_repetitions = edge.minimum_repetitions;
+							path.maximum_repetitions = edge.maximum_repetitions;
+							path.unbounded = edge.unbounded;
+							path.distinct_endpoints = edge.quantified && csr && distinct_endpoints(edge_binding);
+							path.cardinality.rows =
+							    edge.quantified ? EstimateBoundedPathRows(statistics, path, seed_rows)
+							                    : EstimateFixedExpansionRows(statistics, edge.label,
+							                                                 path.expansion_direction, seed_rows);
+							path.cardinality.distinct_ids = edge.quantified
+							                                    ? DConstants::INVALID_INDEX
+							                                    : MinValue<idx_t>(path.cardinality.rows, edge_count);
+							path.cardinality.from_statistics = path.cardinality.rows != DConstants::INVALID_INDEX;
+							path.cost =
+							    csr ? cost_model.Expand(seed_rows, path.cardinality.rows)
+							        : cost_model.Scan(edge_count, path.cardinality.rows, path.cardinality.row_width);
+
+							if (path.type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION) {
+								auto fetch = cost_model.Fetch(path.cardinality.rows, edge_statistics.Width({}));
+								auto scan =
+								    cost_model.Scan(edge_count, path.cardinality.rows, path.cardinality.row_width);
+								path.fetch_edge_properties = can_fetch_edges && fetch.Total() < scan.Total();
+								path.cost.Add(path.fetch_edge_properties ? fetch : scan);
 							}
+							schedule(candidate, edge_binding);
+							if (path.cardinality.rows != DConstants::INVALID_INDEX) {
+								path.cardinality.rows =
+								    ClampCardinality(static_cast<long double>(path.cardinality.rows) *
+								                     predicate_selectivity[edge_binding]);
+							}
+							attach_vertex(candidate, neighbor_binding, entry, path.cardinality.rows);
+							auto &neighbor = candidate.plan.bindings[neighbor_binding];
+							auto previous_distinct = neighbor.cardinality.distinct_ids;
+							// Estimate the joined frontier, including repeated IDs on an already
+							// bound side. A unique source can be multiplied by parallel edges.
+							auto multiplicity =
+							    previous_distinct != DConstants::INVALID_INDEX && previous_distinct > 0 &&
+							            neighbor.cardinality.rows != DConstants::INVALID_INDEX
+							        ? MaxValue<double>(1, static_cast<double>(neighbor.cardinality.rows) /
+							                                  previous_distinct)
+							        : 1.0;
+							auto endpoint_stats = TryEdgeLabelStats(statistics, edge.label);
+							double fraction = 1;
+							idx_t domain = DConstants::INVALID_INDEX;
+							if (endpoint_stats && previous_distinct != DConstants::INVALID_INDEX) {
+								domain = path.expansion_direction == "out" ? endpoint_stats->incoming_vertex_count
+								                                           : endpoint_stats->outgoing_vertex_count;
+								fraction = MinValue<double>(1, static_cast<double>(previous_distinct) /
+								                                   MaxValue<idx_t>(1, domain));
+							}
+							neighbor.cardinality.rows =
+							    path.cardinality.rows == DConstants::INVALID_INDEX
+							        ? DConstants::INVALID_INDEX
+							        : ClampCardinality(static_cast<long double>(path.cardinality.rows) * multiplicity *
+							                           fraction);
+
+							neighbor.cardinality.distinct_ids =
+							    MinValue<idx_t>(previous_distinct, MinValue<idx_t>(domain, path.cardinality.rows));
+
+							path.cost.Add(cost_model.Join(seed_rows, path.cardinality.rows, path.cardinality.rows, 32));
+							path.cost.ApplyMemoryBudget(memory_budget);
+							candidate.plan.cost.Add(path.cost);
+							emit(std::move(candidate));
 						}
 					}
-					for (const auto &programs : {&input.projections, &input.predicates}) {
-						for (const auto &program : *programs) {
-							for (const auto binding : program.binding_indices) {
-								edge_observed |= binding == edge.binding_index;
-							}
-						}
-					}
-					// This three-element pattern has no sibling edges whose TRAIL
-					// uniqueness could observe its edge identity. Keep enumeration
-					// semantics inside VLP, then collapse only equivalent endpoints.
-					edge_path.distinct_endpoints = occurrences == 1 && !edge_observed;
-				}
-				edge_path.fetch_edge_properties =
-				    stage_allows_element_fetch &&
-				    edge_path.type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION && can_fetch_edges &&
-				    BatchedElementFetchBeatsScan(selected_estimated_rows);
-				schedule_source(edge.binding_index);
-				auto neighbor_binding = selected_expand_from_left ? right.binding_index : left.binding_index;
-				auto &neighbor_rows = stage_plan.bindings[neighbor_binding].estimated_rows;
-				if (selected_estimated_rows != DConstants::INVALID_INDEX &&
-				    (neighbor_rows == DConstants::INVALID_INDEX || selected_estimated_rows < neighbor_rows)) {
-					neighbor_rows = selected_estimated_rows;
-				}
-				auto &neighbor_path = stage_plan.bindings[neighbor_binding];
-				if (stage_allows_element_fetch && can_fetch_vertices && stage_plan.introduced[neighbor_binding] &&
-				    neighbor_path.type == GqlBindingAccessPathType::TABLE_SCAN &&
-				    BatchedElementFetchBeatsScan(selected_estimated_rows)) {
-					neighbor_path.type = GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH;
-					if (neighbor_binding < input.vertex_fetch_columns.size()) {
-						neighbor_path.fetch_columns = input.vertex_fetch_columns[neighbor_binding];
-					}
-					neighbor_path.fetch_id_binding = edge.binding_index;
-					if (neighbor_binding == left.binding_index) {
-						neighbor_path.fetch_id_column = edge.reverse ? "__gql_target_id" : "__gql_source_id";
-					} else {
-						neighbor_path.fetch_id_column = edge.reverse ? "__gql_source_id" : "__gql_target_id";
+					if (greedy || considered >= SEARCH_BUDGET) {
+						bounded = true;
+						break;
 					}
 				}
-				reachable[neighbor_binding] = true;
-				reached_by_expansion[neighbor_binding] = true;
-				schedule_source(neighbor_binding);
-				expanded = true;
 			}
-		}
-		for (idx_t binding_index = 0; binding_index < stage_plan.introduced.size(); binding_index++) {
-			schedule_source(binding_index);
-			if (stage_plan.bindings[binding_index].estimated_rows != DConstants::INVALID_INDEX) {
-				propagated_estimated_rows[binding_index] = stage_plan.bindings[binding_index].estimated_rows;
+			if (next.empty())
+				break;
+			std::stable_sort(next.begin(), next.end(), [](const SearchState &left, const SearchState &right) {
+				auto a = left.plan.cost.Total(), b = right.plan.cost.Total();
+				return a < b || (a == b && left.plan.cost.peak_memory_bytes < right.plan.cost.peak_memory_bytes);
+			});
+			auto width = considered >= SEARCH_BUDGET ? idx_t(1) : BEAM_WIDTH;
+			if (next.size() > width) {
+				bounded = true;
+				next.resize(width);
 			}
+			beam = std::move(next);
 		}
+		auto best = std::move(beam.front());
+		// Isolated vertices and unsupported pattern shapes keep native execution.
+		for (idx_t binding = 0; binding < best.plan.introduced.size(); binding++) {
+			if (!best.plan.introduced[binding])
+				continue;
+			if (!best.scheduled[binding]) {
+				auto &path = best.plan.bindings[binding];
+				path.cost = AccessCost(cost_model, path,
+				                       input.binding_types[binding] == GqlPatternElementType::VERTEX ? vertex_count
+				                                                                                     : edge_count);
+				path.cost.ApplyMemoryBudget(memory_budget);
+				best.plan.cost.Add(path.cost);
+				schedule(best, binding);
+			}
+			auto &path = best.plan.bindings[binding];
+
+			propagated_cardinality[binding] = path.cardinality;
+		}
+		best.plan.costed = true;
+		best.plan.alternatives_considered = considered;
+		best.plan.search_bounded = bounded;
+		stage_plan = std::move(best.plan);
+
 		for (const auto &pattern : stage.patterns) {
 			for (const auto &element : pattern.elements) {
 				if (element.quantified &&
@@ -960,6 +1363,164 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 		}
 	}
 	return result;
+}
+
+GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
+                                         const GqlTableGraphBinding &graph, const GqlAccessPathInput &input) {
+	string mode = "legacy";
+	context.TryGetCurrentSetting("gql_optimizer", mode);
+	auto result = mode == "cost" ? GqlOptimizeAccessPathsCost(context, graph_name, graph, input)
+	                             : GqlOptimizeAccessPathsLegacy(context, graph_name, graph, input);
+	result.optimizer_mode = mode;
+	PublishAccessPlan(context, graph_name, result);
+	return result;
+}
+
+struct GqlOptimizerClientState : ClientContextState {
+	string graph_name;
+	GqlAccessPathPlan plan;
+};
+
+static void PublishAccessPlan(ClientContext &context, const string &graph_name, const GqlAccessPathPlan &plan) {
+	auto state = context.registered_state->GetOrCreate<GqlOptimizerClientState>("gql_optimizer_plan");
+	state->graph_name = graph_name;
+	state->plan = plan;
+}
+
+static const char *AccessPathName(GqlBindingAccessPathType type) {
+	switch (type) {
+	case GqlBindingAccessPathType::REFERENCED_ELEMENT_FETCH:
+		return "REFERENCED_ELEMENT_FETCH";
+	case GqlBindingAccessPathType::TABLE_SCAN:
+		return "TABLE_SCAN";
+	case GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP:
+		return "PROPERTY_INDEX_LOOKUP";
+	case GqlBindingAccessPathType::CSR_EXPANSION:
+		return "CSR_EXPANSION";
+	case GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION:
+		return "CSR_EDGE_PROPERTY_EXPANSION";
+	case GqlBindingAccessPathType::CSR_PATH_EXPANSION:
+		return "CSR_PATH_EXPANSION";
+	case GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION:
+		return "RELATIONAL_PATH_EXPANSION";
+	case GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH:
+		return "BATCHED_ELEMENT_FETCH";
+	case GqlBindingAccessPathType::LABEL_POSTING_FETCH:
+		return "LABEL_POSTING_FETCH";
+	}
+	throw InternalException("Invalid GQL access path");
+}
+
+struct GqlOptimizerPlanData : TableFunctionData {
+	string graph_name;
+	GqlAccessPathPlan plan;
+};
+
+struct GqlOptimizerPlanScan : GlobalTableFunctionState {
+	idx_t stage = 0;
+	idx_t position = 0;
+};
+
+static unique_ptr<FunctionData> OptimizerPlanBind(ClientContext &context, TableFunctionBindInput &,
+                                                  vector<LogicalType> &types, vector<Identifier> &names) {
+	auto state = context.registered_state->GetOrCreate<GqlOptimizerClientState>("gql_optimizer_plan");
+	auto result = make_uniq<GqlOptimizerPlanData>();
+	result->graph_name = state->graph_name;
+	result->plan = state->plan;
+	names = {"graph_name",
+	         "stage_id",
+	         "binding_id",
+	         "source_position",
+	         "access_path",
+	         "direction",
+	         "estimated_rows",
+	         "estimated_distinct_ids",
+	         "row_width",
+	         "operator_cost",
+	         "stage_cost",
+	         "peak_memory_bytes",
+	         "alternatives_considered",
+	         "search_bounded",
+	         "scan_cost",
+	         "traversal_cost",
+	         "fetch_cost",
+	         "join_cost",
+	         "from_statistics",
+	         "edge_label",
+	         "fetch_edge_properties",
+	         "spill_cost",
+	         "optimizer_mode"};
+	types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	         LogicalType::UBIGINT, LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::UBIGINT,
+	         LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::DOUBLE,
+	         LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BOOLEAN, LogicalType::VARCHAR,
+	         LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+static unique_ptr<GlobalTableFunctionState> OptimizerPlanInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GqlOptimizerPlanScan>();
+}
+
+static Value EstimateValue(idx_t estimate) {
+	return estimate == DConstants::INVALID_INDEX ? Value(LogicalType::UBIGINT) : Value::UBIGINT(estimate);
+}
+
+static void OptimizerPlanScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &data = input.bind_data->Cast<GqlOptimizerPlanData>();
+	auto &scan = input.global_state->Cast<GqlOptimizerPlanScan>();
+	idx_t count = 0;
+	while (scan.stage < data.plan.stages.size() && count < STANDARD_VECTOR_SIZE) {
+		const auto &stage = data.plan.stages[scan.stage];
+		if (scan.position >= stage.source_order.size()) {
+			scan.stage++;
+			scan.position = 0;
+			continue;
+		}
+		auto binding = stage.source_order[scan.position];
+		const auto &path = stage.bindings[binding];
+		output.data[0].SetValue(count, Value(data.graph_name));
+		output.data[1].SetValue(count, Value::UBIGINT(scan.stage));
+		output.data[2].SetValue(count, Value::UBIGINT(binding));
+		output.data[3].SetValue(count, Value::UBIGINT(scan.position));
+		output.data[4].SetValue(count, Value(AccessPathName(path.type)));
+		output.data[5].SetValue(count, Value(path.expansion_direction));
+		output.data[6].SetValue(count, EstimateValue(path.cardinality.rows));
+		output.data[7].SetValue(count, EstimateValue(path.cardinality.distinct_ids));
+		output.data[8].SetValue(count, Value::UBIGINT(path.cardinality.row_width));
+		output.data[9].SetValue(count, Value(path.cost.Total()));
+		output.data[10].SetValue(count, Value(stage.cost.Total()));
+		output.data[11].SetValue(count, Value::UBIGINT(stage.cost.peak_memory_bytes));
+		output.data[12].SetValue(count, Value::UBIGINT(stage.alternatives_considered));
+		output.data[13].SetValue(count, Value::BOOLEAN(stage.search_bounded));
+		output.data[14].SetValue(count, Value(path.cost.scan));
+		output.data[15].SetValue(count, Value(path.cost.traversal));
+		output.data[16].SetValue(count, Value(path.cost.fetch));
+		output.data[17].SetValue(count, Value(path.cost.join));
+		output.data[18].SetValue(count, Value::BOOLEAN(path.cardinality.from_statistics));
+		output.data[19].SetValue(count, Value(path.edge_label));
+		output.data[20].SetValue(count, Value::BOOLEAN(path.fetch_edge_properties));
+		output.data[21].SetValue(count, Value(path.cost.spill));
+		auto mode = data.plan.optimizer_mode == "cost" && !stage.costed ? "legacy_fallback" : data.plan.optimizer_mode;
+		output.data[22].SetValue(count, Value(mode));
+		if (!stage.costed) {
+			for (idx_t column : {idx_t(8), idx_t(9), idx_t(10), idx_t(11), idx_t(12), idx_t(13), idx_t(14), idx_t(15),
+			                     idx_t(16), idx_t(17), idx_t(18), idx_t(20), idx_t(21)}) {
+				output.data[column].SetValue(count, Value(output.data[column].GetType()));
+			}
+		}
+		scan.position++;
+		count++;
+	}
+	output.SetChildCardinality(count);
+}
+
+TableFunction GqlOptimizerPlanFunction() {
+	TableFunction function("gql_optimizer_plan", {}, OptimizerPlanScan);
+	function.bind = OptimizerPlanBind;
+	function.init_global = OptimizerPlanInit;
+	return function;
 }
 
 } // namespace duckdb

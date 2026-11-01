@@ -33,11 +33,14 @@ set(EXTENSION_SOURCES
     src/gql_extension.cpp
     src/gql_sql_utils.cpp
     src/gql_catalog.cpp
+    src/gql_referenced.cpp
     src/gql_parser.cpp
     src/gql_transformer.cpp
     src/gql_binder.cpp
     src/gql_ir.cpp
     src/gql_optimizer.cpp
+    src/gql_optimizer_legacy.cpp
+    src/gql_cost_model.cpp
     src/gql_lowerer.cpp
     src/gql_mutation.cpp
     src/gql_relational.cpp

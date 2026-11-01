@@ -583,9 +583,10 @@ void GqlAttachReferencedGraphTables(Connection &connection, const string &graph_
 		throw BinderException("Referenced graph requires at least one vertex and one edge table mapping");
 	}
 
-	auto graph = GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode FROM gql_internal.graphs g JOIN "
-	                                  "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
-	                                      GqlQuoteLiteral(graph_name));
+	auto graph =
+	    GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode, g.graph_version FROM gql_internal.graphs g JOIN "
+	                         "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
+	                             GqlQuoteLiteral(graph_name));
 	if (graph->RowCount() != 1 || graph->GetValue(1, 0).GetValue<string>() != "EMPTY") {
 		throw InvalidInputException("Graph '%s' must be empty before attaching referenced tables", graph_name);
 	}
@@ -753,16 +754,22 @@ struct ReferencedPhysicalBinding {
 	string target_column;
 };
 
-static string QualifiedReferencedTable(const GqlElementTableBinding &table) {
-	return GqlQuoteIdentifier(table.catalog_name) + "." + GqlQuoteIdentifier(table.schema_name) + "." +
-	       GqlQuoteIdentifier(table.table_name);
+static string QualifiedReferencedTable(const GqlElementTableBinding &table, bool pinned = false,
+                                       uint64_t snapshot = 0) {
+	auto name = GqlQuoteIdentifier(table.catalog_name) + "." + GqlQuoteIdentifier(table.schema_name) + "." +
+	            GqlQuoteIdentifier(table.table_name);
+	if (!pinned)
+		return name;
+	// The wrapper exposes anonymous edge rowids and permits aliases after it.
+	return "(SELECT *, rowid FROM " + name + " AT (VERSION => " + to_string(snapshot) + "))";
 }
 
 static string ReferencedDenseId(const vector<ReferencedPhysicalBinding> &tables, idx_t table_index,
-                                const string &table_alias) {
+                                const string &table_alias, bool pinned, uint64_t snapshot) {
 	string expression = "CAST(";
 	for (idx_t index = 0; index < table_index; index++) {
-		expression += "(SELECT count(*)::UBIGINT FROM " + QualifiedReferencedTable(tables[index].table) + ") + ";
+		expression += "(SELECT count(*)::UBIGINT FROM " +
+		              QualifiedReferencedTable(tables[index].table, pinned, snapshot) + ") + ";
 	}
 	auto order_column =
 	    tables[table_index].table.key_column.empty() ? string("rowid") : tables[table_index].table.key_column;
@@ -772,13 +779,15 @@ static string ReferencedDenseId(const vector<ReferencedPhysicalBinding> &tables,
 }
 
 static string ReferencedVertexLookup(const vector<ReferencedPhysicalBinding> &vertices, idx_t vertex_index,
-                                     const string &lookup_alias) {
+                                     const string &lookup_alias, bool pinned, uint64_t snapshot) {
 	auto base_alias = lookup_alias + "_base";
 	return "(SELECT " + GqlQuoteIdentifier(base_alias) + "." +
 	       GqlQuoteIdentifier(vertices[vertex_index].table.key_column) + " AS " +
-	       GqlQuoteIdentifier("__gql_source_key") + ", " + ReferencedDenseId(vertices, vertex_index, base_alias) +
-	       " AS " + GqlQuoteIdentifier("__gql_id") + " FROM " + QualifiedReferencedTable(vertices[vertex_index].table) +
-	       " AS " + GqlQuoteIdentifier(base_alias) + ") AS " + GqlQuoteIdentifier(lookup_alias);
+	       GqlQuoteIdentifier("__gql_source_key") + ", " +
+	       ReferencedDenseId(vertices, vertex_index, base_alias, pinned, snapshot) + " AS " +
+	       GqlQuoteIdentifier("__gql_id") + " FROM " +
+	       QualifiedReferencedTable(vertices[vertex_index].table, pinned, snapshot) + " AS " +
+	       GqlQuoteIdentifier(base_alias) + ") AS " + GqlQuoteIdentifier(lookup_alias);
 }
 
 static idx_t FindReferencedVertex(const vector<ReferencedPhysicalBinding> &vertices, uint64_t element_table_id) {
@@ -792,7 +801,9 @@ static idx_t FindReferencedVertex(const vector<ReferencedPhysicalBinding> &verti
 
 static GqlElementTableBinding BuildReferencedUnion(Connection &connection, uint64_t graph_id, const string &kind,
                                                    const vector<ReferencedPhysicalBinding> &tables,
-                                                   const vector<ReferencedPhysicalBinding> &vertices) {
+                                                   const vector<ReferencedPhysicalBinding> &vertices,
+                                                   const string &graph_name, bool cached_ids, uint64_t snapshot_id,
+                                                   bool pinned = false) {
 	GqlElementTableBinding result;
 	result.catalog_name = tables[0].table.catalog_name;
 	result.schema_name = "gql_internal";
@@ -805,6 +816,63 @@ static GqlElementTableBinding BuildReferencedUnion(Connection &connection, uint6
 	for (const auto &property : properties) {
 		result.property_columns.emplace(property.first, property.first);
 	}
+	for (const auto &entry : tables) {
+		result.referenced_sources.push_back({entry.table.element_table_id, entry.table.catalog_name,
+		                                     entry.table.schema_name, entry.table.table_name, entry.table.key_column,
+		                                     entry.table.static_labels, entry.table.property_columns});
+	}
+	if (cached_ids) {
+		auto mapping = [&](uint64_t id, const string &alias) {
+			return "gql_referenced_keys(" + GqlQuoteLiteral(graph_name) + ", " + to_string(id) + "::UBIGINT, " +
+			       to_string(snapshot_id) + "::UBIGINT) AS " + GqlQuoteIdentifier(alias);
+		};
+		for (idx_t index = 0; index < tables.size(); index++) {
+			const auto &entry = tables[index];
+			const auto alias = "gql_referenced_" + StringUtil::Lower(kind) + "_" + to_string(index);
+			const auto ids = alias + "_ids";
+			if (index)
+				result.relation_sql += " UNION ALL ";
+			result.relation_sql +=
+			    "SELECT " + GqlQuoteIdentifier(ids) + ".__gql_id AS " + GqlQuoteIdentifier(result.key_column);
+			if (kind == "VERTEX") {
+				result.relation_sql += ", [";
+				for (idx_t label = 0; label < entry.table.static_labels.size(); label++) {
+					if (label)
+						result.relation_sql += ", ";
+					result.relation_sql += GqlQuoteLiteral(entry.table.static_labels[label]);
+				}
+				result.relation_sql += "]::VARCHAR[] AS " + GqlQuoteIdentifier(result.label_column);
+			} else {
+				result.relation_sql +=
+				    ", " + GqlQuoteLiteral(entry.table.static_labels[0]) +
+				    " AS __gql_type, src.__gql_id AS __gql_source_id, dst.__gql_id AS __gql_target_id";
+			}
+			for (const auto &property : properties) {
+				auto column = FindPropertyColumn(entry.table, property.first);
+				result.relation_sql += ", " +
+				                       (column ? GqlQuoteIdentifier(alias) + "." + GqlQuoteIdentifier(*column)
+				                               : "CAST(NULL AS " + property.second + ")") +
+				                       " AS " + GqlQuoteIdentifier(property.first);
+			}
+			auto key = entry.table.key_column.empty() ? string("rowid") : entry.table.key_column;
+			result.relation_sql += " FROM " + QualifiedReferencedTable(entry.table) + " AS " +
+			                       GqlQuoteIdentifier(alias) + " AT (VERSION => " + to_string(snapshot_id) + ")";
+			result.relation_sql += " JOIN " + mapping(entry.table.element_table_id, ids) + " ON " +
+			                       GqlQuoteIdentifier(alias) + "." + GqlQuoteIdentifier(key) + " = " +
+			                       GqlQuoteIdentifier(ids) + ".source_key";
+			if (kind == "EDGE") {
+				result.relation_sql += " LEFT JOIN " + mapping(entry.source_table_id, "src") + " ON " +
+				                       GqlQuoteIdentifier(alias) + "." + GqlQuoteIdentifier(entry.source_column) +
+				                       " = src.source_key";
+				result.relation_sql += " LEFT JOIN " + mapping(entry.target_table_id, "dst") + " ON " +
+				                       GqlQuoteIdentifier(alias) + "." + GqlQuoteIdentifier(entry.target_column) +
+				                       " = dst.source_key";
+			}
+			result.source_tables.push_back({entry.table.catalog_name, entry.table.schema_name, entry.table.table_name});
+		}
+		return result;
+	}
+
 	for (idx_t table_index = 0; table_index < tables.size(); table_index++) {
 		auto &entry = tables[table_index];
 		result.source_tables.push_back({entry.table.catalog_name, entry.table.schema_name, entry.table.table_name});
@@ -815,8 +883,8 @@ static GqlElementTableBinding BuildReferencedUnion(Connection &connection, uint6
 			result.relation_sql += " UNION ALL ";
 		}
 		auto table_alias = "gql_referenced_" + StringUtil::Lower(kind) + "_" + to_string(table_index);
-		result.relation_sql += "SELECT " + ReferencedDenseId(tables, table_index, table_alias) + " AS " +
-		                       GqlQuoteIdentifier(result.key_column);
+		result.relation_sql += "SELECT " + ReferencedDenseId(tables, table_index, table_alias, pinned, snapshot_id) +
+		                       " AS " + GqlQuoteIdentifier(result.key_column);
 		if (kind == "VERTEX") {
 			result.relation_sql += ", [";
 			for (idx_t label = 0; label < entry.table.static_labels.size(); label++) {
@@ -847,16 +915,18 @@ static GqlElementTableBinding BuildReferencedUnion(Connection &connection, uint6
 			}
 			result.relation_sql += " AS " + GqlQuoteIdentifier(property.first);
 		}
-		result.relation_sql +=
-		    " FROM " + QualifiedReferencedTable(entry.table) + " AS " + GqlQuoteIdentifier(table_alias);
+		result.relation_sql += " FROM " + QualifiedReferencedTable(entry.table, pinned, snapshot_id) + " AS " +
+		                       GqlQuoteIdentifier(table_alias);
 		if (kind == "EDGE") {
 			auto source_index = FindReferencedVertex(vertices, entry.source_table_id);
 			auto target_index = FindReferencedVertex(vertices, entry.target_table_id);
 			result.relation_sql +=
-			    " LEFT JOIN " + ReferencedVertexLookup(vertices, source_index, "gql_referenced_source") + " ON " +
+			    " LEFT JOIN " +
+			    ReferencedVertexLookup(vertices, source_index, "gql_referenced_source", pinned, snapshot_id) + " ON " +
 			    GqlQuoteIdentifier(table_alias) + "." + GqlQuoteIdentifier(entry.source_column) + " = " +
 			    GqlQuoteIdentifier("gql_referenced_source") + "." + GqlQuoteIdentifier("__gql_source_key") +
-			    " LEFT JOIN " + ReferencedVertexLookup(vertices, target_index, "gql_referenced_target") + " ON " +
+			    " LEFT JOIN " +
+			    ReferencedVertexLookup(vertices, target_index, "gql_referenced_target", pinned, snapshot_id) + " ON " +
 			    GqlQuoteIdentifier(table_alias) + "." + GqlQuoteIdentifier(entry.target_column) + " = " +
 			    GqlQuoteIdentifier("gql_referenced_target") + "." + GqlQuoteIdentifier("__gql_source_key");
 		}
@@ -893,13 +963,15 @@ static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
 
 bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result) {
 	Connection connection(*context.db);
-	auto storage = GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode FROM gql_internal.graphs g JOIN "
-	                                    "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
-	                                        GqlQuoteLiteral(graph_name));
+	auto storage =
+	    GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode, g.graph_version FROM gql_internal.graphs g JOIN "
+	                         "gql_internal.graph_storage gs USING (graph_id) WHERE g.graph_name = " +
+	                             GqlQuoteLiteral(graph_name));
 	if (storage->RowCount() == 0) {
 		throw InvalidInputException("Graph '%s' does not exist", graph_name);
 	}
 	result.graph_id = storage->GetValue(0, 0).GetValue<uint64_t>();
+	result.graph_version = storage->GetValue(2, 0).GetValue<uint64_t>();
 	if (storage->GetValue(1, 0).GetValue<string>() != "TABLE_BACKED") {
 		return false;
 	}
@@ -963,18 +1035,6 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 			throw InvalidInputException("Table-backed graph '%s' has invalid endpoint table metadata", graph_name);
 		}
 	}
-	const bool referenced = vertex_tables[0].table.ownership == "REFERENCED";
-	if (!referenced && vertex_tables.size() == 1 && edge_tables.size() == 1) {
-		result.vertex = std::move(vertex_tables[0].table);
-		result.edge = std::move(edge_tables[0].table);
-		result.edge_source_column = edge_tables[0].source_column;
-		result.edge_target_column = edge_tables[0].target_column;
-	} else {
-		result.vertex = BuildReferencedUnion(connection, result.graph_id, "VERTEX", vertex_tables, vertex_tables);
-		result.edge = BuildReferencedUnion(connection, result.graph_id, "EDGE", edge_tables, vertex_tables);
-		result.edge_source_column = "__gql_source_id";
-		result.edge_target_column = "__gql_target_id";
-	}
 	auto source = GqlQuery(connection, "SELECT source_kind, source_catalog, snapshot_policy, pinned_snapshot_id, "
 	                                   "access_mode, schema_fingerprint FROM "
 	                                   "gql_internal.graph_sources WHERE graph_id = " +
@@ -1019,7 +1079,50 @@ bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlT
 	} else if (source->RowCount() != 0) {
 		throw InvalidInputException("Table-backed graph '%s' contains duplicate source metadata", graph_name);
 	}
+	if (StringUtil::CIEquals(result.source_kind, "DUCKLAKE") && context.transaction.IsAutoCommit()) {
+		auto type =
+		    GqlQuery(connection,
+		             "SELECT lower(type), database_oid::UBIGINT FROM duckdb_databases() WHERE lower(database_name)=" +
+		                 GqlQuoteLiteral(StringUtil::Lower(result.source_catalog)));
+		if (type->RowCount() == 1 && type->GetValue(0, 0).GetValue<string>() == "ducklake") {
+			result.cached_reference_ids = true;
+			result.source_catalog_id = type->GetValue(1, 0).GetValue<uint64_t>();
+			result.source_snapshot_id = ReadReferencedDuckLakeSnapshot(connection, result.source_catalog);
+		}
+	}
+
+	const bool referenced = vertex_tables[0].table.ownership == "REFERENCED";
+	if (!referenced && vertex_tables.size() == 1 && edge_tables.size() == 1) {
+		result.vertex = std::move(vertex_tables[0].table);
+		result.edge = std::move(edge_tables[0].table);
+		result.edge_source_column = edge_tables[0].source_column;
+		result.edge_target_column = edge_tables[0].target_column;
+	} else {
+		result.vertex = BuildReferencedUnion(connection, result.graph_id, "VERTEX", vertex_tables, vertex_tables,
+		                                     graph_name, false, result.source_snapshot_id, result.cached_reference_ids);
+		result.edge = BuildReferencedUnion(connection, result.graph_id, "EDGE", edge_tables, vertex_tables, graph_name,
+		                                   false, result.source_snapshot_id, result.cached_reference_ids);
+		if (result.cached_reference_ids) {
+			result.vertex.referenced_fetch_sql =
+			    BuildReferencedUnion(connection, result.graph_id, "VERTEX", vertex_tables, vertex_tables, graph_name,
+			                         true, result.source_snapshot_id)
+			        .relation_sql;
+		}
+		result.edge_source_column = "__gql_source_id";
+		result.edge_target_column = "__gql_target_id";
+	}
 	return true;
+}
+
+bool GqlReferencedKeyIsUnique(const GqlElementTableBinding &table, const string &property) {
+	if (table.referenced_sources.size() != 1)
+		return false;
+	const auto &source = table.referenced_sources[0];
+	for (const auto &entry : source.property_columns) {
+		if (StringUtil::CIEquals(entry.first, property) && StringUtil::CIEquals(entry.second, source.key_column))
+			return true;
+	}
+	return false;
 }
 
 } // namespace duckdb

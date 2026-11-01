@@ -14,3 +14,12 @@ or
 ```bash
 make test_debug
 ```
+
+The real DuckLake identity-cache integration test requires a compatible signed
+DuckLake extension. It uses an isolated catalog under the test directory and
+skips when the extension path is absent:
+
+```bash
+DUCKGQL_DUCKLAKE_EXTENSION=/absolute/path/ducklake.duckdb_extension \
+  build/release/test/unittest 'test/sql/gql_ducklake_identity.test'
+```

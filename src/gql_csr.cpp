@@ -314,6 +314,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		                            "load graph '%s' with COPY GRAPH first",
 		                            graph_name);
 	}
+	if (binding.cached_reference_ids) {
+		binding.vertex.relation_sql = binding.vertex.referenced_fetch_sql;
+	}
 	Connection connection(*context.db);
 	auto snapshot = make_shared_ptr<GqlCsrSnapshot>();
 	snapshot->capabilities = capabilities;
@@ -336,6 +339,10 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 
 	connection.BeginTransaction();
 	auto graph = ReadGraphVersion(connection, graph_name);
+	if (binding.cached_reference_ids && graph.source_snapshot_id != binding.source_snapshot_id) {
+		throw InvalidInputException("Graph '%s' changed before its CSR source snapshot was read; retry the operation",
+		                            graph_name);
+	}
 	snapshot->graph_id = graph.graph_id;
 	snapshot->graph_version = graph.graph_version;
 	snapshot->has_source_snapshot = graph.has_source_snapshot;

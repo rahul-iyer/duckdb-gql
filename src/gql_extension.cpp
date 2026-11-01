@@ -21,8 +21,10 @@
 #include "gql_csr.hpp"
 #include "gql_import.hpp"
 #include "gql_mutation.hpp"
+#include "gql_optimizer.hpp"
 #include "gql_parser.hpp"
 #include "gql_relational.hpp"
+#include "gql_referenced.hpp"
 #include "gql_storage.hpp"
 
 namespace duckdb {
@@ -96,8 +98,21 @@ static void RegisterAlgorithmFunctions(ExtensionLoader &loader) {
 	register_function(GqlClosenessFunction());
 }
 
+static void SetGqlOptimizer(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("gql_optimizer must be 'legacy' or 'cost'");
+	}
+	auto mode = StringUtil::Lower(parameter.GetValue<string>());
+	if (mode != "legacy" && mode != "cost") {
+		throw InvalidInputException("gql_optimizer must be 'legacy' or 'cost'");
+	}
+	parameter = Value(mode);
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlGraphsFunction());
+	loader.RegisterFunction(GqlReferencedKeysFunction());
+	loader.RegisterFunction(GqlReferencedCacheStatsFunction());
 	loader.RegisterFunction(GqlNeighborsFunction());
 	loader.RegisterFunction(GqlCsrVerticesFunction());
 	loader.RegisterFunction(GqlCsrExpandFunction());
@@ -114,6 +129,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlPropertyIndexesFunction());
 	RegisterAlgorithmFunctions(loader);
 	loader.RegisterFunction(GqlRelationalMatchFunction());
+	loader.RegisterFunction(GqlOptimizerPlanFunction());
 	loader.RegisterFunction(GqlTrailUniqueFunction());
 	loader.RegisterFunction(GqlRecursiveMatchFunction());
 	loader.RegisterFunction(GqlAlgorithmCallFunction());
@@ -129,6 +145,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlMergeIdFunction());
 	loader.RegisterFunction(GqlMutationControlFunction());
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
+	config.AddExtensionOption("gql_optimizer",
+	                          "Graph access planner: legacy (default) or experimental cost-based search",
+	                          LogicalType::VARCHAR, Value("legacy"), SetGqlOptimizer);
 	auto parser_override_option = DBConfig::GetOptionByName("allow_parser_override_extension");
 	if (parser_override_option && parser_override_option->setting_idx.IsValid() &&
 	    !config.user_settings.IsSet(parser_override_option->setting_idx.GetIndex())) {

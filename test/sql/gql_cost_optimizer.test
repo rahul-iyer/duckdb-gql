@@ -1,0 +1,255 @@
+# name: test/sql/gql_cost_optimizer.test
+# description: Costed graph access alternatives, multiplicity estimates and bounded search
+# group: [gql]
+
+require duckgql
+
+require json
+
+statement ok
+SET threads=1
+
+query T
+SELECT current_setting('gql_optimizer')
+----
+legacy
+
+statement error
+SET gql_optimizer='invalid'
+----
+must be 'legacy' or 'cost'
+
+statement ok
+SET gql_optimizer='CoSt'
+
+query T
+SELECT current_setting('gql_optimizer')
+----
+cost
+
+# Diagnostics are connection-local and empty before a graph query is bound.
+query I
+SELECT count(*) FROM gql_optimizer_plan()
+----
+0
+
+statement ok
+COPY (
+ SELECT i::VARCHAR AS ":ID", i AS "score:int", i % 4 AS "bucket:int",
+        repeat('x', 16) AS "payload:string",
+        (CASE WHEN i = 0 THEN 'Rare;Node' ELSE 'Node' END) || CASE WHEN i <= 4000 THEN ';Subset' ELSE '' END AS ":LABEL"
+ FROM range(200000) r(i)
+) TO '{TEST_DIR}/cost_nodes.csv' (HEADER)
+
+statement ok
+COPY (
+ SELECT '0' AS ":START_ID", i::VARCHAR AS ":END_ID", 'LINK' AS ":TYPE", 1 AS "weight:int" FROM range(1,6001) r(i)
+ UNION ALL
+ SELECT i::VARCHAR, (i+10000)::VARCHAR, 'TAIL', 1 FROM range(1,6001) r(i)
+ UNION ALL
+ SELECT '0', '1', 'LINK', 1
+ UNION ALL SELECT '0', i::VARCHAR, 'SPARSE', 1 FROM range(1,6) r(i)
+ UNION ALL SELECT '0', '1', 'SPARSE', 1
+ UNION ALL SELECT i::VARCHAR, (i+1)::VARCHAR, 'WIDE', 1 FROM range(1,100001) r(i)
+ UNION ALL SELECT '0', '1', 'WIDE', 1
+) TO '{TEST_DIR}/cost_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH cost_optimizer ANY
+
+statement ok
+COPY GRAPH cost_optimizer FROM (VERTICES '{TEST_DIR}/cost_nodes.csv', EDGES '{TEST_DIR}/cost_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cost_optimizer
+
+statement ok
+CALL gql_create_property_index('cost_optimizer', 'bucket')
+
+statement ok
+CREATE UNIQUE INDEX cost_unique_score ON gql_data.graph_1_vertices(score)
+
+statement ok
+ANALYZE GRAPH cost_optimizer
+
+# A nonunique lookup must not be estimated as one row. Execution still retains
+# every matching vertex, whether a lookup or a sequential scan wins the costing.
+query I
+MATCH (n:Node) WHERE n.bucket = 0 RETURN count(*)
+----
+50000
+
+query I
+SELECT bool_and(estimated_rows > 1) FROM gql_optimizer_plan()
+----
+true
+
+# Range estimates use transaction-visible native min/max statistics, including
+# reversed comparisons. They estimate work; they never truncate execution.
+query I
+MATCH (n:Node) WHERE 120 > n.score RETURN count(*)
+----
+120
+
+query I
+SELECT estimated_rows BETWEEN 1 AND 200 FROM gql_optimizer_plan()
+----
+true
+
+statement ok
+CALL gql_build_csr('cost_optimizer')
+
+# A cached label is an access alternative, not a mandatory independent seed.
+# Fetch the six reached rows rather than all 4001 Subset vertices.
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='{TEST_DIR}/demand_fetch.json'
+
+query II
+MATCH (s:Rare)-[:SPARSE]->(m:Subset) WHERE s.score = 0 RETURN count(*), min(m.score)
+----
+6	1
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT max((node.value->>'intermediate_rows')::UBIGINT) < 16
+FROM read_text('{TEST_DIR}/demand_fetch.json'), json_tree(content) node
+WHERE node.type = 'OBJECT' AND (node.value->>'type') = 'INOUT_FUNCTION'
+----
+true
+
+# Two patterns, a frontier larger than the former 4096-row threshold, and a
+# parallel edge. Access selection must retain the duplicate path to vertex 1.
+query II
+MATCH (s:Rare)-[:LINK]->(m:Node), (m)-[:TAIL]->(t:Node)
+WHERE s.score = 0 RETURN count(*), min(t.score)
+----
+6001	10001
+
+# The large frontier remains a bag even if scans are cheaper than row fetches.
+query I
+SELECT max(estimated_rows) > 4096 FROM gql_optimizer_plan()
+----
+true
+
+# Duplicate seeds may traverse the same edge again. The estimated bag must
+# not be capped to the 6000 distinct TAIL edges.
+query I
+SELECT estimated_rows > 6000 FROM gql_optimizer_plan() WHERE edge_label = 'tail'
+----
+true
+
+# A small two-pattern frontier should instead fetch the required columns.
+query II
+MATCH (s:Rare)-[:SPARSE]->(m:Node), (m)-[:TAIL]->(t:Node)
+WHERE s.score = 0 RETURN count(*), min(t.score)
+----
+6	10001
+
+query II
+SELECT count(*) FILTER (WHERE access_path = 'BATCHED_ELEMENT_FETCH'),
+       count(*) FILTER (WHERE access_path = 'CSR_EXPANSION')
+FROM gql_optimizer_plan()
+----
+2	2
+
+# The selected costs are finite, sum to the stage cost, and identify memory
+# estimates separately from cumulative work. Cardinalities never limit results.
+query III
+SELECT bool_and(isfinite(operator_cost) AND operator_cost >= 0),
+       abs(sum(operator_cost) - max(stage_cost)) < 0.0001,
+       max(alternatives_considered) > 2
+FROM gql_optimizer_plan()
+----
+true	true	true
+
+# Broad inputs should instead scan. Merely having CSR does not force traversal.
+query I
+MATCH (a:Node)-[:LINK]->(b:Node) RETURN count(*)
+----
+6001
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION'
+----
+0
+
+# OPTIONAL remains a semantic boundary, including zero matches and null values.
+query II
+MATCH (s:Rare) OPTIONAL MATCH (s)-[:LINK]->(m:Node), (m)-[:TAIL]->(t:Node)
+WHERE t.score < 0 RETURN s.score, t.score
+----
+0	NULL
+
+# Correlated lateral regions retain the compatibility planner until their
+# complete tuple domains can be costed, and diagnostics make this explicit.
+query I
+SELECT count(*) > 0 FROM gql_optimizer_plan() WHERE optimizer_mode = 'legacy_fallback'
+----
+true
+
+# EXPLAIN binds but does not execute this nine-edge region. Keep planning work
+# bounded even when many expansion orders exist.
+statement ok
+EXPLAIN MATCH (a:Rare)-[:LINK]->(b:Node), (b)-[:TAIL]->(c:Node),
+              (c)-[:LINK]->(d:Node), (d)-[:TAIL]->(e:Node),
+              (e)-[:LINK]->(f:Node), (f)-[:TAIL]->(g:Node),
+              (g)-[:LINK]->(h:Node), (h)-[:TAIL]->(i:Node),
+              (i)-[:LINK]->(j:Node)
+RETURN count(*)
+
+query II
+SELECT bool_or(search_bounded), max(alternatives_considered) < 9000 FROM gql_optimizer_plan()
+----
+true	true
+
+# Noncanonical edge IDs still allow a CSR candidate scan, but must fetch edge
+# properties by joining authoritative rows instead of treating IDs as rowids.
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_edge_id = __gql_edge_id + 1000000
+
+statement ok
+CALL gql_build_csr('cost_optimizer')
+
+query I
+MATCH (s:Rare)-[e:WIDE]->(m:Node) WHERE s.score = 0 RETURN sum(e.weight)
+----
+1
+
+query TI
+SELECT access_path, fetch_edge_properties FROM gql_optimizer_plan() WHERE edge_label = 'wide'
+----
+CSR_EDGE_PROPERTY_EXPANSION	false
+
+# A table write invalidates the snapshot. Replanning must not retain a fetch
+# path that would bind against obsolete canonical row IDs.
+statement ok
+MATCH (s:Rare) REMOVE s:Rare
+
+query I
+MATCH (s:Rare)-[:LINK]->(m:Node) RETURN count(*)
+----
+0
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path IN ('CSR_EXPANSION', 'BATCHED_ELEMENT_FETCH', 'LABEL_POSTING_FETCH')
+----
+0
+
+# RESET restores the tuned default, retaining the same execution semantics.
+statement ok
+RESET gql_optimizer
+
+query I
+MATCH (n:Node) WHERE n.bucket = 0 RETURN count(*)
+----
+50000
+
+query TI
+SELECT min(optimizer_mode), count(operator_cost) FROM gql_optimizer_plan()
+----
+legacy	0

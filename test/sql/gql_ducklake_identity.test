@@ -1,0 +1,580 @@
+# name: test/sql/gql_ducklake_identity.test
+# description: Real DuckLake snapshot-scoped identity cache and relational property fetch
+# group: [gql]
+# Set DUCKGQL_DUCKLAKE_EXTENSION to the absolute path of a compatible signed extension.
+
+require duckgql
+
+require parquet
+
+require-env DUCKGQL_DUCKLAKE_EXTENSION
+
+load {TEST_DIR}/gql_ducklake_identity.db
+
+statement ok
+LOAD '{DUCKGQL_DUCKLAKE_EXTENSION}'
+
+statement ok
+ATTACH 'ducklake:{TEST_DIR}/identity.catalog' AS lake (DATA_PATH '{TEST_DIR}/identity-data')
+
+statement ok
+CREATE TABLE lake.main.person (
+    person_id BIGINT NOT NULL,
+    full_name VARCHAR,
+    age_years BIGINT,
+    private_note VARCHAR
+)
+
+statement ok
+CREATE TABLE lake.main.person_knows (
+    relationship_id BIGINT NOT NULL,
+    src_person_id BIGINT NOT NULL,
+    dst_person_id BIGINT NOT NULL,
+    since_year INTEGER
+)
+
+statement ok
+INSERT INTO lake.main.person VALUES
+    (1, 'Ada', 42, 'hidden'),
+    (2, 'Grace', 37, 'hidden')
+
+statement ok
+INSERT INTO lake.main.person_knows VALUES (10, 1, 2, 2020)
+
+query IT
+CREATE GRAPH social TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING, age INT64}),
+    (Person)-[:KNOWS {id INT64 NOT NULL, since INT32}]->(Person)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.person
+        MAP TO NODE TYPE Person
+        KEY (person_id)
+        PROPERTIES (person_id AS id, full_name AS name, age_years AS age),
+    EDGE TABLE lake.main.person_knows
+        MAP TO EDGE TYPE KNOWS
+        KEY (relationship_id)
+        SOURCE (src_person_id) REFERENCES NODE TYPE Person
+        DESTINATION (dst_person_id) REFERENCES NODE TYPE Person
+        PROPERTIES (relationship_id AS id, since_year AS since)
+)
+OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_ONLY', VALIDATE TRUE)
+----
+true	social
+
+query TTT
+SELECT et.element_kind, et.ownership, et.access_mode
+FROM gql_internal.graph_element_tables et
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'social'
+ORDER BY et.element_kind
+----
+EDGE	REFERENCED	READ_ONLY
+VERTEX	REFERENCED	READ_ONLY
+
+query TTT
+SELECT source_kind, snapshot_policy, access_mode
+FROM gql_internal.graph_sources s
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'social'
+----
+DUCKLAKE	LIVE	READ_ONLY
+
+query II
+SELECT starts_with(schema_fingerprint, 'v1|'), length(schema_fingerprint) > 100
+FROM gql_internal.graph_sources s
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'social'
+----
+true	true
+
+query T
+SELECT csr_policy
+FROM gql_internal.graph_storage s
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'social'
+----
+MANUAL
+
+statement ok
+SESSION SET GRAPH social
+
+statement ok
+CALL gql_build_csr('social')
+
+query III
+SELECT has_vertex_labels, has_edge_labels, source_snapshot_id IS NOT NULL
+FROM gql_csr_stats('social')
+----
+true	true	true
+
+query TI
+SELECT edge_label, edge_count
+FROM gql_csr_edge_stats('social')
+----
+knows	1
+
+query TTI
+MATCH (a:Person)-[e:KNOWS]->(b:Person)
+RETURN a.name, b.name, e.since
+----
+Ada	Grace	2020
+
+query II
+MATCH (p:Person)
+RETURN p.id, p.age
+ORDER BY p.id
+----
+1	42
+2	37
+
+statement error
+MATCH (p:Person) RETURN p.private_note
+----
+<REGEX>:.*Property 'private_note' is not mapped.*
+
+statement error
+MATCH (a:Person)-[:KNOWS]->*(b:Person) RETURN b.private_note
+----
+<REGEX>:.*Property 'private_note' is not mapped.*
+
+statement error
+INSERT (:Person {id: 3, name: 'Katherine', age: 30})
+----
+<REGEX>:.*read-only referenced graph.*
+
+statement error
+CALL gql_create_property_index('social', 'name')
+----
+<REGEX>:.*referenced graph; property indexes are not supported.*
+
+# Warm reads reuse keys without retaining property values.
+query I
+SELECT bool_and(build_count = 1) AND count(*) = 1 FROM gql_referenced_cache_stats('social')
+----
+true
+
+statement ok
+UPDATE lake.main.person SET full_name = 'Ada new' WHERE person_id = 1
+
+query T
+MATCH (p:Person) WHERE p.id = 1 RETURN p.name
+----
+Ada new
+
+statement ok
+CALL gql_build_csr('social')
+
+query I
+SELECT min(build_count) > 1 FROM gql_referenced_cache_stats('social')
+----
+true
+
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id=1 RETURN b.name
+----
+Grace
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path = 'REFERENCED_ELEMENT_FETCH'
+----
+1
+
+statement ok
+SET gql_optimizer='cost'
+
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id=1 RETURN b.name
+----
+Grace
+
+statement ok
+RESET gql_optimizer
+
+# Inserting an earlier key changes the snapshot-local ordinal of existing keys.
+statement ok
+INSERT INTO lake.main.person VALUES (0, 'Zero', 21, 'hidden')
+
+statement ok
+INSERT INTO lake.main.person_knows VALUES (11, 1, 2, 2021)
+
+query III
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id=1
+RETURN element_id(a), element_id(b), count(*)
+----
+2	3	2
+
+statement ok
+CALL gql_build_csr('social')
+
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id=1 RETURN b.name ORDER BY b.name
+----
+Grace
+Grace
+
+# External writes can violate graph keys. Reject the map and allow a clean retry.
+statement ok
+INSERT INTO lake.main.person VALUES (0, 'Duplicate', 22, 'hidden')
+
+statement error
+CALL gql_build_csr('social')
+----
+keys must be unique and non-NULL
+
+statement ok
+DELETE FROM lake.main.person WHERE full_name='Duplicate'
+
+query I
+MATCH (p:Person) RETURN count(*)
+----
+3
+
+# Explicit transactions retain the original relational path.
+statement ok
+BEGIN
+
+query IT
+MATCH (p:Person) RETURN p.id, p.name ORDER BY p.id
+----
+0	Zero
+1	Ada new
+2	Grace
+
+statement ok
+COMMIT
+
+statement ok
+DROP GRAPH social
+
+query II
+SELECT (SELECT count(*) FROM lake.main.person), (SELECT count(*) FROM lake.main.person_knows)
+----
+3	2
+
+statement ok
+CREATE TABLE lake.main.customer (
+    customer_id BIGINT NOT NULL,
+    customer_name VARCHAR
+)
+
+statement ok
+CREATE TABLE lake.main.product (
+    product_id BIGINT NOT NULL,
+    product_name VARCHAR,
+    price DOUBLE
+)
+
+statement ok
+CREATE TABLE lake.main.bought (
+    order_id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    product_id BIGINT NOT NULL,
+    quantity INTEGER
+)
+
+statement ok
+INSERT INTO lake.main.customer VALUES (1, 'Ada'), (2, 'Grace')
+
+statement ok
+INSERT INTO lake.main.product VALUES (101, 'Keyboard', 99.5), (102, 'Mouse', 25.0)
+
+statement ok
+INSERT INTO lake.main.bought VALUES (1001, 1, 101, 1), (1002, 2, 102, 2)
+
+query IT
+CREATE GRAPH commerce TYPED {
+    (Customer :Customer {id INT64 NOT NULL, name STRING}),
+    (Item :Item {id INT64 NOT NULL, name STRING, price FLOAT64}),
+    (Customer)-[:BOUGHT {id INT64 NOT NULL, quantity INT32}]->(Item)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.customer
+        MAP TO NODE TYPE Customer
+        KEY (customer_id)
+        PROPERTIES (customer_id AS id, customer_name AS name),
+    VERTEX TABLE lake.main.product
+        MAP TO NODE TYPE Item
+        KEY (product_id)
+        PROPERTIES (product_id AS id, product_name AS name, price AS price),
+    EDGE TABLE lake.main.bought
+        MAP TO EDGE TYPE BOUGHT
+        KEY (order_id)
+        SOURCE (customer_id) REFERENCES NODE TYPE Customer
+        DESTINATION (product_id) REFERENCES NODE TYPE Item
+        PROPERTIES (order_id AS id, quantity AS quantity)
+)
+OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_ONLY', VALIDATE TRUE)
+----
+true	commerce
+
+query II
+SELECT count(*), count(DISTINCT element_kind)
+FROM gql_internal.graph_element_tables et
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'commerce'
+----
+3	2
+
+statement ok
+SESSION SET GRAPH commerce
+
+query TTI
+MATCH (c:Customer)-[b:BOUGHT]->(p:Item)
+RETURN c.name, p.name, b.quantity
+ORDER BY c.name
+----
+Ada	Keyboard	1
+Grace	Mouse	2
+
+query I
+MATCH (n)
+RETURN count(*)
+----
+4
+
+statement ok
+CALL gql_build_csr('commerce')
+
+query II
+SELECT vertex_count, edge_count FROM gql_csr_stats('commerce')
+----
+4	2
+
+query I
+SELECT count(*) FROM system.algo.pagerank('commerce')
+----
+4
+
+# LIVE mappings scan newly committed rows without recreating the graph.
+statement ok
+INSERT INTO lake.main.product VALUES (103, 'Monitor', 350.0)
+
+statement ok
+INSERT INTO lake.main.bought VALUES (1003, 1, 103, 1)
+
+query T
+MATCH (:Customer)-[:BOUGHT]->(p:Item)
+RETURN p.name
+ORDER BY p.name
+----
+Keyboard
+Monitor
+Mouse
+
+statement ok
+DROP GRAPH commerce
+
+# Source keys may overlap across node types and edge types. Their type-qualified
+# source identities remain distinct, while element_id() exposes DuckGQL's dense
+# snapshot-local graph identity.
+statement ok
+CREATE TABLE lake.main.duplicate_product (product_id BIGINT NOT NULL)
+
+statement ok
+INSERT INTO lake.main.duplicate_product VALUES (1), (101), (102), (103)
+
+statement ok
+CREATE TABLE lake.main.viewed (
+    view_id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    product_id BIGINT NOT NULL
+)
+
+statement ok
+INSERT INTO lake.main.viewed VALUES (1001, 1, 1)
+
+statement ok
+CREATE TABLE lake.main.wishlisted (
+    wish_id BIGINT NOT NULL,
+    customer_id BIGINT NOT NULL,
+    product_id BIGINT NOT NULL
+)
+
+statement ok
+INSERT INTO lake.main.wishlisted VALUES (1001, 1, 101)
+
+query IT
+CREATE GRAPH duplicate_ids TYPED {
+    (Customer :Customer {id INT64 NOT NULL}),
+    (Item :Item {id INT64 NOT NULL}),
+    (Customer)-[:BOUGHT {id INT64 NOT NULL}]->(Item),
+    (Customer)-[:VIEWED {id INT64 NOT NULL}]->(Item),
+    (Customer)-[:WISHLISTED {id INT64 NOT NULL}]->(Item)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.customer
+        MAP TO NODE TYPE Customer KEY (customer_id) PROPERTIES (customer_id AS id),
+    VERTEX TABLE lake.main.duplicate_product
+        MAP TO NODE TYPE Item KEY (product_id) PROPERTIES (product_id AS id),
+    EDGE TABLE lake.main.bought
+        MAP TO EDGE TYPE BOUGHT KEY (order_id)
+        SOURCE (customer_id) REFERENCES NODE TYPE Customer
+        DESTINATION (product_id) REFERENCES NODE TYPE Item
+        PROPERTIES (order_id AS id),
+    EDGE TABLE lake.main.viewed
+        MAP TO EDGE TYPE VIEWED
+        SOURCE (customer_id) REFERENCES NODE TYPE Customer
+        DESTINATION (product_id) REFERENCES NODE TYPE Item
+        PROPERTIES (view_id AS id),
+    EDGE TABLE lake.main.wishlisted
+        MAP TO EDGE TYPE WISHLISTED KEY (wish_id)
+        SOURCE (customer_id) REFERENCES NODE TYPE Customer
+        DESTINATION (product_id) REFERENCES NODE TYPE Item
+        PROPERTIES (wish_id AS id)
+)
+----
+true	duplicate_ids
+
+statement ok
+SESSION SET GRAPH duplicate_ids
+
+query II
+MATCH (customer:Customer), (item:Item)
+WHERE customer.id = 1 AND item.id = 1
+RETURN element_id(customer), element_id(item)
+----
+1	3
+
+query IIII
+MATCH (customer:Customer)-[:VIEWED]->(item:Item)
+RETURN customer.id, item.id, element_id(customer), element_id(item)
+----
+1	1	1	3
+
+query II
+MATCH ()-[relationship]->()
+RETURN relationship.id, element_id(relationship)
+ORDER BY element_id(relationship)
+----
+1001	1
+1002	2
+1003	3
+1001	4
+1001	5
+
+statement ok
+CALL gql_build_csr('duplicate_ids')
+
+query II
+SELECT vertex_count, edge_count FROM gql_csr_stats('duplicate_ids')
+----
+6	5
+
+# PINNED graphs reject a newer live attachment before using cached identities.
+statement ok
+UPDATE gql_internal.graph_sources SET snapshot_policy='PINNED',
+ pinned_snapshot_id=(SELECT id FROM lake.current_snapshot())
+WHERE graph_id=(SELECT graph_id FROM gql_internal.graphs WHERE graph_name='duplicate_ids')
+
+query I
+MATCH (n) RETURN count(*)
+----
+6
+
+statement ok
+INSERT INTO lake.main.customer VALUES (3, 'Third')
+
+statement error
+MATCH (n) RETURN count(*)
+----
+requires DuckLake catalog 'lake' attached with SNAPSHOT_VERSION
+
+statement ok
+UPDATE gql_internal.graph_sources SET snapshot_policy='LIVE', pinned_snapshot_id=NULL
+WHERE graph_id=(SELECT graph_id FROM gql_internal.graphs WHERE graph_name='duplicate_ids')
+
+query I
+MATCH (n) RETURN count(*)
+----
+7
+
+# Empty collections and string properties use the same map contract.
+statement ok
+CREATE TABLE lake.main.text_nodes (k BIGINT, title VARCHAR)
+
+statement ok
+CREATE TABLE lake.main.text_edges (s BIGINT, d BIGINT)
+
+statement ok
+CREATE GRAPH text_graph TYPED {
+ (Node :Node {id INT64, name STRING}), (Node)-[:LINK]->(Node)
+} FROM TABLES (
+ VERTEX TABLE lake.main.text_nodes MAP TO NODE TYPE Node KEY(k) PROPERTIES(k AS id, title AS name),
+ EDGE TABLE lake.main.text_edges MAP TO EDGE TYPE LINK
+ SOURCE(s) REFERENCES NODE TYPE Node DESTINATION(d) REFERENCES NODE TYPE Node
+)
+
+statement ok
+SESSION SET GRAPH text_graph
+
+query I
+MATCH (n) RETURN count(*)
+----
+0
+
+statement ok
+CALL gql_build_csr('text_graph')
+
+query II
+SELECT vertex_count,edge_count FROM gql_csr_stats('text_graph')
+----
+0	0
+
+statement ok
+INSERT INTO lake.main.text_nodes VALUES (26,'Last'),(1,'First')
+
+statement ok
+INSERT INTO lake.main.text_edges VALUES (1,26),(1,26)
+
+
+# Concurrent first readers publish one immutable map for this new snapshot.
+concurrentloop reader 0 4
+
+statement ok
+SET VARIABLE map_table=(SELECT et.element_table_id::UBIGINT
+ FROM gql_internal.graph_element_tables et JOIN gql_internal.graphs g USING(graph_id)
+ WHERE g.graph_name='text_graph' AND et.element_kind='VERTEX')
+
+statement ok
+SET VARIABLE map_version=(SELECT id::UBIGINT FROM lake.current_snapshot())
+
+query II
+SELECT count(*), sum(__gql_id) FROM gql_referenced_keys('text_graph', getvariable('map_table'), getvariable('map_version'))
+----
+2	3
+
+endloop
+
+query I
+SELECT build_count FROM gql_referenced_cache_stats('text_graph')
+----
+2
+
+statement ok
+CALL gql_build_csr('text_graph')
+
+query IT
+MATCH (a:Node)-[:LINK]->(b:Node) WHERE a.id=1 RETURN element_id(b), b.name
+----
+2	Last
+2	Last
+
+query TT
+MATCH (a:Node) WHERE a.id=26
+OPTIONAL MATCH (a)-[:LINK]->(b:Node)
+RETURN a.name, b.name
+----
+Last	NULL
+
+# A new physical table cannot inherit an old table's cached identity mapping.
+statement ok
+ALTER TABLE lake.main.text_nodes RENAME TO text_nodes_original
+
+statement ok
+CREATE TABLE lake.main.text_nodes AS SELECT * FROM lake.main.text_nodes_original
+
+statement error
+MATCH (n) RETURN n.id
+----
+source schema or table identity changed

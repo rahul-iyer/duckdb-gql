@@ -15,6 +15,18 @@ struct GqlSourceTable {
 	string table_name;
 };
 
+// Physical source identity is table-qualified; properties remain authoritative
+// in this source. Cached ordinal maps contain keys only, never property rows.
+struct GqlReferencedSource {
+	uint64_t element_table_id = 0;
+	string catalog_name;
+	string schema_name;
+	string table_name;
+	string key_column;
+	vector<string> labels;
+	unordered_map<string, string> property_columns;
+};
+
 struct GqlElementTableBinding {
 	uint64_t element_table_id = 0;
 	string catalog_name;
@@ -32,11 +44,16 @@ struct GqlElementTableBinding {
 	//! type-qualified by their mapping; the relation assigns snapshot-local,
 	//! graph-wide dense IDs used by MATCH, element_id(), and CSR.
 	string relation_sql;
+	//! Cached ordinal join for selective fetch and CSR preparation only.
+	string referenced_fetch_sql;
 	vector<GqlSourceTable> source_tables;
+	vector<GqlReferencedSource> referenced_sources;
 };
 
 struct GqlTableGraphBinding {
 	uint64_t graph_id = 0;
+	uint64_t graph_version = 0;
+	uint64_t source_catalog_id = 0;
 	GqlElementTableBinding vertex;
 	GqlElementTableBinding edge;
 	string edge_source_column;
@@ -47,6 +64,8 @@ struct GqlTableGraphBinding {
 	bool has_pinned_snapshot = false;
 	uint64_t pinned_snapshot_id = 0;
 	string access_mode;
+	bool cached_reference_ids = false;
+	uint64_t source_snapshot_id = 0;
 };
 
 struct GqlPropertyColumnMapping {
@@ -76,6 +95,10 @@ struct GqlReferencedTableMapping {
 //! Returns true when the graph has native table storage. Throws when native
 //! metadata is incomplete or inconsistent.
 bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result);
+
+// A one-table referenced key is unique in its snapshot, unlike an arbitrary
+// property. This proves selectivity only; it does not impose a result limit.
+bool GqlReferencedKeyIsUnique(const GqlElementTableBinding &table, const string &property);
 
 //! Attach graph-owned wide tables to an existing empty graph. The caller owns
 //! the transaction and must create the tables before calling this function.

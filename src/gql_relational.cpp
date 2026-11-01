@@ -30,6 +30,7 @@
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
@@ -1132,6 +1133,23 @@ static unique_ptr<TableRef> ElementFetchTable(const string &graph_name, const st
 	return std::move(result);
 }
 
+static unique_ptr<TableRef> ReferencedFetchTable(const GqlElementTableBinding &table, const string &alias,
+                                                 unique_ptr<ParsedExpression> id, const vector<string> &columns) {
+	// A relational lateral join is decorrelated and executed by DuckDB in
+	// batches. No SQL query, connection, or object-store request is issued per ID.
+	auto base = alias + "_source";
+	auto select = make_uniq<SelectNode>();
+	auto fetched = table;
+	fetched.relation_sql = table.referenced_fetch_sql;
+	select->from_table = ElementTable(fetched, base);
+	for (const auto &column : columns)
+		select->select_list.push_back(Column(base, column));
+	select->where_clause = Equal(Column(base, table.key_column), std::move(id));
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
+}
+
 static unique_ptr<TableRef> CsrEdgePropertyExpansionTable(const GqlTableGraphBinding &graph, const string &graph_name,
                                                           const string &vertex_alias, const string &vertex_key,
                                                           const GqlBindingAccessPath &path, const string &edge_alias) {
@@ -1806,6 +1824,10 @@ static unique_ptr<TableRef> RecursiveMatchBindReplace(ClientContext &context, Ta
 		throw InvalidInputException("Graph '%s' has no native tables; load it with COPY GRAPH before MATCH",
 		                            graph_name);
 	}
+	// A prepared LIVE query must capture a fresh source version on execution.
+	if (table_graph.cached_reference_ids && input.binder) {
+		input.binder->SetAlwaysRequireRebind();
+	}
 	return TableBackedNativeRecursiveMatch(table_graph, match);
 }
 
@@ -2299,6 +2321,13 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				source =
 				    RelationalPathExpansionTable(graph, identities[path.expansion_vertex_binding].table_alias,
 				                                 graph.vertex.key_column, path, identities[binding_index].table_alias);
+			} else if (path.type == GqlBindingAccessPathType::REFERENCED_ELEMENT_FETCH) {
+				if (path.fetch_id_binding >= identities.size() || path.fetch_id_column.empty()) {
+					throw InternalException("Invalid GQL referenced element fetch access path");
+				}
+				source = ReferencedFetchTable(
+				    graph.vertex, identities[binding_index].table_alias,
+				    Column(identities[path.fetch_id_binding].table_alias, path.fetch_id_column), path.fetch_columns);
 			} else if (path.type == GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH) {
 				if (path.fetch_id_binding >= identities.size() || path.fetch_id_column.empty()) {
 					throw InternalException("Invalid GQL batched element fetch access path");
@@ -2370,7 +2399,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			    path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION ||
 			    path.type == GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION) {
 				dependency = path.expansion_vertex_binding;
-			} else if (path.type == GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH) {
+			} else if (path.type == GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH ||
+			           path.type == GqlBindingAccessPathType::REFERENCED_ELEMENT_FETCH) {
 				dependency = path.fetch_id_binding;
 			}
 			if (dependency != DConstants::INVALID_INDEX && joined[dependency] &&
@@ -2641,6 +2671,10 @@ static unique_ptr<TableRef> RelationalMatchBindReplace(ClientContext &context, T
 	if (!GqlTryLoadTableGraph(context, graph_name, table_graph)) {
 		throw InvalidInputException("Graph '%s' has no native tables; load it with COPY GRAPH before MATCH",
 		                            graph_name);
+	}
+	// A prepared LIVE query must capture a fresh source version on execution.
+	if (table_graph.cached_reference_ids && input.binder) {
+		input.binder->SetAlwaysRequireRebind();
 	}
 	return TableBackedMatch(context, graph_name, table_graph, match);
 }

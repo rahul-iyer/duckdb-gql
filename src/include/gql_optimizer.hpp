@@ -1,10 +1,12 @@
 #pragma once
 
 #include "gql_ir.hpp"
+#include "gql_cost_model.hpp"
 
 namespace duckdb {
 
 class ClientContext;
+class TableFunction;
 struct GqlTableGraphBinding;
 
 // Applies semantics-preserving logical rewrites and annotates every operator
@@ -62,7 +64,8 @@ enum class GqlBindingAccessPathType : uint8_t {
 	CSR_PATH_EXPANSION,
 	RELATIONAL_PATH_EXPANSION,
 	BATCHED_ELEMENT_FETCH,
-	LABEL_POSTING_FETCH
+	LABEL_POSTING_FETCH,
+	REFERENCED_ELEMENT_FETCH
 };
 
 struct GqlBindingAccessPath {
@@ -84,17 +87,25 @@ struct GqlBindingAccessPath {
 	GqlLiteralType literal_type = GqlLiteralType::NULL_VALUE;
 	string literal_value;
 	vector<string> label_postings;
-	idx_t estimated_rows = DConstants::INVALID_INDEX;
+	GqlCardinalityEstimate cardinality;
+	GqlPlanCost cost;
+	bool native_index_filter = false;
+	idx_t candidate_rows = DConstants::INVALID_INDEX;
 };
 
 struct GqlStageAccessPlan {
 	vector<bool> introduced;
 	vector<idx_t> source_order;
 	vector<GqlBindingAccessPath> bindings;
+	GqlPlanCost cost;
+	idx_t alternatives_considered = 0;
+	bool search_bounded = false;
+	bool costed = false;
 };
 
 struct GqlAccessPathPlan {
 	vector<GqlStageAccessPlan> stages;
+	string optimizer_mode = "cost";
 };
 
 // Chooses graph-specific physical access paths that DuckDB's relational
@@ -102,5 +113,9 @@ struct GqlAccessPathPlan {
 // reapplying eligibility or selectivity policy.
 GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
                                          const GqlTableGraphBinding &graph, const GqlAccessPathInput &input);
+
+// Inspect the last graph access plan bound on this connection, including EXPLAIN.
+// This reads diagnostics only; it never executes the graph query or builds CSR.
+TableFunction GqlOptimizerPlanFunction();
 
 } // namespace duckdb
