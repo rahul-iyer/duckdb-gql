@@ -391,8 +391,8 @@ FROM read_text('__TEST_DIR__/gql_csr_stale_fallback_plan.txt')
 ----
 false	false
 
-# Posting access requires both a point-like property predicate and a selective
-# label. Label-only scans remain ordinary native-list scans.
+# Broad label scans stay native even when their posting lists are cached.
+# Only a small, selective label frontier should use projected element fetches.
 statement ok
 COPY (
     SELECT CAST(i AS VARCHAR) AS ":ID",

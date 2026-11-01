@@ -1,0 +1,180 @@
+# name: test/sql/gql_selective_label_ranges.test
+# description: Selective label fetches and range predicates preserve bags and OPTIONAL null extension
+# group: [gql]
+
+require duckgql
+
+require json
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "score:int", NULL::VARCHAR AS "note:string", CASE WHEN i < 2 THEN 'Rare;Node' ELSE 'Common;Node' END AS ":LABEL" FROM range(4096) r(i)) TO '__TEST_DIR__/selective_nodes.csv' (HEADER)
+
+statement ok
+COPY (
+    SELECT * FROM (VALUES ('0','2','LINK'),('0','3','LINK'),('0','3','LINK'),('1','4','LINK'),('3','5','TAIL'),('4','6','TAIL')) e(":START_ID", ":END_ID", ":TYPE")
+    UNION ALL
+    SELECT s::VARCHAR, t::VARCHAR, 'DENSE' FROM range(2,1026) sources(s), range(500,564) targets(t)
+) TO '__TEST_DIR__/selective_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH selective_ranges ANY
+
+statement ok
+COPY GRAPH selective_ranges FROM (VERTICES '__TEST_DIR__/selective_nodes.csv', EDGES '__TEST_DIR__/selective_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH selective_ranges
+
+# The same results must work before and after acquiring derived label state.
+query I
+MATCH (r:Rare) RETURN count(*)
+----
+2
+
+statement ok
+CALL gql_build_csr('selective_ranges')
+
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/selective_label.json'
+
+query I rowsort
+MATCH (r:Rare) RETURN r.score
+----
+0
+1
+
+statement ok
+PRAGMA disable_profiling
+
+# A rare label with no point predicate must avoid scanning the broad vertex table.
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'), contains(lower(content), 'gql_vertex_fetch_projected') FROM read_text('__TEST_DIR__/selective_label.json')
+----
+true	true
+
+query I
+MATCH (r:Rare&Node) RETURN count(*)
+----
+2
+
+query I
+MATCH (r:Rare&Common) RETURN count(*)
+----
+0
+
+# Parallel edges retain their multiplicity after the selective vertex lookup.
+query II rowsort
+MATCH (r:Rare)-[:LINK]->(c:Common) WHERE c.score >= 3 AND c.score < 5 RETURN r.score, c.score
+----
+0	3
+0	3
+1	4
+
+# Multiple patterns retain relational inputs, exercising the local range boundary.
+# An OPTIONAL region's range filter must run before null extension.
+query II rowsort
+MATCH (r:Rare) OPTIONAL MATCH (r)-[:LINK]->(c:Common), (c)-[:TAIL]->(d:Common) WHERE c.score > 99999 RETURN r.score, c.score
+----
+0	NULL
+1	NULL
+
+# This range filter is above OPTIONAL and must reject the null-extended rows.
+query II
+MATCH (r:Rare) OPTIONAL MATCH (r)-[:LINK]->(c:Common), (c)-[:TAIL]->(d:Common) WHERE c.score > 99999 LET optional_score = c.score FILTER optional_score >= 3 RETURN r.score, optional_score
+----
+
+# A NULL property on a real match must preserve its rows, including parallel edges.
+query I rowsort
+MATCH (r:Rare) OPTIONAL MATCH (r)-[:LINK]->(c:Common), (c)-[:TAIL]->(d:Common) WHERE c.score >= 3 LET missing_note = c.note FILTER missing_note IS NULL RETURN r.score
+----
+0
+0
+1
+
+# Preserve native literal-filter plans before graph property indexes exist.
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/literal_seed.json'
+
+query I rowsort
+MATCH (c:Common)<-[:LINK]-(r:Rare) WHERE c.score = 3 RETURN r.score
+----
+0
+0
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT contains(lower(content), 'gql_csr_vertices') FROM read_text('__TEST_DIR__/literal_seed.json')
+----
+false
+
+statement ok
+CALL gql_create_property_index('selective_ranges', 'score')
+
+statement ok
+CALL gql_build_csr('selective_ranges')
+
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/point_seed.json'
+
+query I rowsort
+MATCH (c:Common)<-[:LINK]-(r:Rare) WHERE c.score = 3 RETURN r.score
+----
+0
+0
+
+statement ok
+PRAGMA disable_profiling
+
+# A connected point lookup should fetch its neighbors instead of an entire label.
+query II
+SELECT contains(lower(content), 'gql_csr_vertices'), contains(lower(content), 'gql_vertex_fetch_projected') FROM read_text('__TEST_DIR__/point_seed.json')
+----
+false	true
+
+statement ok
+PRAGMA enable_profiling='json'
+
+# Prefer a small connected frontier over a larger independently bound sink.
+# The DENSE edge type has 1,024 incoming edges per sink, versus 64 outgoing.
+statement ok
+PRAGMA profiling_output='__TEST_DIR__/frontier_cost.json'
+
+query III rowsort
+MATCH (r:Rare), (sink:Common) WHERE r.score = 0 AND sink.score = 500
+MATCH (r)-[:LINK]->(middle:Common), (middle)-[:DENSE]->(sink)
+RETURN r.score, middle.score, sink.score
+----
+0	2	500
+0	3	500
+0	3	500
+
+statement ok
+PRAGMA disable_profiling
+
+# Bound physical expansion work, including the fanout of the second hop.
+query I
+SELECT max((node.value->>'intermediate_rows')::UBIGINT) < 512
+FROM read_text('__TEST_DIR__/frontier_cost.json'), json_tree(content) node
+WHERE node.type = 'OBJECT' AND (node.value->>'type') = 'INOUT_FUNCTION'
+----
+true
+
+# A committed write invalidates derived label membership before the next query.
+statement ok
+MATCH (r:Rare) WHERE r.score = 0 REMOVE r:Rare
+
+query I
+MATCH (r:Rare) RETURN r.score
+----
+1

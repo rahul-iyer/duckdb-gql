@@ -1255,6 +1255,30 @@ static unique_ptr<TableRef> CsrVerticesTable(const string &graph_name, const str
 	return std::move(result);
 }
 
+static unique_ptr<TableRef> LabelPostingFetchTable(const string &graph_name, const string &alias,
+                                                   const GqlBindingAccessPath &path) {
+	if (path.label_postings.size() != 1 || path.fetch_columns.empty()) {
+		throw InternalException("Invalid GQL label posting fetch access path");
+	}
+	auto posting_alias = alias + "_label_ids";
+	auto fetch_alias = alias + "_label_rows";
+	auto source = CsrVerticesTable(graph_name, path.label_postings[0], posting_alias);
+	vector<unique_ptr<ParsedExpression>> conditions;
+	conditions.push_back(Constant(Value(true)));
+	AppendJoin(
+	    source,
+	    ElementFetchTable(graph_name, "vertex", Column(posting_alias, "__gql_id"), fetch_alias, path.fetch_columns),
+	    JoinType::INNER, std::move(conditions));
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(source);
+	for (const auto &column : path.fetch_columns) {
+		select->select_list.push_back(Column(fetch_alias, column));
+	}
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
+}
+
 static unique_ptr<TableRef> PropertyIndexTable(const GqlElementTableBinding &table, const string &alias,
                                                const GqlBindingAccessPath &path, idx_t stage_index,
                                                idx_t binding_index) {
@@ -1969,6 +1993,65 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 	auto access_plan = GqlOptimizeAccessPaths(context, graph_name, graph, access_input);
 	const bool cycle_pipeline = CanLowerCyclePipeline(match, graph, access_plan);
 
+	// Keep independent range checks inside an OPTIONAL region's base inputs,
+	// before its correlation domain can multiply rows. Ordinary inner regions
+	// retain native join/filter reordering. Filters above LEFT_APPLY stay above it.
+	vector<vector<pair<idx_t, idx_t>>> local_ranges(match.match_stages.size());
+	vector<bool> optional_stages(match.match_stages.size(), false);
+	for (const auto &node : match.nodes) {
+		if (node.type != GqlLogicalOperatorType::LEFT_APPLY) {
+			continue;
+		}
+		auto child = node.right;
+		while (match.nodes[child].type == GqlLogicalOperatorType::FILTER) {
+			child = match.nodes[child].child;
+		}
+		if (match.nodes[child].type == GqlLogicalOperatorType::MATCH) {
+			optional_stages[match.nodes[child].payload] = true;
+		}
+	}
+	for (const auto &node : match.nodes) {
+		if (node.type != GqlLogicalOperatorType::FILTER) {
+			continue;
+		}
+		auto child = node.child;
+		while (match.nodes[child].type == GqlLogicalOperatorType::FILTER) {
+			child = match.nodes[child].child;
+		}
+		if (match.nodes[child].type != GqlLogicalOperatorType::MATCH || !optional_stages[match.nodes[child].payload]) {
+			continue;
+		}
+		const auto &program = match.predicates[node.payload];
+		auto collect = [&](auto &self, idx_t root) -> void {
+			if (static_cast<GqlExpressionType>(program.node_types[root]) != GqlExpressionType::BINARY) {
+				return;
+			}
+			auto operation = static_cast<GqlBinaryOperator>(program.operators[root]);
+			auto left = root + 1;
+			auto right = ExpressionEnd(program, left);
+			if (operation == GqlBinaryOperator::AND) {
+				self(self, left);
+				self(self, right);
+				return;
+			}
+			if (operation != GqlBinaryOperator::LESS_THAN && operation != GqlBinaryOperator::LESS_THAN_OR_EQUAL &&
+			    operation != GqlBinaryOperator::GREATER_THAN && operation != GqlBinaryOperator::GREATER_THAN_OR_EQUAL) {
+				return;
+			}
+			auto is_property = [&](idx_t index) {
+				return static_cast<GqlExpressionType>(program.node_types[index]) ==
+				       GqlExpressionType::PROPERTY_REFERENCE;
+			};
+			auto is_literal = [&](idx_t index) {
+				return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::LITERAL;
+			};
+			if ((is_property(left) && is_literal(right)) || (is_literal(left) && is_property(right))) {
+				local_ranges[match.nodes[child].payload].emplace_back(node.payload, root);
+			}
+		};
+		collect(collect, 0);
+	}
+
 	struct StageState {
 		unique_ptr<TableRef> source;
 		vector<bool> introduced;
@@ -2196,7 +2279,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		for (const auto binding_index : stage_plan.source_order) {
 			unique_ptr<TableRef> source;
 			const auto &path = stage_plan.bindings[binding_index];
-			if (path.type == GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
+			if (path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+				source = LabelPostingFetchTable(graph_name, identities[binding_index].table_alias, path);
+			} else if (path.type == GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
 				source = PropertyIndexTable(graph.vertex, identities[binding_index].table_alias, path, stage_index,
 				                            binding_index);
 			} else if (path.type == GqlBindingAccessPathType::CSR_EXPANSION) {
@@ -2226,6 +2311,46 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				const auto &table =
 				    match.binding_types[binding_index] == GqlPatternElementType::EDGE ? graph.edge : graph.vertex;
 				source = ElementTable(table, identities[binding_index].table_alias);
+				vector<unique_ptr<ParsedExpression>> ranges;
+				for (const auto &entry : local_ranges[stage_index]) {
+					const auto &program = match.predicates[entry.first];
+					auto left = entry.second + 1;
+					auto right = ExpressionEnd(program, left);
+					auto property = static_cast<GqlExpressionType>(program.node_types[left]) ==
+					                        GqlExpressionType::PROPERTY_REFERENCE
+					                    ? left
+					                    : right;
+					if (program.binding_indices[property] == binding_index) {
+						auto cursor = entry.second;
+						ranges.push_back(LowerExpression(program, cursor, property_aliases, identities));
+					}
+				}
+				if (!ranges.empty()) {
+					for (const auto &pattern : stage.patterns) {
+						for (const auto &element : pattern.elements) {
+							if (element.binding_index != binding_index) {
+								continue;
+							}
+							for (const auto &label : StringUtil::Split(element.label, ';')) {
+								if (!label.empty()) {
+									ranges.push_back(
+									    ElementHasLabel(identities[binding_index].table_alias, table, label));
+								}
+							}
+						}
+					}
+					auto select = make_uniq<SelectNode>();
+					select->from_table = std::move(source);
+					select->select_list.push_back(make_uniq<StarExpression>());
+					select->where_clause = And(std::move(ranges));
+					auto boundary = make_uniq<LimitModifier>();
+					boundary->offset = Constant(Value::BIGINT(0));
+					select->modifiers.push_back(std::move(boundary));
+					auto statement = make_uniq<SelectStatement>();
+					statement->node = std::move(select);
+					source =
+					    make_uniq<SubqueryRef>(std::move(statement), Identifier(identities[binding_index].table_alias));
+				}
 			}
 			components[binding_index] = std::move(source);
 			component_ids[binding_index] = binding_index;
@@ -2274,6 +2399,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 		idx_t posting_index = 0;
 		for (idx_t binding_index = 0; binding_index < stage_plan.bindings.size(); binding_index++) {
+			if (stage_plan.bindings[binding_index].type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+				continue;
+			}
 			for (const auto &label : stage_plan.bindings[binding_index].label_postings) {
 				auto alias = "gql_vertex_label_" + to_string(stage_index) + "_" + to_string(posting_index++);
 				vector<unique_ptr<ParsedExpression>> posting_conditions;

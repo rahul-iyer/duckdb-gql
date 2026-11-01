@@ -438,8 +438,8 @@ static idx_t ClampCardinality(long double value) {
 	return static_cast<idx_t>(std::ceil(value));
 }
 
-static idx_t EstimateFixedExpansionRows(const GqlFanoutStatistics &statistics, const string &label, const string &direction,
-                                        idx_t seed_rows) {
+static idx_t EstimateFixedExpansionRows(const GqlFanoutStatistics &statistics, const string &label,
+                                        const string &direction, idx_t seed_rows) {
 	if (seed_rows == DConstants::INVALID_INDEX) {
 		return DConstants::INVALID_INDEX;
 	}
@@ -636,18 +636,44 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 			}
 		}
 
+		bool has_literal_seed = false;
+		for (idx_t binding_index = 0; binding_index < stage_plan.introduced.size(); binding_index++) {
+			has_literal_seed |= stage_plan.introduced[binding_index] &&
+			                    !vertex_literal_equalities[binding_index].empty();
+		}
 		if (can_use_vertex_postings) {
 			for (const auto &pattern : stage.patterns) {
 				for (const auto &element : pattern.elements) {
 					if (element.type != GqlPatternElementType::VERTEX || element.label.empty() ||
 					    !stage_plan.introduced[element.binding_index] ||
-					    vertex_literal_equalities[element.binding_index].empty() ||
 					    stage_plan.bindings[element.binding_index].type ==
 					        GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
 						continue;
 					}
 					auto &path = stage_plan.bindings[element.binding_index];
 					for (const auto &label : StringUtil::Split(element.label, ';')) {
+						if (vertex_literal_equalities[element.binding_index].empty()) {
+							// Keep the existing selective single-pattern plan, including
+							// native table indexes not registered as graph property indexes.
+							if (stage_allows_element_fetch && pattern.elements.size() > 1 && has_literal_seed) {
+								continue;
+							}
+							auto cardinality = LabelPostingCardinality(*snapshot, label);
+							// A small, selective posting is a bounded independent
+							// frontier; fetch its requested columns, not the table.
+							if (can_fetch_vertices && element.binding_index < input.vertex_fetch_columns.size() &&
+							    !input.vertex_fetch_columns[element.binding_index].empty() &&
+							    cardinality <= MinValue<idx_t>(GQL_BATCHED_ELEMENT_FETCH_THRESHOLD,
+							                                   snapshot->vertex_ids.size() / 64) &&
+							    (path.type != GqlBindingAccessPathType::LABEL_POSTING_FETCH ||
+							     cardinality < path.estimated_rows)) {
+								path.type = GqlBindingAccessPathType::LABEL_POSTING_FETCH;
+								path.label_postings = {label};
+								path.estimated_rows = cardinality;
+								path.fetch_columns = input.vertex_fetch_columns[element.binding_index];
+							}
+							continue;
+						}
 						if (!LabelPostingBeatsScan(*snapshot, label) || ContainsLabel(path.label_postings, label)) {
 							continue;
 						}
@@ -671,7 +697,8 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 			}
 		};
 		for (idx_t binding_index = 0; binding_index < stage_plan.bindings.size(); binding_index++) {
-			if (stage_plan.bindings[binding_index].type != GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
+			if (stage_plan.bindings[binding_index].type != GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP &&
+			    stage_plan.bindings[binding_index].type != GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
 				continue;
 			}
 			reachable[binding_index] = true;
@@ -722,10 +749,10 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 				if (expand_from_left && reachable[right.binding_index]) {
 					const auto left_rows = stage_plan.bindings[left.binding_index].estimated_rows;
 					const auto right_rows = stage_plan.bindings[right.binding_index].estimated_rows;
-					const auto left_cost = EstimateFixedExpansionRows(statistics, edge.label,
-					                                                  edge.reverse ? "in" : "out", left_rows);
-					const auto right_cost = EstimateFixedExpansionRows(statistics, edge.label,
-					                                                   edge.reverse ? "out" : "in", right_rows);
+					const auto left_cost =
+					    EstimateFixedExpansionRows(statistics, edge.label, edge.reverse ? "in" : "out", left_rows);
+					const auto right_cost =
+					    EstimateFixedExpansionRows(statistics, edge.label, edge.reverse ? "out" : "in", right_rows);
 					if ((right_cost != DConstants::INVALID_INDEX && right_cost < left_cost) ||
 					    (right_cost == left_cost && right_rows != DConstants::INVALID_INDEX &&
 					     (left_rows == DConstants::INVALID_INDEX || right_rows < left_rows))) {
@@ -750,12 +777,14 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 					continue;
 				}
 				const auto seed_is_independent =
-				    available[expansion_vertex_binding] || stage_plan.bindings[expansion_vertex_binding].type ==
-				                                               GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP;
+				    available[expansion_vertex_binding] ||
+				    stage_plan.bindings[expansion_vertex_binding].type ==
+				        GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP ||
+				    stage_plan.bindings[expansion_vertex_binding].type == GqlBindingAccessPathType::LABEL_POSTING_FETCH;
 				const auto priority =
 				    edge.quantified ? uint8_t(0)
-				                    : (seed_is_independent &&
-				                               CsrAvailableSeedBeatsBulkScan(statistics, edge.label, expansion_direction)
+				                    : (seed_is_independent && CsrAvailableSeedBeatsBulkScan(statistics, edge.label,
+				                                                                            expansion_direction)
 				                           ? uint8_t(1)
 				                           : uint8_t(2));
 				idx_t estimated_rows = DConstants::INVALID_INDEX;
@@ -773,10 +802,16 @@ GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &g
 						    EstimateFixedExpansionRows(statistics, edge.label, expansion_direction, seed_rows);
 					}
 				}
-				if (selected_pattern != DConstants::INVALID_INDEX &&
-				    (priority > selected_priority ||
-				     (priority == selected_priority && estimated_rows >= selected_estimated_rows))) {
-					continue;
+				if (selected_pattern != DConstants::INVALID_INDEX) {
+					// Keep bounded paths first. For fixed expansions, an independent
+					// seed is only a tie-breaker: it can still have a huge fanout.
+					auto selected_is_path = selected_priority == 0;
+					if ((!edge.quantified && selected_is_path) ||
+					    (edge.quantified == selected_is_path &&
+					     (estimated_rows > selected_estimated_rows ||
+					      (estimated_rows == selected_estimated_rows && priority >= selected_priority)))) {
+						continue;
+					}
 				}
 				selected_pattern = pattern_index;
 				selected_expand_from_left = expand_from_left;
