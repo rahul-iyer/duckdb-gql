@@ -48,13 +48,22 @@ GqlPlanCost GqlCostModel::Scan(idx_t table_rows, idx_t output_rows, idx_t width)
 
 GqlPlanCost GqlCostModel::Lookup(idx_t table_rows, idx_t output_rows, idx_t width) const {
 	auto result = Fetch(output_rows, width);
+	// This is a native table predicate (ART or scan), not a separate graph
+	// table-function bind. Do not charge element-fetch metadata startup here.
+	result.fetch = 8 + WorkRows(output_rows) * (128 + static_cast<double>(width) * 2);
 	result.scan = 4 * std::log2(2 + WorkRows(table_rows));
 	return result;
 }
 
 GqlPlanCost GqlCostModel::Fetch(idx_t rows, idx_t width) const {
 	GqlPlanCost result;
-	result.fetch = 8 + WorkRows(rows) * (128 + static_cast<double>(width) * 2);
+	// Element-fetch functions bind graph metadata and initialize a correlated
+	// source even for one row. Keep that fixed work separate from per-row work;
+	// otherwise tiny frontiers appear almost free compared with native joins.
+	// Scattered projected row fetches cross many storage vectors. Calibration
+	// must charge that work even when only a few columns are requested.
+	auto per_row = analyzed_domains ? 512 + static_cast<double>(width) * 8 : 128 + static_cast<double>(width) * 2;
+	result.fetch = 32776 + WorkRows(rows) * per_row;
 	result.peak_memory_bytes = MemoryBytes(std::min(WorkRows(rows), 2048.0), width);
 	return result;
 }

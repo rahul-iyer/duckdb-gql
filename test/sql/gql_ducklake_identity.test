@@ -100,13 +100,20 @@ statement ok
 SESSION SET GRAPH social
 
 statement ok
-CALL gql_build_csr('social')
+CALL gql_build_csr('social', endpoint_statistics := true)
 
 query III
 SELECT has_vertex_labels, has_edge_labels, source_snapshot_id IS NOT NULL
 FROM gql_csr_stats('social')
 ----
 true	true	true
+
+query IIII
+SELECT edge_count,source_active_vertices,target_active_vertices,
+ source_catalog='lake' AND source_snapshot_id=(SELECT source_snapshot_id FROM gql_csr_stats('social'))
+FROM gql_csr_endpoint_stats('social')
+----
+1	1	1	true
 
 query TI
 SELECT edge_label, edge_count

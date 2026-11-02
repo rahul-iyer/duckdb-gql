@@ -47,6 +47,7 @@ set(EXTENSION_SOURCES
     src/gql_storage.cpp
     src/gql_import.cpp
     src/gql_csr.cpp
+    src/gql_statistics.cpp
     src/gql_algorithms.cpp
     src/parser/generated/GQLBaseVisitor.cpp
     src/parser/generated/GQLLexer.cpp

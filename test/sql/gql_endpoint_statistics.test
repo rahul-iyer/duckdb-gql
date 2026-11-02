@@ -1,0 +1,475 @@
+# name: test/sql/gql_endpoint_statistics.test
+# description: Bounded snapshot-owned joint endpoint label-set statistics
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT * FROM (VALUES
+ ('p1','Person;Sender',1),('p2','Sender;Person',2),('p3','Person;Sender',3),
+ ('city','City;Place',4),('post','Message;Post',5),('comment','Message;Comment',6),
+ ('country','Country;Place',7),('plain','',8)) v(":ID",":LABEL","score:int"))
+TO '{TEST_DIR}/endpoint_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES ('p1','city','R'),('p1','city','R'),('p2','city','R'),
+ ('post','country','R'),('comment','country','R'),('p1','p1','R'),('plain','city','R'))
+ e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/endpoint_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH endpoints ANY
+
+statement ok
+COPY GRAPH endpoints FROM (VERTICES '{TEST_DIR}/endpoint_nodes.csv', EDGES '{TEST_DIR}/endpoint_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH endpoints
+
+statement ok
+CALL gql_build_csr('endpoints')
+
+query T
+SELECT endpoint_statistics_status FROM gql_csr_stats('endpoints')
+----
+not_requested
+
+statement error
+SELECT * FROM gql_csr_endpoint_stats('endpoints')
+----
+Endpoint statistics unavailable (not_requested)
+
+statement error
+CALL gql_build_csr('endpoints', endpoint_statistics := NULL)
+----
+must be a non-NULL BOOLEAN
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query TIII
+SELECT endpoint_statistics_status, endpoint_label_groups, endpoint_combinations,
+ endpoint_statistics_bytes > 0 FROM gql_csr_stats('endpoints')
+----
+complete	6	5	true
+
+query I
+SELECT (capability_mask & 256)<>0 FROM gql_csr_stats('endpoints')
+----
+true
+
+# Different orderings of the same label set form one partition. Parallel edges
+# count separately; active endpoints count each participating vertex once.
+query IIIII
+SELECT edge_count, source_active_vertices, target_active_vertices, source_population, target_population
+FROM gql_csr_endpoint_stats('endpoints')
+WHERE list_contains(source_labels,'person') AND list_contains(target_labels,'city')
+----
+3	2	1	3	1
+
+# Complete label sets partition the graph: overlapping labels do not duplicate
+# edges in these totals. Each row's distinct counts are local to that pair.
+query II
+SELECT sum(edge_count), count(*) FROM gql_csr_endpoint_stats('endpoints')
+----
+7	5
+
+query II
+SELECT sum(edge_count), count(*) FROM gql_csr_endpoint_stats('endpoints')
+WHERE list_contains(source_labels,'message') AND list_contains(target_labels,'country')
+----
+2	2
+
+query III
+SELECT edge_count,source_active_vertices,target_active_vertices FROM gql_csr_endpoint_stats('endpoints')
+WHERE list_contains(source_labels,'person') AND list_contains(target_labels,'person')
+----
+1	1	1
+
+query II
+SELECT edge_count,source_population FROM gql_csr_endpoint_stats('endpoints') WHERE len(source_labels)=0
+----
+1	1
+
+# The old marginal labels both occur on R, but this particular endpoint
+# combination does not. A complete joint distribution can distinguish it.
+query I
+SELECT count(*) FROM gql_csr_endpoint_stats('endpoints')
+WHERE list_contains(source_labels,'person') AND list_contains(target_labels,'country')
+----
+0
+
+statement ok
+SET gql_optimizer='cost'
+
+query I
+MATCH (s:Person)-[:R]->(t:City) RETURN count(*)
+----
+3
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+3	3
+
+query I
+MATCH (t:City)<-[:R]-(s:Person) RETURN count(*)
+----
+3
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+3	3
+
+# A source that reaches two target groups is active once in the marginal,
+# not once per group. The point predicate therefore has a 3/2 fanout estimate.
+query I
+MATCH (s:Person)-[:R]->(t:City) WHERE s.score=1 RETURN count(*)
+----
+2
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+3	2
+
+query I
+MATCH (s:Person)-[:R]->(t:Country) RETURN count(*)
+----
+0
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+0	0
+
+# An unnamed edge matches every type; it is not an absent named type.
+# Keep the existing wildcard estimator until an all-type joint model is used.
+query I
+MATCH (s)-[e]->(t) RETURN count(*)
+----
+7
+
+query I
+SELECT endpoint_edges IS NULL AND estimated_rows=7 FROM gql_optimizer_plan() WHERE binding_id=1
+----
+true
+
+query I
+MATCH (s:Person)-[:UNSEEN]->(t:City) RETURN count(*)
+----
+0
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='unseen'
+----
+0	0
+
+query I
+MATCH (s:Person&Sender)-[:R]->(t:City&Place) RETURN count(*)
+----
+3
+
+query II
+SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+3	3
+
+statement ok
+RESET gql_optimizer
+
+statement ok
+PREPARE endpoint_read AS SELECT sum(edge_count) FROM gql_csr_endpoint_stats('endpoints')
+
+query I
+EXECUTE endpoint_read
+----
+7
+
+statement ok
+MATCH (s:Person), (t:Country) WHERE s.score=1 INSERT (s)-[:R]->(t)
+
+statement error
+SELECT * FROM gql_csr_endpoint_stats('endpoints')
+----
+has not been built
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query III
+SELECT edge_count,source_active_vertices,source_population FROM gql_csr_endpoint_stats('endpoints')
+WHERE list_contains(source_labels,'person') AND list_contains(target_labels,'country')
+----
+1	1	3
+
+query I
+EXECUTE endpoint_read
+----
+8
+
+query I
+SELECT bool_and(source_catalog IS NULL AND source_snapshot_id IS NULL AND
+ graph_version=(SELECT graph_version FROM gql_csr_stats('endpoints')))
+FROM gql_csr_endpoint_stats('endpoints')
+----
+true
+
+# Native SQL can change data without incrementing the graph catalog version.
+# Table write generations must still invalidate the joint distribution.
+statement ok
+SET VARIABLE prior_endpoint_version=(SELECT max(graph_version) FROM gql_csr_endpoint_stats('endpoints'))
+
+statement ok
+DELETE FROM gql_data.graph_1_edges
+WHERE __gql_source_id=(SELECT __gql_id FROM gql_data.graph_1_vertices WHERE score=1)
+  AND __gql_target_id=(SELECT __gql_id FROM gql_data.graph_1_vertices WHERE score=7)
+
+statement error
+SELECT * FROM gql_csr_endpoint_stats('endpoints')
+----
+has not been built
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query I
+EXECUTE endpoint_read
+----
+7
+
+query I
+SELECT bool_and(graph_version=getvariable('prior_endpoint_version')) FROM gql_csr_endpoint_stats('endpoints')
+----
+true
+
+# Admission fails cleanly and a later larger budget can rebuild the statistics.
+# Invalidate the old complete generation so the pressure test cannot simply
+# reuse an already available superset of the requested capabilities.
+statement ok
+INSERT (:Person {score:9})
+
+statement ok
+SET memory_limit='8MB'
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query T
+SELECT endpoint_statistics_status FROM gql_csr_stats('endpoints')
+----
+workspace_limit
+
+query I
+SELECT (capability_mask & 256)=0 FROM gql_csr_stats('endpoints')
+----
+true
+
+statement error
+SELECT * FROM gql_csr_endpoint_stats('endpoints')
+----
+Endpoint statistics unavailable (workspace_limit)
+
+statement ok
+RESET memory_limit
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query T
+SELECT endpoint_statistics_status FROM gql_csr_stats('endpoints')
+----
+complete
+
+# More than 256 different label sets discards the optional distribution.
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", 'L'||i::VARCHAR AS ":LABEL" FROM range(257) r(i))
+TO '{TEST_DIR}/endpoint_group_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":START_ID", i::VARCHAR AS ":END_ID", 'R' AS ":TYPE" FROM range(257) r(i))
+TO '{TEST_DIR}/endpoint_group_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH endpoint_groups ANY
+
+statement ok
+COPY GRAPH endpoint_groups FROM (VERTICES '{TEST_DIR}/endpoint_group_nodes.csv', EDGES '{TEST_DIR}/endpoint_group_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_build_csr('endpoint_groups', endpoint_statistics := true)
+
+query TII
+SELECT endpoint_statistics_status, endpoint_label_groups, endpoint_combinations FROM gql_csr_stats('endpoint_groups')
+----
+group_limit	0	0
+
+# The combination budget is independent of the label-group budget.
+statement ok
+COPY (SELECT 's'||i::VARCHAR AS ":ID", 'S'||i::VARCHAR AS ":LABEL" FROM range(65) r(i)
+ UNION ALL SELECT 't'||i::VARCHAR, 'T'||i::VARCHAR FROM range(65) r(i))
+TO '{TEST_DIR}/endpoint_combination_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 's'||s.i::VARCHAR AS ":START_ID", 't'||t.i::VARCHAR AS ":END_ID", 'R' AS ":TYPE"
+ FROM range(65) s(i), range(65) t(i)) TO '{TEST_DIR}/endpoint_combination_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH endpoint_combinations ANY
+
+statement ok
+COPY GRAPH endpoint_combinations FROM (VERTICES '{TEST_DIR}/endpoint_combination_nodes.csv', EDGES '{TEST_DIR}/endpoint_combination_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_build_csr('endpoint_combinations', endpoint_statistics := true)
+
+query TII
+SELECT endpoint_statistics_status, endpoint_label_groups, endpoint_combinations FROM gql_csr_stats('endpoint_combinations')
+----
+combination_limit	0	0
+
+statement ok
+SESSION SET GRAPH endpoint_combinations
+
+statement ok
+SET gql_optimizer='cost'
+
+query I
+MATCH (s:S0)-[:R]->(t:T0) RETURN count(*)
+----
+1
+
+query I
+SELECT endpoint_edges IS NULL FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+true
+
+statement ok
+RESET gql_optimizer
+
+
+# Pathological label sets fail independently of pair/group cardinality.
+statement ok
+COPY (SELECT 'a' AS ":ID", string_agg('L'||i::VARCHAR, ';') AS ":LABEL" FROM range(17) r(i)
+ UNION ALL SELECT 'b','Target') TO '{TEST_DIR}/endpoint_label_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'a' AS ":START_ID", 'b' AS ":END_ID", 'R' AS ":TYPE")
+TO '{TEST_DIR}/endpoint_label_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH endpoint_labels ANY
+
+statement ok
+COPY GRAPH endpoint_labels FROM (VERTICES '{TEST_DIR}/endpoint_label_nodes.csv', EDGES '{TEST_DIR}/endpoint_label_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_build_csr('endpoint_labels', endpoint_statistics := true)
+
+query TII
+SELECT endpoint_statistics_status,endpoint_label_groups,endpoint_combinations FROM gql_csr_stats('endpoint_labels')
+----
+label_limit	0	0
+
+# Empty graphs publish a complete empty distribution, rather than "unknown".
+statement ok
+SESSION SET GRAPH endpoints
+
+statement ok
+MATCH (n) DETACH DELETE n
+
+statement ok
+CALL gql_build_csr('endpoints', endpoint_statistics := true)
+
+query TII
+SELECT endpoint_statistics_status,endpoint_label_groups,endpoint_combinations FROM gql_csr_stats('endpoints')
+----
+complete	0	0
+
+query I
+SELECT count(*) FROM gql_csr_endpoint_stats('endpoints')
+----
+0
+
+# Compare every populated combination against independent relational joins and
+# aggregates on a larger graph with overlapping labels and repeated edges.
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID",
+ (CASE i%4 WHEN 0 THEN 'Shared;A' WHEN 1 THEN 'B;Shared' WHEN 2 THEN 'C' ELSE '' END)
+ || CASE WHEN i%11=0 THEN ';Extra' ELSE '' END AS ":LABEL"
+ FROM range(1000) r(i)) TO '{TEST_DIR}/endpoint_reference_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT ((i*17+3)%997)::VARCHAR AS ":START_ID", ((i*i*13+19)%997)::VARCHAR AS ":END_ID",
+ CASE i%3 WHEN 0 THEN 'R' WHEN 1 THEN 'S' ELSE 'T' END AS ":TYPE" FROM range(3000) r(i)
+ UNION ALL SELECT '3','19','R' UNION ALL SELECT '3','19','R')
+TO '{TEST_DIR}/endpoint_reference_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH endpoint_reference ANY
+
+statement ok
+COPY GRAPH endpoint_reference FROM (VERTICES '{TEST_DIR}/endpoint_reference_nodes.csv', EDGES '{TEST_DIR}/endpoint_reference_edges.csv') FORMAT GRAPH
+
+statement ok
+SET VARIABLE endpoint_reference_vertices=(SELECT et.schema_name||'.'||et.table_name
+ FROM gql_internal.graph_element_tables et JOIN gql_internal.graphs g USING(graph_id)
+ WHERE g.graph_name='endpoint_reference' AND et.element_kind='VERTEX')
+
+statement ok
+SET VARIABLE endpoint_reference_edges=(SELECT et.schema_name||'.'||et.table_name
+ FROM gql_internal.graph_element_tables et JOIN gql_internal.graphs g USING(graph_id)
+ WHERE g.graph_name='endpoint_reference' AND et.element_kind='EDGE')
+
+statement ok
+CREATE MACRO endpoint_labels(v) AS list_sort(list_distinct(list_transform(
+ list_filter(coalesce(v,[]), lambda x: x IS NOT NULL AND x<>''), lambda x: lower(x))))
+
+statement ok
+CREATE TEMP VIEW endpoint_reference_vertices AS
+SELECT __gql_id, endpoint_labels(__gql_label) AS labels
+FROM query_table(getvariable('endpoint_reference_vertices'))
+
+statement ok
+CREATE TEMP VIEW endpoint_reference_populations AS
+SELECT labels, count(*)::UBIGINT AS population FROM endpoint_reference_vertices GROUP BY labels
+
+statement ok
+CREATE TEMP VIEW endpoint_reference_counts AS
+SELECT s.labels AS source_labels, lower(e.__gql_type) AS edge_label, t.labels AS target_labels,
+ count(*)::UBIGINT AS edge_count, count(DISTINCT s.__gql_id)::UBIGINT AS source_active_vertices,
+ count(DISTINCT t.__gql_id)::UBIGINT AS target_active_vertices
+FROM query_table(getvariable('endpoint_reference_edges')) e
+JOIN endpoint_reference_vertices s ON e.__gql_source_id=s.__gql_id
+JOIN endpoint_reference_vertices t ON e.__gql_target_id=t.__gql_id
+GROUP BY s.labels,lower(e.__gql_type),t.labels
+
+statement ok
+CALL gql_build_csr('endpoint_reference', endpoint_statistics := true)
+
+query I
+WITH expected AS (
+ SELECT c.*,s.population AS source_population,t.population AS target_population
+ FROM endpoint_reference_counts c
+ JOIN endpoint_reference_populations s ON s.labels=c.source_labels
+ JOIN endpoint_reference_populations t ON t.labels=c.target_labels
+), actual AS (
+ SELECT list_sort(source_labels) AS source_labels,edge_label,list_sort(target_labels) AS target_labels,
+ edge_count,source_active_vertices,target_active_vertices,source_population,target_population
+ FROM gql_csr_endpoint_stats('endpoint_reference')
+)
+SELECT count(*) FROM (
+ (SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+ UNION ALL
+ (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected)
+) differences
+----
+0
+
+query I
+SELECT sum(edge_count) FROM gql_csr_endpoint_stats('endpoint_reference')
+----
+3002

@@ -21,6 +21,7 @@ enum GqlCsrCapability : GqlCsrCapabilities {
 	GQL_CSR_VERTEX_LABEL_POSTINGS = 1U << 5U,
 	GQL_CSR_EDGE_STATS = 1U << 6U,
 	GQL_CSR_OUT_DEGREES = 1U << 7U,
+	GQL_CSR_ENDPOINT_STATS = 1U << 8U,
 };
 
 static constexpr GqlCsrCapabilities GQL_CSR_FULL = GQL_CSR_OUTGOING | GQL_CSR_INCOMING | GQL_CSR_EDGE_IDS |
@@ -181,6 +182,55 @@ struct GqlCsrEdgeLabelStats {
 	uint64_t max_incoming_degree = 0;
 };
 
+// Population totals include vertices with zero matching degree. Sparse pairs
+// avoid a vertex-label by relationship-type matrix. Absence means zero only
+// when the snapshot marks this complete, bounded statistic as available.
+struct GqlCsrLabelFanoutStats {
+	uint64_t outgoing_edges = 0;
+	uint64_t incoming_edges = 0;
+	uint64_t outgoing_vertices = 0;
+	uint64_t incoming_vertices = 0;
+	// Populated by explicit endpoint analysis, not by the cheap marginal pass.
+	double outgoing_degree_squares = 0;
+	double incoming_degree_squares = 0;
+};
+
+inline uint64_t GqlCsrLabelFanoutKey(uint32_t vertex_label, uint32_t edge_label) {
+	return (static_cast<uint64_t>(vertex_label) << 32) | edge_label;
+}
+
+struct GqlEndpointGroupCounts {
+	uint64_t edges = 0;
+	uint64_t source_vertices = 0;
+	uint64_t target_vertices = 0;
+};
+
+// Label sets partition vertices: overlapping individual labels cannot count an
+// edge twice. Packed keys contain a 32-bit edge label and two 8-bit group IDs.
+struct GqlEndpointStatistics {
+	vector<vector<uint32_t>> groups;
+	vector<uint64_t> populations;
+	unordered_map<uint64_t, GqlEndpointGroupCounts> counts;
+	unordered_map<uint64_t, GqlCsrLabelFanoutStats> fanout_by_group;
+	idx_t AllocatedBytes() const;
+};
+
+struct GqlEndpointSummary {
+	uint64_t edges = 0;
+	uint64_t source_edges = 0;
+	uint64_t target_edges = 0;
+	uint64_t source_population = 0;
+	uint64_t target_population = 0;
+	uint64_t source_active = 0;
+	uint64_t target_active = 0;
+	double source_degree_squares = 0;
+	double target_degree_squares = 0;
+};
+
+inline uint64_t GqlEndpointGroupKey(uint32_t edge_label, uint8_t source, uint8_t target) {
+	return (static_cast<uint64_t>(edge_label) << 16) | (static_cast<uint64_t>(source) << 8) | target;
+}
+
 struct GqlCsrSnapshot {
 	GqlCsrCapabilities capabilities = 0;
 	//! Optional numeric property projected as DOUBLE, aligned with adjacency.
@@ -219,6 +269,10 @@ struct GqlCsrSnapshot {
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
 	vector<GqlCsrEdgeLabelStats> edge_label_stats;
+	unordered_map<uint64_t, GqlCsrLabelFanoutStats> label_fanout_stats;
+	bool has_label_fanout_stats = false;
+	unique_ptr<GqlEndpointStatistics> endpoint_statistics;
+	string endpoint_statistics_status = "not_requested";
 	bool edge_labels_single = true;
 	idx_t topology_bytes = 0;
 	idx_t identity_bytes = 0;
@@ -227,6 +281,12 @@ struct GqlCsrSnapshot {
 	idx_t build_auxiliary_bytes = 0;
 	idx_t memory_bytes = 0;
 };
+
+unique_ptr<GqlEndpointStatistics> GqlCollectEndpointStatistics(ClientContext &context, const GqlCsrSnapshot &snapshot,
+                                                               string &status, idx_t &workspace_bytes);
+bool GqlSummarizeEndpointStatistics(const GqlCsrSnapshot &snapshot, const vector<uint32_t> &source_labels,
+                                    uint32_t edge_label, const vector<uint32_t> &target_labels,
+                                    GqlEndpointSummary &result);
 
 bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
 
@@ -264,5 +324,6 @@ TableFunction GqlEdgeFetchFunction();
 TableFunction GqlBuildCsrFunction();
 TableFunction GqlCsrStatsFunction();
 TableFunction GqlCsrEdgeStatsFunction();
+TableFunction GqlCsrEndpointStatsFunction();
 
 } // namespace duckdb

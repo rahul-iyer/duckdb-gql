@@ -30,7 +30,8 @@ struct GqlPlanCost {
 // coefficients are independent of query names and scale factors. They model
 // sequential column work versus random row fetches and per-seed lateral work.
 struct GqlCostModel {
-	explicit GqlCostModel(idx_t worker_count_p = 1) : worker_count(worker_count_p ? worker_count_p : 1) {
+	explicit GqlCostModel(idx_t worker_count_p = 1, bool analyzed_domains_p = false)
+	    : worker_count(worker_count_p ? worker_count_p : 1), analyzed_domains(analyzed_domains_p) {
 	}
 	GqlPlanCost Scan(idx_t table_rows, idx_t output_rows, idx_t width) const;
 	GqlPlanCost Lookup(idx_t table_rows, idx_t output_rows, idx_t width) const;
@@ -40,6 +41,7 @@ struct GqlCostModel {
 
 private:
 	idx_t worker_count;
+	bool analyzed_domains;
 };
 
 } // namespace duckdb

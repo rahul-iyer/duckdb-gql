@@ -1,0 +1,195 @@
+# name: test/sql/gql_cost_fanout.test
+# description: Population-aware directional fanout, zero degree and bounded statistics
+# group: [gql]
+
+require duckgql
+
+require json
+
+statement ok
+SET threads=1
+
+statement ok
+SET gql_optimizer='cost'
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "score:int",
+ CASE WHEN i<10 THEN 'Node;SparseGroup' WHEN i=10 THEN 'Node;Hub'
+      WHEN i=50000 THEN 'Node;IsolatedGroup' ELSE 'Node;Target' END AS ":LABEL"
+ FROM range(50001) r(i)) TO '{TEST_DIR}/fanout_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT '10' AS ":START_ID", i::VARCHAR AS ":END_ID", 'R' AS ":TYPE"
+ FROM range(11,40011) r(i)
+ UNION ALL SELECT '0','11','R') TO '{TEST_DIR}/fanout_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH fanout ANY
+
+statement ok
+COPY GRAPH fanout FROM (VERTICES '{TEST_DIR}/fanout_nodes.csv', EDGES '{TEST_DIR}/fanout_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH fanout
+
+statement ok
+CALL gql_build_csr('fanout')
+
+query II
+SELECT has_label_fanout_stats, label_fanout_pairs > 0 FROM gql_csr_stats('fanout')
+----
+true	true
+
+# Nine of ten SparseGroup vertices have zero degree. The other active source is an
+# unrelated hub. Its 40K neighbors must not inflate this label's average degree.
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='{TEST_DIR}/fanout_seed.json'
+
+query I
+MATCH (s:SparseGroup)-[:R]->(t) RETURN count(*)
+----
+1
+
+statement ok
+PRAGMA disable_profiling
+
+# Estimated seed selectivity must also hold before the physical expansion.
+# Moving the label filter after CSR would visit the unrelated 40K-edge hub.
+query I
+SELECT coalesce(max((node.value->>'intermediate_rows')::UBIGINT),0) <= 1
+FROM read_text('{TEST_DIR}/fanout_seed.json'), json_tree(content) node
+WHERE node.type='OBJECT' AND (node.value->>'type')='INOUT_FUNCTION'
+  AND (node.value->'extra_info'->>'Name')='gql_csr_expand'
+----
+true
+
+query TIII
+SELECT fanout_source, fanout_population, fanout_edges, estimated_rows
+FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+label_population	10	1	1
+
+# Incoming distributions are independent of outgoing distributions, including
+# a label with no matching incoming edges.
+query I
+MATCH (s)-[:R]->(t:SparseGroup) RETURN count(*)
+----
+0
+
+query TTIII
+SELECT direction, fanout_source, fanout_population, fanout_edges, estimated_rows
+FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+in	label_population	10	0	0
+
+query I
+MATCH (s:IsolatedGroup)-[:R]->(t) RETURN count(*)
+----
+0
+
+query TIII
+SELECT fanout_source, fanout_population, fanout_edges, estimated_rows
+FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+label_population	1	0	0
+
+# Native scan alternatives use the same endpoint population when estimating
+# joined output. A singleton hub has all its edges, not the global average.
+query I
+MATCH (s:Hub)-[:R]->(t) RETURN count(*)
+----
+40000
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+40000
+
+# A property may select a hub within a broad label. Keep the conservative
+# active-endpoint estimate instead of claiming that this is a uniform sample.
+query I
+MATCH (s:Node)-[:R]->(t) WHERE s.score=0 RETURN count(*)
+----
+1
+
+query I
+SELECT estimated_rows > 1 FROM gql_optimizer_plan() WHERE edge_label='r'
+----
+true
+
+# The compatibility optimizer still returns the same bags.
+statement ok
+SET gql_optimizer='legacy'
+
+query I
+MATCH (s:SparseGroup)-[:R]->(t) RETURN count(*)
+----
+1
+
+statement ok
+SET gql_optimizer='cost'
+
+# Direct writes invalidate both topology and its label-conditioned statistics.
+statement ok
+INSERT (:SparseGroup {score:50001})
+
+statement error
+SELECT * FROM gql_csr_stats('fanout')
+----
+has not been built
+
+statement ok
+CALL gql_build_csr('fanout')
+
+query I
+MATCH (s:SparseGroup)-[:R]->(t) RETURN count(*)
+----
+1
+
+query II
+SELECT fanout_population, fanout_edges FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+11	1
+
+# Too many label/type pairs discard the entire optional statistic. Missing
+# pairs in a partial table must never be interpreted as zero degree.
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", 'L'||i::VARCHAR AS ":LABEL" FROM range(4097) r(i))
+TO '{TEST_DIR}/fanout_budget_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":START_ID", i::VARCHAR AS ":END_ID", 'R' AS ":TYPE" FROM range(4097) r(i))
+TO '{TEST_DIR}/fanout_budget_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH fanout_budget ANY
+
+statement ok
+COPY GRAPH fanout_budget FROM (VERTICES '{TEST_DIR}/fanout_budget_nodes.csv', EDGES '{TEST_DIR}/fanout_budget_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_build_csr('fanout_budget')
+
+query II
+SELECT has_label_fanout_stats, label_fanout_pairs FROM gql_csr_stats('fanout_budget')
+----
+false	0
+
+statement ok
+SESSION SET GRAPH fanout_budget
+
+query I
+MATCH (s:L0)-[:R]->(t) RETURN count(*)
+----
+1
+
+query T
+SELECT fanout_source FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+active_endpoints
+
+statement ok
+RESET gql_optimizer

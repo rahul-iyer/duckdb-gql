@@ -1,0 +1,304 @@
+# name: test/sql/gql_cost_join_domains.test
+# description: Costed multi-pattern domains preserve bags, cycles and range bounds
+# group: [gql]
+
+require duckgql
+
+require json
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "score:int",
+ CASE WHEN i<10 THEN 'A;Shared' WHEN i<20 THEN 'B' ELSE 'C;Shared' END AS ":LABEL"
+ FROM range(30) r(i)) TO '{TEST_DIR}/join_domain_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":START_ID", (10+i%3)::VARCHAR AS ":END_ID", 'R' AS ":TYPE"
+ FROM range(10) r(i)
+ UNION ALL SELECT '0','10','R'
+ UNION ALL SELECT '10','20','S' UNION ALL SELECT '10','21','S'
+ UNION ALL SELECT '11','22','S' UNION ALL SELECT '12','23','S'
+ UNION ALL SELECT '20','0','T' UNION ALL SELECT '22','1','T'
+ UNION ALL SELECT '23','2','T') TO '{TEST_DIR}/join_domain_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH join_domains ANY
+
+statement ok
+COPY GRAPH join_domains FROM (VERTICES '{TEST_DIR}/join_domain_nodes.csv', EDGES '{TEST_DIR}/join_domain_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH join_domains
+
+statement ok
+CREATE INDEX join_seed_score ON gql_data.graph_1_vertices(score)
+
+statement ok
+CALL gql_build_csr('join_domains', endpoint_statistics := true)
+
+statement ok
+SET gql_optimizer='cost'
+
+# Eleven R edges meet four S edges; the parallel R edge contributes twice.
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN count(*)
+----
+16
+
+query II
+SELECT count(*) FILTER (WHERE endpoint_edges IS NOT NULL),
+ count(*) FILTER (WHERE joined_rows IS NOT NULL)
+FROM gql_optimizer_plan()
+----
+2	2
+
+# The selected indexed vertex has two parallel edges; a global degree average
+# must not replace its bounded seed-specific fanout.
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) WHERE a.score=0 RETURN count(*)
+----
+4
+
+query I
+SELECT coalesce(bool_or(fanout_source='indexed_seed' AND fanout_population=1 AND fanout_edges=2),false)
+FROM gql_optimizer_plan()
+----
+true
+
+query I
+MATCH (c:C)<-[:S]-(b:B)<-[:R]-(a:A) RETURN count(*)
+----
+16
+
+# Closing a cycle joins the existing tuple, rather than an independent copy.
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C), (c)-[:T]->(a) RETURN count(*)
+----
+4
+
+query I
+MATCH (a:A)-[:R]->(b:B), (a)-[:R]->(other:B) RETURN count(*)
+----
+13
+
+# Separate patterns preserve Cartesian-product semantics.
+query I
+MATCH (a:A)-[:R]->(b:B), (c:C) RETURN count(*)
+----
+110
+
+query I
+MATCH (a:A&Shared)-[:R]->(b:B), (b)-[:S]->(c:C&Shared)
+WHERE a.score >= 0 AND a.score < 2 RETURN count(*)
+----
+5
+
+query I
+MATCH (a:A)-[:R]->{1,2}(b:B), (b)-[:S]->(c:C) RETURN count(*)
+----
+16
+
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:UNSEEN]->(c:C) RETURN count(*)
+----
+0
+
+# The correlated region keeps its compatibility contract.
+query I
+MATCH (a:A)-[:R]->(b:B)
+OPTIONAL MATCH (b)-[:S]->(c:C) RETURN count(*)
+----
+16
+
+statement ok
+SET gql_optimizer='legacy'
+
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C), (c)-[:T]->(a) RETURN count(*)
+----
+4
+
+statement ok
+SET gql_optimizer='cost'
+
+# A write removes the complete snapshot; query semantics must not depend on it.
+statement ok
+INSERT (:A {score: 100})
+
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN count(*)
+----
+16
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE endpoint_edges IS NOT NULL
+----
+0
+
+# Deleted rowids create gaps: a native rowid is not a CSR ordinal. The index
+# probe must translate through the snapshot's vertex identity map.
+statement ok
+MATCH (a:A) WHERE a.score=9 DETACH DELETE a
+
+statement ok
+CALL gql_build_csr('join_domains', endpoint_statistics := true)
+
+query I
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) WHERE b.score=10 RETURN count(*)
+----
+8
+
+query I
+SELECT coalesce(bool_or(fanout_source='indexed_seed' AND fanout_population=1 AND fanout_edges IN (2,4)),false)
+FROM gql_optimizer_plan()
+----
+true
+
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "score:int", i%2 AS "bucket:int",
+ TIMESTAMP '2000-01-01' + i*INTERVAL '1 day' AS "created:datetime", 'Node' AS ":LABEL"
+ FROM range(1000) r(i)) TO '{TEST_DIR}/join_range_nodes.csv' (HEADER)
+
+statement ok
+CREATE GRAPH join_ranges ANY
+
+statement ok
+COPY GRAPH join_ranges FROM (VERTICES '{TEST_DIR}/join_range_nodes.csv', EDGES '{TEST_DIR}/join_domain_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH join_ranges
+
+statement ok
+CREATE INDEX join_range_bucket ON gql_data.graph_2_vertices(bucket)
+
+statement ok
+CALL gql_build_csr('join_ranges', endpoint_statistics := true)
+
+# Intersect bounds on the same property. Min(selectivity(lower),selectivity(upper))
+# would estimate about 201 rows instead of the 101-row continuous-range estimate.
+query I
+MATCH (n:Node) WHERE n.score >= 100 AND n.score < 200 RETURN count(*)
+----
+100
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan()
+----
+101
+
+query I
+MATCH (n:Node) WHERE 100 <= n.score AND 200 > n.score AND n.score >= 150 RETURN count(*)
+----
+50
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan()
+----
+51
+
+query I
+MATCH (n:Node) WHERE n.score >= 100 AND n.score <= 100 RETURN count(*)
+----
+1
+
+query I
+SELECT estimated_rows BETWEEN 1 AND 4 FROM gql_optimizer_plan()
+----
+true
+
+query I
+MATCH (n:Node) WHERE n.score >= 200 AND n.score < 100 RETURN count(*)
+----
+0
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan()
+----
+0
+
+query I
+MATCH (n:Node) WHERE n.score > 100 OR n.score < 200 RETURN count(*)
+----
+1000
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan()
+----
+1000
+
+query I
+MATCH (n:Node) WHERE n.created >= '2000-04-10 00:00:00'
+ AND n.created < '2000-07-19 00:00:00' RETURN count(*)
+----
+100
+
+query I
+SELECT estimated_rows FROM gql_optimizer_plan()
+----
+101
+
+# An equality matching 500 rows exceeds the 64-row probe cap. No partial
+# index result may be presented as a complete seed distribution.
+query I
+MATCH (a:Node)-[:R]->(b:Node), (b)-[:S]->(c:Node) WHERE a.bucket=0 RETURN count(*)
+----
+9
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE fanout_source='indexed_seed'
+----
+0
+
+# A constrained intermediate seed must precede the next traversal. An unrelated
+# hub in the same label has 400K edges; expanding it before the R join is wasted.
+statement ok
+COPY (SELECT i::VARCHAR AS ":ID", i AS "score:int",
+ CASE WHEN i=0 THEN 'Seed' WHEN i=1 THEN 'Node;Member' ELSE 'Node' END AS ":LABEL"
+ FROM range(500001) r(i)) TO '{TEST_DIR}/join_frontier_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT '0' AS ":START_ID", '1' AS ":END_ID", 'R' AS ":TYPE"
+ UNION ALL SELECT '1','2','S'
+ UNION ALL SELECT '10',i::VARCHAR,'S' FROM range(11,400011) r(i))
+TO '{TEST_DIR}/join_frontier_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH join_frontiers ANY
+
+statement ok
+COPY GRAPH join_frontiers FROM (VERTICES '{TEST_DIR}/join_frontier_nodes.csv', EDGES '{TEST_DIR}/join_frontier_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH join_frontiers
+
+statement ok
+CALL gql_build_csr('join_frontiers', endpoint_statistics := true)
+
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='{TEST_DIR}/join_frontier.json'
+
+query I
+MATCH (s:Seed)-[:R]->(b:Member), (b)-[:S]->(c:Node) RETURN count(*)
+----
+1
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path='CSR_EXPANSION'
+----
+2
+
+query I
+SELECT sum((node.value->>'intermediate_rows')::UBIGINT)
+FROM read_text('{TEST_DIR}/join_frontier.json'), json_tree(content) node
+WHERE node.type='OBJECT' AND (node.value->>'type')='INOUT_FUNCTION'
+ AND (node.value->'extra_info'->>'Name')='gql_csr_expand'
+----
+2

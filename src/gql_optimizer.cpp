@@ -15,6 +15,13 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -555,47 +562,79 @@ public:
 		return count;
 	}
 
-	double Selectivity(const GqlExpressionProgram &program, idx_t node, idx_t binding,
-	                   const GqlElementTableBinding &mapping) {
-		if (!table || node >= program.node_types.size() ||
-		    static_cast<GqlExpressionType>(program.node_types[node]) != GqlExpressionType::BINARY)
-			return 1;
-		auto op = static_cast<GqlBinaryOperator>(program.operators[node]);
-		auto left = node + 1, right = AccessExpressionEnd(program, left);
-		if (op == GqlBinaryOperator::AND) {
-			// Without joint distributions, avoid multiplying correlated predicates.
-			return MinValue<double>(Selectivity(program, left, binding, mapping),
-			                        Selectivity(program, right, binding, mapping));
-		}
-		auto property = [&](idx_t index) {
-			return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::PROPERTY_REFERENCE &&
-			       program.binding_indices[index] == binding;
-		};
-		auto literal = [&](idx_t index) {
-			return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::LITERAL;
-		};
-		bool reversed = false;
-		if (!(property(left) && literal(right))) {
-			if (!(literal(left) && property(right)))
-				return 1;
-			std::swap(left, right);
-			reversed = true;
-		}
-		string column;
-		if (!TryFindCaseInsensitive(mapping.property_columns, program.properties[left], column) ||
-		    !table->ColumnExists(Identifier(column)))
-			return 1;
-		if (op == GqlBinaryOperator::EQUAL) {
-			auto ndv = Distinct(column);
-			return ndv == DConstants::INVALID_INDEX ? 1 : 1.0 / MaxValue<idx_t>(1, ndv);
-		}
-		if (op != GqlBinaryOperator::LESS_THAN && op != GqlBinaryOperator::LESS_THAN_OR_EQUAL &&
-		    op != GqlBinaryOperator::GREATER_THAN && op != GqlBinaryOperator::GREATER_THAN_OR_EQUAL)
-			return 1;
+	// A bounded ART probe supplies cost information for literal seeds without
+	// executing a planning-time SQL query or scanning a property column. The
+	// caller uses rowids only when the current CSR proves their identity mapping.
+	bool Probe(const string &column, const Value &literal, vector<idx_t> &rowids) {
+		if (!table || !HasIndex(column))
+			return false;
+		auto &storage = table->Cast<DuckTableEntry>().GetStorage();
+		auto &info = storage.GetDataTableInfo();
+		info->BindIndexes(context, ART::TYPE_NAME);
 		auto &definition = table->GetColumn(Identifier(column));
-		auto stats = table->GetStatistics(context, definition.Logical().index);
-		if (!stats || stats->GetStatsType() != StatisticsType::NUMERIC_STATS || !NumericStats::HasMinMax(*stats))
+		Value value;
+		try {
+			value = literal.DefaultCastAs(definition.Type());
+		} catch (const Exception &) {
+			return false;
+		}
+		if (value.IsNull())
+			return false;
+		for (auto entry : info->GetIndexes().IndexEntries()) {
+			if (entry->GetBindState() != IndexBindState::BOUND || entry->GetIndexType() != ART::TYPE_NAME)
+				continue;
+			auto art = entry->GetReadHandle<ART>();
+			if (art->UnboundExpressionCount() != 1 || art->GetColumnIds().size() != 1 ||
+			    art->GetColumnIds()[0] != definition.StorageOid())
+				continue;
+			auto expression = art->CopyUnboundExpression(0);
+			// Expression indexes are not equivalent to a property equality.
+			if (expression->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF)
+				continue;
+			auto predicate = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, expression->Copy(),
+			                                                   make_uniq<BoundConstantExpression>(value));
+			auto scan = art->TryInitializeScan(*expression, *predicate);
+			set<row_t> matches;
+			if (!scan || !art->Scan(*scan, 64, matches))
+				return false;
+			for (auto delta : {IndexDeltaType::DELETED_ROWS_IN_USE, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT}) {
+				auto extra = art.FindDelta(delta);
+				if (!extra)
+					continue;
+				auto delta_scan = extra->TryInitializeScan(*expression, *predicate);
+				if (!delta_scan || !extra->Scan(*delta_scan, 64, matches))
+					return false;
+			}
+			for (auto row : matches) {
+				if (row < 0)
+					return false;
+				rowids.push_back(static_cast<idx_t>(row));
+			}
+			return true;
+		}
+		return false;
+	}
+
+	double Selectivity(const GqlExpressionProgram &program, idx_t node, idx_t binding,
+	                   const GqlElementTableBinding &mapping, bool intersect_bounds) {
+		if (!table)
 			return 1;
+		if (!intersect_bounds && node < program.node_types.size() &&
+		    static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::BINARY &&
+		    static_cast<GqlBinaryOperator>(program.operators[node]) == GqlBinaryOperator::AND) {
+			auto left = node + 1, right = AccessExpressionEnd(program, left);
+			return MinValue<double>(Selectivity(program, left, binding, mapping, false),
+			                        Selectivity(program, right, binding, mapping, false));
+		}
+		struct Interval {
+			double low, high;
+			double lower = -std::numeric_limits<double>::infinity();
+			double upper = std::numeric_limits<double>::infinity();
+			bool lower_inclusive = true, upper_inclusive = true;
+			idx_t ndv;
+		};
+		unordered_map<string, Interval> intervals;
+		double selectivity = 1;
 		auto numeric = [](Value value) {
 			switch (value.type().id()) {
 			case LogicalTypeId::DATE:
@@ -609,21 +648,97 @@ public:
 				return value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
 			}
 		};
-		// Unsupported casts and nonnumeric predicates retain an unknown selectivity.
-		// The ordinary binder still checks and reports invalid user expressions.
-		try {
-			auto value = numeric(Value(program.values[right]).DefaultCastAs(definition.Type()));
-			auto low = numeric(NumericStats::Min(*stats)), high = numeric(NumericStats::Max(*stats));
-			if (!std::isfinite(value) || !std::isfinite(low) || !std::isfinite(high) || high <= low)
-				return 1;
-			auto fraction = std::max(0.0, std::min(1.0, (value - low) / (high - low)));
-			bool less = op == GqlBinaryOperator::LESS_THAN || op == GqlBinaryOperator::LESS_THAN_OR_EQUAL;
-			if (reversed)
-				less = !less;
-			return less ? fraction : 1 - fraction;
-		} catch (const Exception &) {
-			return 1;
+		auto collect = [&](auto &self, idx_t cursor) -> void {
+			if (cursor >= program.node_types.size() ||
+			    static_cast<GqlExpressionType>(program.node_types[cursor]) != GqlExpressionType::BINARY)
+				return;
+			auto op = static_cast<GqlBinaryOperator>(program.operators[cursor]);
+			auto left = cursor + 1, right = AccessExpressionEnd(program, left);
+			if (op == GqlBinaryOperator::AND) {
+				self(self, left);
+				self(self, right);
+				return;
+			}
+			auto property = [&](idx_t index) {
+				return static_cast<GqlExpressionType>(program.node_types[index]) ==
+				           GqlExpressionType::PROPERTY_REFERENCE &&
+				       program.binding_indices[index] == binding;
+			};
+			auto literal = [&](idx_t index) {
+				return static_cast<GqlExpressionType>(program.node_types[index]) == GqlExpressionType::LITERAL;
+			};
+			bool reversed = false;
+			if (!(property(left) && literal(right))) {
+				if (!(literal(left) && property(right)))
+					return;
+				std::swap(left, right);
+				reversed = true;
+			}
+			string column;
+			if (!TryFindCaseInsensitive(mapping.property_columns, program.properties[left], column) ||
+			    !table->ColumnExists(Identifier(column)))
+				return;
+			if (op == GqlBinaryOperator::EQUAL) {
+				auto ndv = Distinct(column);
+				if (ndv != DConstants::INVALID_INDEX)
+					selectivity = MinValue<double>(selectivity, 1.0 / MaxValue<idx_t>(1, ndv));
+				return;
+			}
+			if (op != GqlBinaryOperator::LESS_THAN && op != GqlBinaryOperator::LESS_THAN_OR_EQUAL &&
+			    op != GqlBinaryOperator::GREATER_THAN && op != GqlBinaryOperator::GREATER_THAN_OR_EQUAL)
+				return;
+			auto &definition = table->GetColumn(Identifier(column));
+			auto stats = table->GetStatistics(context, definition.Logical().index);
+			if (!stats || stats->GetStatsType() != StatisticsType::NUMERIC_STATS || !NumericStats::HasMinMax(*stats))
+				return;
+			// Unsupported casts remain unknown; ordinary binding reports user errors.
+			try {
+				auto value = numeric(Value(program.values[right]).DefaultCastAs(definition.Type()));
+				auto low = numeric(NumericStats::Min(*stats)), high = numeric(NumericStats::Max(*stats));
+				if (!std::isfinite(value) || !std::isfinite(low) || !std::isfinite(high) || high < low)
+					return;
+				auto found = intervals.find(column);
+				if (found == intervals.end())
+					found = intervals
+					            .emplace(column, Interval {low, high, -std::numeric_limits<double>::infinity(),
+					                                       std::numeric_limits<double>::infinity(), true, true,
+					                                       Distinct(column)})
+					            .first;
+				auto &range = found->second;
+				bool less = op == GqlBinaryOperator::LESS_THAN || op == GqlBinaryOperator::LESS_THAN_OR_EQUAL;
+				if (reversed)
+					less = !less;
+				bool inclusive =
+				    op == GqlBinaryOperator::LESS_THAN_OR_EQUAL || op == GqlBinaryOperator::GREATER_THAN_OR_EQUAL;
+				if (less && value <= range.upper) {
+					range.upper_inclusive = value < range.upper ? inclusive : range.upper_inclusive && inclusive;
+					range.upper = value;
+				} else if (!less && value >= range.lower) {
+					range.lower_inclusive = value > range.lower ? inclusive : range.lower_inclusive && inclusive;
+					range.lower = value;
+				}
+			} catch (const Exception &) {
+			}
+		};
+		collect(collect, node);
+		for (const auto &entry : intervals) {
+			const auto &range = entry.second;
+			auto low = MaxValue<double>(range.low, range.lower), high = MinValue<double>(range.high, range.upper);
+			double fraction;
+			if (low > high || (low == high && ((low == range.lower && !range.lower_inclusive) ||
+			                                   (high == range.upper && !range.upper_inclusive))))
+				fraction = 0;
+			else if (range.high == range.low)
+				fraction = 1;
+			else if (low == high)
+				fraction = range.ndv == DConstants::INVALID_INDEX ? 1 : 1.0 / MaxValue<idx_t>(1, range.ndv);
+			else
+				fraction = (high - low) / (range.high - range.low);
+			// Bounds on one property form an interval. Separate properties still
+			// use the conservative minimum rather than assuming independence.
+			selectivity = MinValue<double>(selectivity, fraction);
 		}
+		return selectivity;
 	}
 
 	idx_t Width(const vector<string> &columns) const {
@@ -757,16 +872,27 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 	}
 
 	vector<vector<GqlLiteralEquality>> vertex_literal_equalities(input.binding_types.size());
+	vector<bool> property_filtered(input.binding_types.size(), false);
 	for (idx_t binding_index = 0; binding_index < input.binding_types.size(); binding_index++) {
 		if (input.binding_types[binding_index] != GqlPatternElementType::VERTEX) {
 			continue;
 		}
 		for (const auto &predicate : input.predicates) {
 			CollectLiteralEqualityConjuncts(predicate, 0, binding_index, vertex_literal_equalities[binding_index]);
+			for (idx_t node = 0; node < predicate.node_types.size(); node++) {
+				if (static_cast<GqlExpressionType>(predicate.node_types[node]) ==
+				        GqlExpressionType::PROPERTY_REFERENCE &&
+				    predicate.binding_indices[node] == binding_index) {
+					property_filtered[binding_index] = true;
+				}
+			}
 		}
 	}
 
-	GqlCostModel cost_model(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	// Keep cardinality and physical costs on the same model. Without complete
+	// endpoint analysis the established multi-edge estimator remains in use.
+	const bool analyzed_domains = snapshot && snapshot->endpoint_statistics;
+	GqlCostModel cost_model(TaskScheduler::GetScheduler(context).NumberOfThreads(), analyzed_domains);
 	GqlNativeStatistics vertex_statistics(context, graph.vertex);
 	GqlNativeStatistics edge_statistics(context, graph.edge);
 	const auto vertex_count = snapshot ? snapshot->vertex_ids.size() : vertex_statistics.rows;
@@ -777,7 +903,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 		bool vertex = input.binding_types[binding] == GqlPatternElementType::VERTEX;
 		for (const auto &program : input.predicates) {
 			auto fraction = (vertex ? vertex_statistics : edge_statistics)
-			                    .Selectivity(program, 0, binding, vertex ? graph.vertex : graph.edge);
+			                    .Selectivity(program, 0, binding, vertex ? graph.vertex : graph.edge, analyzed_domains);
 			predicate_selectivity[binding] = MinValue<double>(predicate_selectivity[binding], fraction);
 		}
 	}
@@ -980,6 +1106,9 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			vector<bool> reachable;
 			vector<bool> scheduled;
 			vector<bool> completed;
+			vector<bool> frontier;
+			vector<idx_t> component;
+			vector<GqlCardinalityEstimate> domain;
 		};
 		struct SearchEdge {
 			GqlAccessPatternElement left;
@@ -1002,8 +1131,190 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 				edges.push_back({pattern.elements[part - 1], edge, pattern.elements[part + 1], supported});
 			}
 		}
-		SearchState initial {stage_plan, available, vector<bool>(input.binding_types.size(), false),
-		                     vector<bool>(edges.size(), false)};
+		SearchState initial {stage_plan,
+		                     available,
+		                     vector<bool>(input.binding_types.size(), false),
+		                     vector<bool>(edges.size(), false),
+		                     vector<bool>(input.binding_types.size(), false),
+		                     {},
+		                     {}};
+		// Marginal endpoint distributions do not describe the tuple domain of a
+		// joined or quantified region. Keep the existing estimates there until a
+		// joint-domain model can cost the complete region. This is a statistics
+		// eligibility boundary, not a restriction on query execution or search.
+		const bool use_population_stats = stage.patterns.size() == 1 && stage.patterns[0].elements.size() == 3 &&
+		                                  !stage.patterns[0].elements[1].quantified;
+		// Resolve populations once per binding, outside the bounded beam search.
+		vector<string> population_labels(input.binding_types.size());
+		vector<vector<uint32_t>> required_labels(input.binding_types.size());
+		vector<idx_t> population_rows(input.binding_types.size(),
+		                              snapshot ? snapshot->vertex_ids.size() : DConstants::INVALID_INDEX);
+		vector<bool> label_constrained(input.binding_types.size(), false);
+		for (const auto &pattern : stage.patterns) {
+			for (const auto &element : pattern.elements) {
+				if (element.type != GqlPatternElementType::VERTEX)
+					continue;
+				auto binding = element.binding_index;
+				for (const auto &name : StringUtil::Split(element.label, ';')) {
+					if (name.empty())
+						continue;
+					label_constrained[binding] = true;
+					if (snapshot) {
+						auto id = snapshot->label_ids.find(StringUtil::Lower(name));
+						required_labels[binding].push_back(
+						    id == snapshot->label_ids.end() ? std::numeric_limits<uint32_t>::max() : id->second);
+					}
+					if (!can_use_vertex_postings)
+						continue;
+					auto count = LabelPostingCardinality(*snapshot, name);
+					if (population_labels[binding].empty() || count < population_rows[binding]) {
+						population_labels[binding] = name;
+						population_rows[binding] = count;
+					}
+				}
+			}
+		}
+		vector<GqlEndpointSummary> endpoint_summaries(edges.size());
+		vector<bool> endpoint_available(edges.size(), false);
+		// Exact endpoint classes are valid for each fixed edge even when the
+		// surrounding MATCH contains other edges. Joined tuple domains below
+		// carry multiplicity separately from distinct endpoint participation.
+
+		for (idx_t index = 0; index < edges.size(); index++) {
+			const auto &entry = edges[index];
+			if (!snapshot || !snapshot->endpoint_statistics || !entry.expand_allowed || entry.edge.quantified)
+				continue;
+			auto label = snapshot->label_ids.find(StringUtil::Lower(entry.edge.label));
+			auto source = entry.edge.reverse ? entry.right.binding_index : entry.left.binding_index;
+			auto target = entry.edge.reverse ? entry.left.binding_index : entry.right.binding_index;
+			auto &summary = endpoint_summaries[index];
+			endpoint_available[index] = GqlSummarizeEndpointStatistics(
+			    *snapshot, required_labels[source],
+			    label == snapshot->label_ids.end() ? std::numeric_limits<uint32_t>::max() : label->second,
+			    required_labels[target], summary);
+			if (!endpoint_available[index])
+				continue;
+			population_rows[source] = summary.source_population;
+			population_rows[target] = summary.target_population;
+			for (auto binding : {source, target}) {
+				auto &cardinality = initial.plan.bindings[binding].cardinality;
+				cardinality.rows = MinValue<idx_t>(cardinality.rows, population_rows[binding]);
+				cardinality.distinct_ids = MinValue<idx_t>(cardinality.distinct_ids, cardinality.rows);
+			}
+			initial.plan.bindings[entry.edge.binding_index].endpoint_edges = summary.edges;
+		}
+		const bool joint_region = edges.size() > 1 && std::any_of(endpoint_available.begin(), endpoint_available.end(),
+		                                                          [](bool value) { return value; });
+		for (idx_t binding = 0; binding < input.binding_types.size(); binding++) {
+			initial.component.push_back(binding);
+			initial.domain.push_back(initial.plan.bindings[binding].cardinality);
+		}
+		struct SeedFanout {
+			bool available = false;
+			idx_t population = 0, edges = 0, matching = 0;
+		};
+		vector<SeedFanout> seed_fanouts(edges.size() * 2);
+		if (joint_region && can_fetch_vertices && snapshot->vertex_ids_match_rowids) {
+			vector<vector<idx_t>> seeds(input.binding_types.size());
+			vector<bool> probed(input.binding_types.size(), false);
+			idx_t probes = 0, adjacency_budget = 1048576;
+			auto matches_labels = [&](idx_t vertex, idx_t binding) {
+				for (auto label : required_labels[binding]) {
+					bool found = false;
+					for (auto offset = snapshot->vertex_label_offsets[vertex];
+					     offset < snapshot->vertex_label_offsets[vertex + 1]; offset++)
+						found |= snapshot->vertex_label_ids[offset] == label;
+					if (!found)
+						return false;
+				}
+				return true;
+			};
+			for (idx_t binding = 0; binding < input.binding_types.size() && probes < 8; binding++) {
+				if (!initial.plan.introduced[binding])
+					continue;
+				for (const auto &equality : vertex_literal_equalities[binding]) {
+					string column;
+					if (equality.literal_type == GqlLiteralType::NULL_VALUE ||
+					    !TryFindCaseInsensitive(graph.vertex.property_columns, equality.property_name, column) ||
+					    !vertex_statistics.HasIndex(column))
+						continue;
+					probes++;
+					vector<idx_t> ids;
+					if (!vertex_statistics.Probe(column, Value(equality.literal_value), ids))
+						break;
+					bool valid = !ids.empty();
+					for (auto rowid : ids) {
+						idx_t ordinal;
+						if (!GqlTryGetCsrOrdinal(*snapshot, static_cast<uint64_t>(rowid) + 1, ordinal)) {
+							valid = false;
+							break;
+						}
+						if (matches_labels(ordinal, binding))
+							seeds[binding].push_back(ordinal);
+					}
+					probed[binding] = valid && !seeds[binding].empty();
+					break;
+				}
+			}
+			for (idx_t index = 0; index < edges.size(); index++) {
+				const auto &entry = edges[index];
+				if (!endpoint_available[index])
+					continue;
+				auto label = snapshot->label_ids.find(StringUtil::Lower(entry.edge.label));
+				if (label == snapshot->label_ids.end())
+					continue;
+				for (idx_t side = 0; side < 2; side++) {
+					auto binding = side == 0 ? entry.left.binding_index : entry.right.binding_index;
+					auto other = side == 0 ? entry.right.binding_index : entry.left.binding_index;
+					if (!probed[binding])
+						continue;
+					auto outgoing = (side == 0) != entry.edge.reverse;
+					const auto &offsets = outgoing ? snapshot->outgoing_offsets : snapshot->incoming_offsets;
+					const auto &neighbors = outgoing ? snapshot->outgoing_neighbors : snapshot->incoming_neighbors;
+					const auto &labels = outgoing ? snapshot->outgoing_label_ids : snapshot->incoming_label_ids;
+					auto &fanout = seed_fanouts[index * 2 + side];
+					idx_t visits = 0;
+					bool within_budget = true;
+					for (auto vertex : seeds[binding]) {
+						auto degree = offsets[vertex + 1] - offsets[vertex];
+						if (degree > adjacency_budget - visits) {
+							within_budget = false;
+							break;
+						}
+						visits += degree;
+					}
+					if (!within_budget)
+						continue;
+					adjacency_budget -= visits;
+					fanout.available = true;
+					fanout.population = seeds[binding].size();
+					for (auto vertex : seeds[binding]) {
+						for (idx_t offset = offsets[vertex]; offset < offsets[vertex + 1]; offset++) {
+							if ((offset & 4095) == 0 && context.IsInterrupted())
+								throw InterruptException();
+							if (labels[offset] != label->second)
+								continue;
+							fanout.edges++;
+							fanout.matching += matches_labels(neighbors[offset], other);
+						}
+					}
+				}
+			}
+		}
+		auto label_distribution = [&](idx_t binding, const string &label, GqlCsrLabelFanoutStats &result) {
+			if (!use_population_stats || !snapshot || !snapshot->has_label_fanout_stats ||
+			    population_labels[binding].empty())
+				return false;
+			auto vertex_label = snapshot->label_ids.find(StringUtil::Lower(population_labels[binding]));
+			auto edge_label = snapshot->label_ids.find(StringUtil::Lower(label));
+			if (vertex_label != snapshot->label_ids.end() && edge_label != snapshot->label_ids.end()) {
+				auto found =
+				    snapshot->label_fanout_stats.find(GqlCsrLabelFanoutKey(vertex_label->second, edge_label->second));
+				if (found != snapshot->label_fanout_stats.end())
+					result = found->second;
+			}
+			return true;
+		};
 		auto schedule = [&](SearchState &state, idx_t binding) {
 			if (state.plan.introduced[binding] && !state.scheduled[binding]) {
 				state.plan.source_order.push_back(binding);
@@ -1100,9 +1411,135 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 					const auto &entry = edges[index];
 					const auto &edge = entry.edge;
 					const auto edge_binding = edge.binding_index;
+					const bool has_endpoint_summary = endpoint_available[index];
+					const auto &endpoint_summary = endpoint_summaries[index];
+					auto seed_fanout = [&](idx_t binding) -> const SeedFanout * {
+						if (state.frontier[binding])
+							return nullptr;
+						auto side = binding == entry.left.binding_index ? idx_t(0) : idx_t(1);
+						const auto &fanout = seed_fanouts[index * 2 + side];
+						return fanout.available ? &fanout : nullptr;
+					};
+					auto source_edges = [&](const string &direction) -> idx_t {
+						return direction == "out" ? endpoint_summary.source_edges : endpoint_summary.target_edges;
+					};
+					auto endpoint_domain = [&](idx_t binding, const string &label, const string &direction,
+					                           idx_t fallback) {
+						if (has_endpoint_summary)
+							return static_cast<idx_t>(direction == "out" ? endpoint_summary.source_active
+							                                             : endpoint_summary.target_active);
+						GqlCsrLabelFanoutStats distribution;
+						if (!label_distribution(binding, label, distribution))
+							return fallback;
+						return static_cast<idx_t>(direction == "out" ? distribution.outgoing_vertices
+						                                             : distribution.incoming_vertices);
+					};
+					auto estimate_expansion = [&](const SearchState &state, idx_t binding, const string &label,
+					                              const string &direction, idx_t rows, GqlBindingAccessPath &path) {
+						const auto stats = TryEdgeLabelStats(statistics, label);
+						path.fanout_source = "unknown";
+						if (rows == DConstants::INVALID_INDEX)
+							return DConstants::INVALID_INDEX;
+						if (!stats) {
+							if (!has_endpoint_summary)
+								return DConstants::INVALID_INDEX;
+							path.fanout_source = "endpoint_population";
+							path.fanout_population = population_rows[binding];
+							path.fanout_edges = source_edges(direction);
+							return idx_t(0);
+						}
+						path.fanout_source = "active_endpoints";
+						path.fanout_population =
+						    direction == "out" ? stats->outgoing_vertex_count : stats->incoming_vertex_count;
+						path.fanout_edges = stats->edge_count;
+						GqlCsrLabelFanoutStats distribution;
+						const bool typed = label_distribution(binding, label, distribution);
+						if (typed) {
+							path.fanout_source = "label_active_endpoints";
+							path.fanout_population =
+							    direction == "out" ? distribution.outgoing_vertices : distribution.incoming_vertices;
+							path.fanout_edges =
+							    direction == "out" ? distribution.outgoing_edges : distribution.incoming_edges;
+						}
+						if (has_endpoint_summary) {
+							path.fanout_edges = source_edges(direction);
+							path.fanout_population =
+							    direction == "out" ? endpoint_summary.source_active : endpoint_summary.target_active;
+							path.fanout_source = "endpoint_active";
+						}
+						// Reached vertices are degree-biased, and property values can select hubs.
+						// Use active endpoints for those domains; include zero-degree vertices only
+						// for an independent population (or its known singleton).
+						if ((use_population_stats || has_endpoint_summary) && snapshot && !state.frontier[binding] &&
+						    (!property_filtered[binding] || population_rows[binding] <= 1)) {
+							if (has_endpoint_summary) {
+								path.fanout_source = "endpoint_population";
+								path.fanout_population = population_rows[binding];
+							} else if (typed) {
+								path.fanout_source = "label_population";
+								path.fanout_population = population_rows[binding];
+							} else if (!label_constrained[binding]) {
+								path.fanout_source = "vertex_population";
+								path.fanout_population = population_rows[binding];
+							}
+						}
+						if (auto seed = seed_fanout(binding)) {
+							path.fanout_source = "indexed_seed";
+							path.fanout_population = seed->population;
+							path.fanout_edges = seed->edges;
+						}
+						if (rows == 0 || path.fanout_population == 0)
+							return idx_t(0);
+						if (joint_region && has_endpoint_summary && state.frontier[binding] && path.fanout_edges) {
+							// Reached vertices are not a uniform sample. The size-biased
+							// degree mean E[d^2]/E[d] models that uncertainty without
+							// replacing it by a maximum degree or an arbitrary multiplier.
+							auto squares = direction == "out" ? endpoint_summary.source_degree_squares
+							                                  : endpoint_summary.target_degree_squares;
+							auto mean =
+							    MaxValue<double>(static_cast<double>(path.fanout_edges) / path.fanout_population,
+							                     squares / path.fanout_edges);
+							path.fanout_source = "endpoint_degree_biased";
+							return ClampCardinality(static_cast<long double>(rows) * mean);
+						}
+						return ClampCardinality(static_cast<long double>(rows) * path.fanout_edges /
+						                        path.fanout_population);
+					};
 					auto emit = [&](SearchState candidate) {
 						candidate.completed[index] = true;
+						candidate.frontier[entry.left.binding_index] = true;
+						candidate.frontier[entry.right.binding_index] = true;
 						auto &selected = candidate.plan.bindings[edge_binding];
+						if (joint_region) {
+							const auto left = entry.left.binding_index, right = entry.right.binding_index;
+							const auto lc = state.component[left], rc = state.component[right];
+							const auto output = selected.joined_rows;
+							// Merge tuple domains without multiplying a component twice on
+							// closing edges. NDVs can shrink but never grow through a join.
+							for (idx_t binding = 0; binding < candidate.domain.size(); binding++) {
+								if (state.component[binding] != lc && state.component[binding] != rc)
+									continue;
+								auto &domain = candidate.domain[binding];
+								auto before = domain.rows;
+								if (output != DConstants::INVALID_INDEX && before != DConstants::INVALID_INDEX &&
+								    domain.distinct_ids != DConstants::INVALID_INDEX) {
+									if (output < before)
+										domain.distinct_ids =
+										    before ? ClampCardinality(static_cast<long double>(domain.distinct_ids) *
+										                              output / before)
+										           : 0;
+									domain.distinct_ids = MinValue<idx_t>(domain.distinct_ids, output);
+								}
+								if (has_endpoint_summary && (binding == left || binding == right)) {
+									auto outgoing = (binding == left) != edge.reverse;
+									domain.distinct_ids =
+									    MinValue<idx_t>(domain.distinct_ids, outgoing ? endpoint_summary.source_active
+									                                                  : endpoint_summary.target_active);
+								}
+								domain.rows = output;
+								candidate.component[binding] = lc;
+							}
+						}
 						if (selected.cardinality.distinct_ids != DConstants::INVALID_INDEX) {
 							selected.cardinality.distinct_ids =
 							    MinValue<idx_t>(selected.cardinality.distinct_ids, selected.cardinality.rows);
@@ -1129,33 +1566,92 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 						auto scan_rows = path.cardinality.rows;
 						auto stats = TryEdgeLabelStats(statistics, edge.label);
 						auto filtered_rows = scan_rows;
+						if (has_endpoint_summary && !stats)
+							filtered_rows = endpoint_summary.edges;
 						if (stats && scan_rows != DConstants::INVALID_INDEX) {
-							const auto &left = candidate.plan.bindings[entry.left.binding_index];
-							const auto &right = candidate.plan.bindings[entry.right.binding_index];
-							auto ratio = [](const GqlBindingAccessPath &binding, idx_t domain) {
-								auto ndv = binding.cardinality.distinct_ids;
-								if (ndv == DConstants::INVALID_INDEX ||
-								    binding.cardinality.rows == DConstants::INVALID_INDEX)
-									return 1.0;
+							// Separate static endpoint-label coverage from filtering within
+							// that population. Label marginals can be strongly correlated;
+							// their overlap is not the product of their selectivities.
+							auto ratio = [&](idx_t binding_id, const string &direction,
+							                 idx_t domain) -> pair<double, double> {
+								const auto &binding = candidate.plan.bindings[binding_id];
+								const auto &cardinality = joint_region ? state.domain[binding_id] : binding.cardinality;
+								GqlCsrLabelFanoutStats typed;
+								double coverage = 1;
+								if (label_distribution(binding_id, edge.label, typed)) {
+									auto edge_rows = direction == "out" ? typed.outgoing_edges : typed.incoming_edges;
+									coverage =
+									    stats->edge_count ? static_cast<double>(edge_rows) / stats->edge_count : 0;
+								}
+								GqlBindingAccessPath distribution;
+								estimate_expansion(state, binding_id, edge.label, direction, cardinality.rows,
+								                   distribution);
+								if (distribution.fanout_source == "label_population" ||
+								    distribution.fanout_source == "endpoint_population" ||
+								    distribution.fanout_source == "indexed_seed" ||
+								    distribution.fanout_source == "vertex_population") {
+									auto population = distribution.fanout_population;
+									return {coverage,
+									        population ? static_cast<double>(cardinality.rows) / population : 0};
+								}
+								domain = endpoint_domain(binding_id, edge.label, direction, domain);
+								if (domain == 0)
+									return {coverage, 0};
+								auto ndv = cardinality.distinct_ids;
+								if (ndv == DConstants::INVALID_INDEX || cardinality.rows == DConstants::INVALID_INDEX)
+									return {coverage, 1};
 								auto participation =
 								    MinValue<double>(1, static_cast<double>(ndv) / MaxValue<idx_t>(1, domain));
 								auto multiplicity =
-								    ndv ? MaxValue<double>(1, static_cast<double>(binding.cardinality.rows) / ndv) : 1;
-								return participation * multiplicity;
+								    ndv ? MaxValue<double>(1, static_cast<double>(cardinality.rows) / ndv) : 1;
+								return {coverage, participation * multiplicity};
 							};
-							filtered_rows = ClampCardinality(static_cast<long double>(scan_rows) *
-							                                 ratio(left, edge.reverse ? stats->incoming_vertex_count
-							                                                          : stats->outgoing_vertex_count) *
-							                                 ratio(right, edge.reverse ? stats->outgoing_vertex_count
-							                                                           : stats->incoming_vertex_count));
+							auto left_ratio =
+							    ratio(entry.left.binding_index, edge.reverse ? "in" : "out",
+							          edge.reverse ? stats->incoming_vertex_count : stats->outgoing_vertex_count);
+							auto right_ratio =
+							    ratio(entry.right.binding_index, edge.reverse ? "out" : "in",
+							          edge.reverse ? stats->outgoing_vertex_count : stats->incoming_vertex_count);
+							auto fraction = MinValue<double>(left_ratio.first, right_ratio.first) * left_ratio.second *
+							                right_ratio.second;
+							filtered_rows = ClampCardinality(static_cast<long double>(scan_rows) * fraction);
+							if (has_endpoint_summary && stats->edge_count) {
+								auto edge_fraction = static_cast<long double>(scan_rows) / stats->edge_count;
+								filtered_rows = ClampCardinality(endpoint_summary.edges * edge_fraction *
+								                                 left_ratio.second * right_ratio.second);
+								for (idx_t side = 0; side < 2; side++) {
+									auto binding = side == 0 ? entry.left.binding_index : entry.right.binding_index;
+									auto seed = seed_fanout(binding);
+									if (!seed)
+										continue;
+									auto fraction = side == 0 ? right_ratio.second : left_ratio.second;
+									filtered_rows = ClampCardinality(
+									    seed->matching * edge_fraction * fraction *
+									    static_cast<long double>(state.domain[binding].rows) / seed->population);
+									path.fanout_source = "indexed_seed";
+									path.fanout_population = seed->population;
+									path.fanout_edges = seed->edges;
+									break;
+								}
+							}
 						}
+						if (joint_region &&
+						    state.component[entry.left.binding_index] == state.component[entry.right.binding_index] &&
+						    filtered_rows != DConstants::INVALID_INDEX) {
+							auto tuples = state.domain[entry.left.binding_index].rows;
+							filtered_rows = tuples == 0 ? 0
+							                            : ClampCardinality(static_cast<long double>(filtered_rows) /
+							                                               MaxValue<idx_t>(1, tuples));
+						}
+						path.joined_rows = filtered_rows;
 						schedule(candidate, edge_binding);
 						attach_vertex(candidate, entry.left.binding_index, entry, scan_rows);
 						attach_vertex(candidate, entry.right.binding_index, entry, scan_rows);
 						path.cost = cost_model.Scan(edge_count, scan_rows, path.cardinality.row_width);
-						path.cost.Add(
-						    cost_model.Join(candidate.plan.bindings[entry.left.binding_index].cardinality.rows,
-						                    scan_rows, scan_rows, path.cardinality.row_width));
+						path.cost.Add(cost_model.Join(
+						    joint_region ? state.domain[entry.left.binding_index].rows
+						                 : candidate.plan.bindings[entry.left.binding_index].cardinality.rows,
+						    scan_rows, joint_region ? filtered_rows : scan_rows, path.cardinality.row_width));
 						path.cost.ApplyMemoryBudget(memory_budget);
 						candidate.plan.cost.Add(path.cost);
 						path.cardinality.rows = filtered_rows;
@@ -1169,10 +1665,13 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							                           : (edge.reverse ? stats->outgoing_vertex_count
 							                                           : stats->incoming_vertex_count))
 							                    : DConstants::INVALID_INDEX;
+							auto role = binding == entry.left.binding_index ? (edge.reverse ? "in" : "out")
+							                                                : (edge.reverse ? "out" : "in");
+							domain = endpoint_domain(binding, edge.label, role, domain);
 							neighbor.cardinality.distinct_ids = MinValue<idx_t>(neighbor.cardinality.distinct_ids,
 							                                                    MinValue<idx_t>(filtered_rows, domain));
 							neighbor.cardinality.rows = filtered_rows;
-							neighbor.cardinality.rows = filtered_rows;
+							candidate.frontier[binding] = true;
 						}
 						schedule(candidate, edge_binding);
 						emit(std::move(candidate));
@@ -1184,7 +1683,8 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							auto seed_binding = from_left ? entry.left.binding_index : entry.right.binding_index;
 							auto neighbor_binding = from_left ? entry.right.binding_index : entry.left.binding_index;
 							seed(candidate, seed_binding);
-							auto seed_rows = candidate.plan.bindings[seed_binding].cardinality.rows;
+							auto seed_rows = joint_region ? state.domain[seed_binding].distinct_ids
+							                              : candidate.plan.bindings[seed_binding].cardinality.rows;
 							auto &path = candidate.plan.bindings[edge_binding];
 							path.type = edge.quantified ? (csr ? GqlBindingAccessPathType::CSR_PATH_EXPANSION
 							                                   : GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION)
@@ -1199,10 +1699,10 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							path.maximum_repetitions = edge.maximum_repetitions;
 							path.unbounded = edge.unbounded;
 							path.distinct_endpoints = edge.quantified && csr && distinct_endpoints(edge_binding);
-							path.cardinality.rows =
-							    edge.quantified ? EstimateBoundedPathRows(statistics, path, seed_rows)
-							                    : EstimateFixedExpansionRows(statistics, edge.label,
-							                                                 path.expansion_direction, seed_rows);
+							path.cardinality.rows = edge.quantified
+							                            ? EstimateBoundedPathRows(statistics, path, seed_rows)
+							                            : estimate_expansion(state, seed_binding, edge.label,
+							                                                 path.expansion_direction, seed_rows, path);
 							path.cardinality.distinct_ids = edge.quantified
 							                                    ? DConstants::INVALID_INDEX
 							                                    : MinValue<idx_t>(path.cardinality.rows, edge_count);
@@ -1226,14 +1726,15 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							}
 							attach_vertex(candidate, neighbor_binding, entry, path.cardinality.rows);
 							auto &neighbor = candidate.plan.bindings[neighbor_binding];
-							auto previous_distinct = neighbor.cardinality.distinct_ids;
+							const auto &neighbor_domain =
+							    joint_region ? state.domain[neighbor_binding] : neighbor.cardinality;
+							auto previous_distinct = neighbor_domain.distinct_ids;
 							// Estimate the joined frontier, including repeated IDs on an already
 							// bound side. A unique source can be multiplied by parallel edges.
 							auto multiplicity =
 							    previous_distinct != DConstants::INVALID_INDEX && previous_distinct > 0 &&
-							            neighbor.cardinality.rows != DConstants::INVALID_INDEX
-							        ? MaxValue<double>(1, static_cast<double>(neighbor.cardinality.rows) /
-							                                  previous_distinct)
+							            neighbor_domain.rows != DConstants::INVALID_INDEX
+							        ? MaxValue<double>(1, static_cast<double>(neighbor_domain.rows) / previous_distinct)
 							        : 1.0;
 							auto endpoint_stats = TryEdgeLabelStats(statistics, edge.label);
 							double fraction = 1;
@@ -1241,8 +1742,36 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							if (endpoint_stats && previous_distinct != DConstants::INVALID_INDEX) {
 								domain = path.expansion_direction == "out" ? endpoint_stats->incoming_vertex_count
 								                                           : endpoint_stats->outgoing_vertex_count;
-								fraction = MinValue<double>(1, static_cast<double>(previous_distinct) /
-								                                   MaxValue<idx_t>(1, domain));
+								GqlCsrLabelFanoutStats neighbor_distribution;
+								if (!edge.quantified &&
+								    label_distribution(neighbor_binding, edge.label, neighbor_distribution)) {
+									domain = path.expansion_direction == "out"
+									             ? neighbor_distribution.incoming_vertices
+									             : neighbor_distribution.outgoing_vertices;
+									auto typed_edges = path.expansion_direction == "out"
+									                       ? neighbor_distribution.incoming_edges
+									                       : neighbor_distribution.outgoing_edges;
+									// Cap the possible endpoint-label overlap before applying
+									// within-label selectivity. A Country's incoming edges are
+									// not all Organisations merely because every Organisation
+									// has an edge of this type.
+									if (path.fanout_edges != DConstants::INVALID_INDEX && path.fanout_edges > 0)
+										fraction =
+										    MinValue<double>(1, static_cast<double>(typed_edges) / path.fanout_edges);
+								}
+								if (has_endpoint_summary && !edge.quantified) {
+									domain = !state.frontier[neighbor_binding] && !property_filtered[neighbor_binding]
+									             ? population_rows[neighbor_binding]
+									             : (path.expansion_direction == "out" ? endpoint_summary.target_active
+									                                                  : endpoint_summary.source_active);
+									if (path.fanout_edges != DConstants::INVALID_INDEX && path.fanout_edges > 0)
+										fraction = static_cast<double>(endpoint_summary.edges) / path.fanout_edges;
+									if (auto seed = seed_fanout(seed_binding))
+										fraction = seed->edges ? static_cast<double>(seed->matching) / seed->edges : 0;
+								}
+								fraction *= domain == 0
+								                ? 0
+								                : MinValue<double>(1, static_cast<double>(previous_distinct) / domain);
 							}
 							neighbor.cardinality.rows =
 							    path.cardinality.rows == DConstants::INVALID_INDEX
@@ -1252,8 +1781,28 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 
 							neighbor.cardinality.distinct_ids =
 							    MinValue<idx_t>(previous_distinct, MinValue<idx_t>(domain, path.cardinality.rows));
+							if (!state.reachable[neighbor_binding])
+								candidate.frontier[neighbor_binding] = true;
 
-							path.cost.Add(cost_model.Join(seed_rows, path.cardinality.rows, path.cardinality.rows, 32));
+							path.joined_rows = neighbor.cardinality.rows;
+							if (joint_region && path.joined_rows != DConstants::INVALID_INDEX) {
+								const auto &seed_domain = state.domain[seed_binding];
+								auto seed_multiplicity = seed_rows && seed_rows != DConstants::INVALID_INDEX &&
+								                                 seed_domain.rows != DConstants::INVALID_INDEX
+								                             ? static_cast<long double>(seed_domain.rows) / seed_rows
+								                             : 1;
+								auto tuples = static_cast<long double>(path.joined_rows) * seed_multiplicity;
+								if (state.component[seed_binding] == state.component[neighbor_binding]) {
+									// Both endpoint bindings already describe the same tuple.
+									// Do not join a second independent copy of that component.
+									auto common = seed_domain.rows;
+									tuples = common == 0 ? 0 : tuples / MaxValue<idx_t>(1, common);
+								}
+								path.joined_rows = ClampCardinality(tuples);
+							}
+							path.cost.Add(cost_model.Join(joint_region ? state.domain[seed_binding].rows : seed_rows,
+							                              path.cardinality.rows,
+							                              joint_region ? path.joined_rows : path.cardinality.rows, 32));
 							path.cost.ApplyMemoryBudget(memory_budget);
 							candidate.plan.cost.Add(path.cost);
 							emit(std::move(candidate));
@@ -1449,13 +1998,19 @@ static unique_ptr<FunctionData> OptimizerPlanBind(ClientContext &context, TableF
 	         "edge_label",
 	         "fetch_edge_properties",
 	         "spill_cost",
-	         "optimizer_mode"};
+	         "optimizer_mode",
+	         "fanout_source",
+	         "fanout_population",
+	         "fanout_edges",
+	         "endpoint_edges",
+	         "joined_rows"};
 	types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
 	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT,
 	         LogicalType::UBIGINT, LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::UBIGINT,
 	         LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::DOUBLE,
 	         LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::BOOLEAN, LogicalType::VARCHAR,
-	         LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::VARCHAR};
+	         LogicalType::BOOLEAN, LogicalType::DOUBLE,  LogicalType::VARCHAR, LogicalType::VARCHAR,
+	         LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
 	return std::move(result);
 }
 
@@ -1504,6 +2059,12 @@ static void OptimizerPlanScan(ClientContext &, TableFunctionInput &input, DataCh
 		output.data[21].SetValue(count, Value(path.cost.spill));
 		auto mode = data.plan.optimizer_mode == "cost" && !stage.costed ? "legacy_fallback" : data.plan.optimizer_mode;
 		output.data[22].SetValue(count, Value(mode));
+		output.data[23].SetValue(count,
+		                         path.fanout_source.empty() ? Value(LogicalType::VARCHAR) : Value(path.fanout_source));
+		output.data[24].SetValue(count, EstimateValue(path.fanout_population));
+		output.data[25].SetValue(count, EstimateValue(path.fanout_edges));
+		output.data[26].SetValue(count, EstimateValue(path.endpoint_edges));
+		output.data[27].SetValue(count, EstimateValue(path.joined_rows));
 		if (!stage.costed) {
 			for (idx_t column : {idx_t(8), idx_t(9), idx_t(10), idx_t(11), idx_t(12), idx_t(13), idx_t(14), idx_t(15),
 			                     idx_t(16), idx_t(17), idx_t(18), idx_t(20), idx_t(21)}) {

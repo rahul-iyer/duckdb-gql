@@ -91,6 +91,13 @@ struct GqlBindingAccessPath {
 	GqlPlanCost cost;
 	bool native_index_filter = false;
 	idx_t candidate_rows = DConstants::INVALID_INDEX;
+	//! Distribution used for a fixed expansion estimate, never a semantic bound.
+	string fanout_source;
+	idx_t fanout_population = DConstants::INVALID_INDEX;
+	idx_t fanout_edges = DConstants::INVALID_INDEX;
+	idx_t endpoint_edges = DConstants::INVALID_INDEX;
+	//! Estimated joined tuple rows after this edge, distinct from physical expansion rows.
+	idx_t joined_rows = DConstants::INVALID_INDEX;
 };
 
 struct GqlStageAccessPlan {

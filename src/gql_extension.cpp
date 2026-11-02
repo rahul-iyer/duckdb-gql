@@ -123,6 +123,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlBuildCsrFunction());
 	loader.RegisterFunction(GqlCsrStatsFunction());
 	loader.RegisterFunction(GqlCsrEdgeStatsFunction());
+	loader.RegisterFunction(GqlCsrEndpointStatsFunction());
 	loader.RegisterFunction(GqlAlgorithmStatsFunction());
 	loader.RegisterFunction(GqlCreatePropertyIndexFunction());
 	loader.RegisterFunction(GqlDropPropertyIndexFunction());

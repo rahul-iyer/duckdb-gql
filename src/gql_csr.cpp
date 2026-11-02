@@ -284,6 +284,8 @@ static bool CsrHasCapabilities(GqlCsrCapabilities available, GqlCsrCapabilities 
 }
 
 static GqlCsrCapabilities NormalizeCsrCapabilities(GqlCsrCapabilities capabilities) {
+	if (capabilities & GQL_CSR_ENDPOINT_STATS)
+		capabilities |= GQL_CSR_FULL;
 	if (capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS) {
 		capabilities |= GQL_CSR_VERTEX_LABELS;
 	}
@@ -729,6 +731,17 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	vector<uint64_t> label_degrees(snapshot->edge_label_stats.size(), 0);
 	vector<uint32_t> touched_labels;
+	// Reuse the existing directional degree pass. Optional statistics have a
+	// fixed entry budget and bounded work per touched relationship type. If
+	// either budget is exceeded, discard all pairs rather than treating a missing
+	// pair in a partial map as zero degree.
+	constexpr idx_t LABEL_FANOUT_PAIRS = 4096;
+	constexpr idx_t LABEL_FANOUT_LABELS_PER_VERTEX = 16;
+	snapshot->has_label_fanout_stats = build_edge_stats && build_vertex_labels && build_vertex_label_postings;
+	auto discard_label_fanout = [&]() {
+		snapshot->has_label_fanout_stats = false;
+		decltype(snapshot->label_fanout_stats)().swap(snapshot->label_fanout_stats);
+	};
 	auto collect_degree_stats = [&](const vector<uint64_t> &offsets, const GqlCsrEdgeLabels &labels, bool outgoing) {
 		for (idx_t vertex = 0; vertex + 1 < offsets.size(); vertex++) {
 			touched_labels.clear();
@@ -748,6 +761,27 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 					stats.incoming_vertex_count++;
 					stats.max_incoming_degree = MaxValue<uint64_t>(stats.max_incoming_degree, degree);
 				}
+				if (snapshot->has_label_fanout_stats) {
+					auto start = snapshot->vertex_label_offsets[vertex];
+					auto end = snapshot->vertex_label_offsets[vertex + 1];
+					if (end - start > LABEL_FANOUT_LABELS_PER_VERTEX) {
+						discard_label_fanout();
+					} else {
+						for (auto position = start; position < end; position++) {
+							auto key = GqlCsrLabelFanoutKey(snapshot->vertex_label_ids[position], label_id);
+							auto entry = snapshot->label_fanout_stats.find(key);
+							if (entry == snapshot->label_fanout_stats.end()) {
+								if (snapshot->label_fanout_stats.size() >= LABEL_FANOUT_PAIRS) {
+									discard_label_fanout();
+									break;
+								}
+								entry = snapshot->label_fanout_stats.emplace(key, GqlCsrLabelFanoutStats()).first;
+							}
+							(outgoing ? entry->second.outgoing_edges : entry->second.incoming_edges) += degree;
+							(outgoing ? entry->second.outgoing_vertices : entry->second.incoming_vertices)++;
+						}
+					}
+				}
 				label_degrees[label_id] = 0;
 			}
 		}
@@ -756,6 +790,16 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		collect_degree_stats(snapshot->outgoing_offsets, snapshot->outgoing_label_ids, true);
 		collect_degree_stats(snapshot->incoming_offsets, snapshot->incoming_label_ids, false);
 	}
+	idx_t endpoint_workspace_bytes = 0;
+	if (capabilities & GQL_CSR_ENDPOINT_STATS) {
+		snapshot->endpoint_statistics = GqlCollectEndpointStatistics(
+		    context, *snapshot, snapshot->endpoint_statistics_status, endpoint_workspace_bytes);
+		if (!snapshot->endpoint_statistics) {
+			// Capabilities describe available resources, not attempted analysis.
+			snapshot->capabilities &= ~GQL_CSR_ENDPOINT_STATS;
+		}
+	}
+
 	snapshot->topology_bytes =
 	    snapshot->outgoing_offsets.capacity() * sizeof(uint64_t) + snapshot->outgoing_neighbors.AllocatedBytes() +
 	    snapshot->incoming_offsets.capacity() * sizeof(uint64_t) + snapshot->incoming_neighbors.AllocatedBytes() +
@@ -776,11 +820,15 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    snapshot->source_catalog.capacity() + snapshot->vertex_table_key.capacity() +
 	    snapshot->edge_table_key.capacity() + snapshot->edge_label_stats.capacity() * sizeof(GqlCsrEdgeLabelStats);
 	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->source_write_generations);
+	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->label_fanout_stats);
+	snapshot->auxiliary_bytes += snapshot->endpoint_statistics_status.capacity();
+	if (snapshot->endpoint_statistics)
+		snapshot->auxiliary_bytes += snapshot->endpoint_statistics->AllocatedBytes();
 	for (const auto &source : snapshot->source_write_generations) {
 		snapshot->auxiliary_bytes += source.first.capacity();
 	}
 	snapshot->build_auxiliary_bytes =
-	    transient_vertex_id_bytes + outgoing_cursor.capacity() * sizeof(uint64_t) +
+	    endpoint_workspace_bytes + transient_vertex_id_bytes + outgoing_cursor.capacity() * sizeof(uint64_t) +
 	    incoming_cursor.capacity() * sizeof(uint64_t) + HashContainerStorageBytes(edge_ids) +
 	    label_degrees.capacity() * sizeof(uint64_t) + touched_labels.capacity() * sizeof(uint32_t);
 	snapshot->memory_bytes =
@@ -975,6 +1023,7 @@ shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, co
 }
 
 struct CsrBindData : TableFunctionData {
+	bool endpoint_statistics = false;
 	string graph_name;
 	string weight_property;
 	uint64_t vertex_id = 0;
@@ -1646,14 +1695,21 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
 	         "has_out_degrees",
 	         "snapshot_acquisition_count",
 	         "source_catalog",
-	         "source_snapshot_id"};
-	return_types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
-	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT,
-	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::UBIGINT,
-	                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
-	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
-	                LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
-	                LogicalType::UBIGINT, LogicalType::VARCHAR, LogicalType::UBIGINT};
+	         "source_snapshot_id",
+	         "has_label_fanout_stats",
+	         "label_fanout_pairs",
+	         "endpoint_statistics_status",
+	         "endpoint_label_groups",
+	         "endpoint_combinations",
+	         "endpoint_statistics_bytes"};
+	return_types = {
+	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
+	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
+	    LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::UBIGINT,
+	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::VARCHAR,
+	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
 	return std::move(result);
 }
 
@@ -1688,7 +1744,9 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 		                            "COPY GRAPH before building CSR",
 		                            data.graph_name);
 	}
-	PublishTableSnapshot(*storage, BuildTableSnapshot(context, data.graph_name, GQL_CSR_FULL));
+	PublishTableSnapshot(*storage,
+	                     BuildTableSnapshot(context, data.graph_name,
+	                                        GQL_CSR_FULL | (data.endpoint_statistics ? GQL_CSR_ENDPOINT_STATS : 0)));
 	// Publication is followed by the same generation check used by consumers.
 	// If a write raced construction, CALL must not report a stale projection as
 	// successfully prepared.
@@ -1741,6 +1799,15 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	output.SetValue(20, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABELS));
 	output.SetValue(21, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS));
 	output.SetValue(22, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_STATS));
+	output.SetValue(27, 0, Value::BOOLEAN(snapshot->has_label_fanout_stats));
+	output.SetValue(28, 0, Value::UBIGINT(snapshot->label_fanout_stats.size()));
+	output.SetValue(29, 0, Value(snapshot->endpoint_statistics_status));
+	output.SetValue(30, 0,
+	                Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->groups.size() : 0));
+	output.SetValue(31, 0,
+	                Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->counts.size() : 0));
+	output.SetValue(
+	    32, 0, Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->AllocatedBytes() : 0));
 	output.SetValue(
 	    23, 0,
 	    Value::BOOLEAN((snapshot->capabilities & GQL_CSR_OUT_DEGREES) || (snapshot->capabilities & GQL_CSR_OUTGOING)));
@@ -1875,12 +1942,20 @@ TableFunction GqlBuildCsrFunction() {
 	                   vector<Identifier> &names) -> unique_ptr<FunctionData> {
 		auto result = make_uniq<CsrBindData>();
 		result->graph_name = input.inputs[0].GetValue<string>();
+		auto endpoint = input.named_parameters.find("endpoint_statistics");
+		if (endpoint != input.named_parameters.end()) {
+			if (endpoint->second.IsNull())
+				throw BinderException("endpoint_statistics must be a non-NULL BOOLEAN");
+			result->endpoint_statistics = endpoint->second.GetValue<bool>();
+		}
 		names = {"graph_name", "graph_version", "vertex_count", "edge_count", "memory_bytes", "build_count"};
 		return_types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT,
 		                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
 		return std::move(result);
 	};
 	function.init_global = SingleRowInit;
+	function.GetSignature().WithTypedKwargs(
+	    "options", [](TypedKwargs &options) { options.Add("endpoint_statistics", LogicalType::BOOLEAN); });
 	return function;
 }
 
