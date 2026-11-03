@@ -23,7 +23,8 @@ enum class GqlTypeId : uint8_t {
 	EDGE,
 	PATH,
 	PROPERTY_VALUE,
-	BYTE_STRING
+	BYTE_STRING,
+	LIST
 };
 
 struct GqlType {

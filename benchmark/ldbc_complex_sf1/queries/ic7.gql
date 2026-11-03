@@ -1,0 +1,15 @@
+MATCH (source:Person)<-[:HAS_CREATOR]-(message:Message)<-[reaction:LIKES]-(liker:Person)
+WHERE source.id=1131
+OPTIONAL MATCH (source)<-[:HAS_CREATOR]-(other:Message)<-[newer:LIKES]-(liker)
+WHERE newer.creationDate>reaction.creationDate OR
+      (newer.creationDate=reaction.creationDate AND other.id<message.id)
+LET newer_id=element_id(newer)
+FILTER newer_id IS NULL
+OPTIONAL MATCH (source)-[friendship:KNOWS]->(liker)
+RETURN DISTINCT liker.id AS personId,liker.firstName AS personFirstName,liker.lastName AS personLastName,
+       reaction.creationDate AS likeCreationDate,message.id AS commentOrPostId,
+       COALESCE(message.content,message.imageFile) AS commentOrPostContent,
+       CAST(FLOOR(CAST(reaction.creationDate-message.creationDate AS FLOAT)/60000.0) AS INTEGER) AS minutesLatency,
+       element_id(friendship) IS NULL AS isNew
+ORDER BY likeCreationDate DESC,personId ASC
+LIMIT 20;

@@ -1,0 +1,13 @@
+
+MATCH (source:Person), (target:Person)
+WHERE source.id = 1131
+  AND target.id = 19791209300775
+CALL algo.shortest_path_length(
+    'snb_interactive',
+    element_id(source),
+    element_id(target),
+    'Person',
+    'KNOWS'
+)
+YIELD distance
+RETURN distance;

@@ -1,0 +1,34 @@
+# LDBC SNB Interactive Complex Read 6 — Tag co-occurrence.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-06.yaml
+
+id = 6
+name = "Tag co-occurrence"
+status = "implemented"
+
+params_file = "interactive_6_param.txt"
+param_columns = ["personId", "tagName"]
+param_types = ["int", "string"]
+
+query = """
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag {name: {tagName}}),
+      (post)-[:hasTag]->(otherTag:Tag)
+WHERE otherTag <> tag
+RETURN
+    otherTag.name AS tagName,
+    COUNT(post) AS postCount
+GROUP BY otherTag.name
+ORDER BY postCount DESC, otherTag.name ASC
+LIMIT 10
+"""
+
+return_columns = ["tagName", "postCount"]
+
+[divergences]
+group-by-raw-expr = "spec writes `GROUP BY tagName` referencing the RETURN-alias. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we use `GROUP BY otherTag.name` (raw expression). Same group key, same rows. Same divergence as IC5."
+comma-join-tag-otherTag = "spec separates `MATCH (...post...)-[:hasTag]->(tag:Tag {name})` and `MATCH (post)-[:hasTag]->(otherTag:Tag)` into two MATCH clauses, then `WHERE otherTag <> tag` references both. gqlite's typechecker doesn't propagate `tag` from the first to the second MATCH's WHERE scope, so we comma-join the two patterns into one MATCH (`A, B`). Logically identical join."
+order-by-raw-expr = "spec writes `ORDER BY postCount DESC, tagName ASC`. We keep `postCount` as the alias (alias resolution works for ORDER BY) but use `otherTag.name ASC` for the tie-break to match the GROUP BY rewrite. Identical sort key."
+edge-casing = "loader produces lowercase :knows, :hasCreator, :hasTag. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson` and `WHERE otherTag <> tag`. gqlite's `<>` on bound nodes is now first-class (PR #42); both compare verbatim."
+no-with-distinct = "spec dedups the friends-of-friends set with `WITH knownTagId, collect(distinct friend) AS friends UNWIND friends AS f` between the `KNOWS*1..2` MATCH and the post-by-friend MATCH. gqlite's parser has no `WITH` clause, so we use a flat chain — `MATCH (person)~[:knows]~{1,2}(otherPerson)` directly followed by the post/tag MATCH and `GROUP BY otherTag.name` at the end. A FoF reachable via multiple `:knows` paths produces multiple `otherPerson` bindings, which can inflate `COUNT(post)` per `otherTag` when summed over the duplicates. An `EXISTS`-based semi-join would restore spec semantics but invert the join order (post-first), making the iso gql shape less recognizable as the LDBC reference. The kuzu and graphqlite cross-system Cypher mirror this flat-chain form so all three engines run the same variant; cross-system row-content equivalence verifies engine agreement, not spec faithfulness. Same divergence applies to IC5, IC9, IC11."

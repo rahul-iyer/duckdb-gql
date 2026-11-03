@@ -96,6 +96,16 @@ struct GqlReferencedTableMapping {
 //! metadata is incomplete or inconsistent.
 bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result);
 
+//! Reads the graph's version from an unexpired cached binding without running
+//! metadata SQL. Returns false when the caller must read it from the catalog.
+bool GqlTryGetCachedGraphVersion(ClientContext &context, const string &graph_name, uint64_t &graph_id,
+                                 uint64_t &graph_version);
+
+//! Expires cached graph metadata and plans. Call when a write is planned and after it commits.
+void GqlInvalidateTableGraphCache(ClientContext &context);
+//! Advances whenever cached metadata or plans may have been outdated by a write.
+uint64_t GqlDatabaseWriteGeneration(ClientContext &context);
+
 // A one-table referenced key is unique in its snapshot, unlike an arbitrary
 // property. This proves selectivity only; it does not impose a result limit.
 bool GqlReferencedKeyIsUnique(const GqlElementTableBinding &table, const string &property);

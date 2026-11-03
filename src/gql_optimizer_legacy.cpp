@@ -274,8 +274,10 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 	                                    StringUtil::CIEquals(graph.edge_target_column, "__gql_target_id") &&
 	                                    StringUtil::CIEquals(graph.edge.label_column, "__gql_type") &&
 	                                    !graph.edge.label_is_list && snapshot && snapshot->edge_labels_single;
+	// Fetch resolves IDs through the snapshot's row mapping, in sorted batches.
 	const bool can_fetch_vertices =
-	    snapshot && snapshot->vertex_ids_match_rowids && StringUtil::CIEquals(graph.vertex.ownership, "MANAGED");
+	    snapshot && snapshot->HasVertexRowIds() && StringUtil::CIEquals(graph.vertex.ownership, "MANAGED");
+	const bool can_fetch_postings = can_fetch_vertices;
 	const bool can_fetch_edges =
 	    snapshot && snapshot->edge_ids_match_rowids && StringUtil::CIEquals(graph.edge.ownership, "MANAGED");
 
@@ -324,6 +326,25 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 		stage_planned[stage_index] = true;
 		const auto &stage = input.match_stages[stage_index];
 		const bool stage_allows_element_fetch = stage.patterns.size() == 1;
+		// Enumerate fixed-edge access paths within a chain while retaining the
+		// original pattern for TRAIL checks and optional-stage semantics.
+		vector<GqlAccessPattern> expansion_patterns;
+		vector<bool> correlated_chain_expansion;
+		const bool correlated_stage = std::any_of(available.begin(), available.end(), [](bool value) { return value; });
+		for (const auto &pattern : stage.patterns) {
+			if (pattern.elements.size() == 3) {
+				expansion_patterns.push_back(pattern);
+				correlated_chain_expansion.push_back(false);
+			} else if (std::none_of(pattern.elements.begin(), pattern.elements.end(),
+			                        [](const GqlAccessPatternElement &element) { return element.quantified; })) {
+				for (idx_t part = 1; part + 1 < pattern.elements.size(); part += 2) {
+					GqlAccessPattern edge;
+					edge.elements = {pattern.elements[part - 1], pattern.elements[part], pattern.elements[part + 1]};
+					expansion_patterns.push_back(std::move(edge));
+					correlated_chain_expansion.push_back(correlated_stage);
+				}
+			}
+		}
 		auto &stage_plan = result.stages[stage_index];
 		stage_plan.introduced.resize(input.binding_types.size(), false);
 		stage_plan.bindings.resize(input.binding_types.size());
@@ -400,7 +421,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 							auto cardinality = LabelPostingCardinality(*snapshot, label);
 							// A small, selective posting is a bounded independent
 							// frontier; fetch its requested columns, not the table.
-							if (can_fetch_vertices && element.binding_index < input.vertex_fetch_columns.size() &&
+							if (can_fetch_postings && element.binding_index < input.vertex_fetch_columns.size() &&
 							    !input.vertex_fetch_columns[element.binding_index].empty() &&
 							    cardinality <= MinValue<idx_t>(GQL_BATCHED_ELEMENT_FETCH_THRESHOLD,
 							                                   snapshot->vertex_ids.size() / 64) &&
@@ -472,8 +493,8 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 			bool selected_expand_from_left = true;
 			idx_t selected_estimated_rows = DConstants::INVALID_INDEX;
 			uint8_t selected_priority = NumericLimits<uint8_t>::Maximum();
-			for (idx_t pattern_index = 0; pattern_index < stage.patterns.size(); pattern_index++) {
-				const auto &pattern = stage.patterns[pattern_index];
+			for (idx_t pattern_index = 0; pattern_index < expansion_patterns.size(); pattern_index++) {
+				const auto &pattern = expansion_patterns[pattern_index];
 				if (pattern.elements.size() != 3) {
 					continue;
 				}
@@ -516,8 +537,6 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				if (!edge.quantified && reached_by_expansion[expansion_vertex_binding] &&
 				    !available[expansion_vertex_binding] &&
 				    (stage_plan.bindings[expansion_vertex_binding].type ==
-				         GqlBindingAccessPathType::BATCHED_ELEMENT_FETCH ||
-				     stage_plan.bindings[expansion_vertex_binding].type ==
 				         GqlBindingAccessPathType::REFERENCED_ELEMENT_FETCH ||
 				     !CsrFrontierBeatsBulkScan(statistics, edge.label, seed_rows))) {
 					// A correlated CSR expansion should beat scanning this edge
@@ -551,6 +570,13 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 						    EstimateFixedExpansionRows(statistics, edge.label, expansion_direction, seed_rows);
 					}
 				}
+				// A captured frontier can contain many IDs. Only split a correlated
+				// chain when its estimated expansion is a small fraction of the edge
+				// relation; broad frontiers retain the bulk hash-join alternative.
+				if (correlated_chain_expansion[pattern_index] &&
+				    !CsrFrontierBeatsBulkScan(statistics, edge.label, estimated_rows)) {
+					continue;
+				}
 				if (selected_pattern != DConstants::INVALID_INDEX) {
 					// Keep bounded paths first. For fixed expansions, an independent
 					// seed is only a tie-breaker: it can still have a huge fanout.
@@ -568,7 +594,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				selected_priority = priority;
 			}
 			if (selected_pattern != DConstants::INVALID_INDEX) {
-				const auto &pattern = stage.patterns[selected_pattern];
+				const auto &pattern = expansion_patterns[selected_pattern];
 				const auto &left = pattern.elements[0];
 				const auto &edge = pattern.elements[1];
 				const auto &right = pattern.elements[2];

@@ -68,6 +68,7 @@ LogicalType GqlDuckType(const GqlType &type) {
 	case GqlTypeId::NODE:
 	case GqlTypeId::EDGE:
 	case GqlTypeId::PATH:
+	case GqlTypeId::LIST:
 		break;
 	}
 	throw NotImplementedException("GQL value type cannot be returned by the current backend");

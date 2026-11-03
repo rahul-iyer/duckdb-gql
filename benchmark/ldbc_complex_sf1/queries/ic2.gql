@@ -1,0 +1,9 @@
+
+MATCH (source:Person)-[:KNOWS]->(friend:Person),
+      (message:Message)-[:HAS_CREATOR]->(friend)
+WHERE source.id = 1131
+  AND message.creationDate <= '2010-10-16 12:00:00'
+RETURN friend.id, friend.firstName, friend.lastName, message.id,
+       COALESCE(message.content, message.imageFile), message.creationDate
+ORDER BY message.creationDate DESC, message.id ASC
+LIMIT 20;

@@ -1,0 +1,29 @@
+# LDBC SNB Interactive Complex Read 4 — New topics.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-04.yaml
+
+id = 4
+name = "New topics"
+status = "implemented"
+
+params_file = "interactive_4_param.txt"
+param_columns = ["personId", "startDate", "durationDays"]
+param_types = ["int", "int", "int"]
+
+query = """
+MATCH (person:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(post:Post)-[:hasTag]->(tag:Tag)
+WHERE post.creationDate >= {startDate} AND post.creationDate < {startDate} + DURATION({days: {durationDays}})
+  AND NOT EXISTS {
+      MATCH (friend)<-[:hasCreator]-(post2:Post)-[:hasTag]->(tag)
+      WHERE post2.creationDate < {startDate}
+  }
+RETURN tag.name AS tagName, COUNT(post) AS postCount
+GROUP BY tag.name
+ORDER BY postCount DESC, tagName ASC
+LIMIT 10
+"""
+
+return_columns = ["tagName", "postCount"]
+
+[divergences]
+duration = "spec uses `$startDate + DURATION({days: $durationDays})`; gqlite stores creationDate as int epoch-millis and `DURATION({days: N})` desugars to `N * 86400000` ms, so the bound is plain int arithmetic. Unblocked once `DURATION` + `*` landed."
+group-by-expr = "spec/Cypher group by the RETURN alias (`GROUP BY tagName`); gqlite's typechecker groups by the projected expression (`GROUP BY tag.name`). ORDER BY still uses the alias `tagName`. Same grouping."

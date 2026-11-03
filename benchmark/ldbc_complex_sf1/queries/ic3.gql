@@ -1,0 +1,24 @@
+
+MATCH (source:Person)-[:KNOWS]->{1,2}(friend:Person),
+      (friend)-[:IS_LOCATED_IN]->(:City)-[:IS_PART_OF]->(home_country:Country),
+      (message_x:Message)-[:HAS_CREATOR]->(friend),
+      (message_x)-[:IS_LOCATED_IN]->(country_x:Country),
+      (message_y:Message)-[:HAS_CREATOR]->(friend),
+      (message_y)-[:IS_LOCATED_IN]->(country_y:Country)
+WHERE source.id = 1131
+  AND friend.id <> source.id
+  AND home_country.name <> 'Panama'
+  AND home_country.name <> 'South_Africa'
+  AND country_x.name = 'Panama'
+  AND country_y.name = 'South_Africa'
+  AND message_x.creationDate >= '2010-06-01 12:00:00'
+  AND message_x.creationDate < '2010-06-29 12:00:00'
+  AND message_y.creationDate >= '2010-06-01 12:00:00'
+  AND message_y.creationDate < '2010-06-29 12:00:00'
+RETURN friend.id, friend.firstName, friend.lastName,
+       COUNT(DISTINCT message_x.id) AS ct1,
+       COUNT(DISTINCT message_y.id) AS ct2,
+       COUNT(DISTINCT message_x.id) + COUNT(DISTINCT message_y.id) AS totalcount
+GROUP BY friend
+ORDER BY totalcount DESC, friend.id ASC
+LIMIT 20;

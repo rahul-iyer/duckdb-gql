@@ -18,8 +18,12 @@ public:
 	explicit GqlTransformer(const string &query_p) : query(query_p) {
 	}
 	shared_ptr<GqlStatement> Transform(GQLParser::GqlProgramContext &root);
+	const vector<string> &ParameterNames() const {
+		return parameter_names;
+	}
 
 private:
+	vector<string> parameter_names;
 	std::any visitCreateGraphStatement(GQLParser::CreateGraphStatementContext *context) override;
 	std::any visitDropGraphStatement(GQLParser::DropGraphStatementContext *context) override;
 	std::any visitSessionSetGraphClause(GQLParser::SessionSetGraphClauseContext *context) override;

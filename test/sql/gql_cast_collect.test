@@ -1,0 +1,94 @@
+# name: test/sql/gql_cast_collect.test
+# description: Scalar casts, fixed-duration conversion, and null-eliminating list aggregation
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'x','2000-05-21'),(2,'x','2000-06-22'),(3,'y','2000-01-01'),(4,NULL,NULL)) v(":ID","name:string","birthday:string")) TO '{TEST_DIR}/cast_collect.csv' (HEADER)
+
+statement ok
+COPY (SELECT 1 AS ":START_ID",2 AS ":END_ID",'R' AS ":TYPE" WHERE false) TO '{TEST_DIR}/cast_collect_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH cast_collect ANY
+
+statement ok
+COPY GRAPH cast_collect FROM (VERTICES '{TEST_DIR}/cast_collect.csv', EDGES '{TEST_DIR}/cast_collect_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cast_collect
+
+query I
+MATCH (n) WHERE n.name='y'
+RETURN CAST(RIGHT(LEFT(CAST(n.birthday AS STRING),7),2) AS INTEGER)
+----
+1
+
+query T
+MATCH (n) WHERE n.name='x' RETURN COLLECT_LIST(DISTINCT n.name)
+----
+[x]
+
+query IIRT
+MATCH (n) WHERE n.name='x' RETURN COUNT(*),CAST('12' AS INTEGER),CAST('1.5' AS FLOAT),CAST(NULL AS STRING)
+----
+2	12	1.5	NULL
+
+query T
+MATCH (n) WHERE n.name='x' RETURN COLLECT_LIST(n.name)
+----
+[x, x]
+
+query T
+MATCH (n) WHERE n.name IS NULL RETURN COLLECT_LIST(n.name)
+----
+[]
+
+query T
+MATCH (n) WHERE n.name='absent' RETURN COLLECT_LIST(n.name)
+----
+[]
+
+query TTT rowsort
+MATCH (n) WHERE n.name IS NOT NULL
+RETURN n.birthday,n.name,COLLECT_LIST(DISTINCT n.name) GROUP BY n
+----
+2000-01-01	y	[y]
+2000-05-21	x	[x]
+2000-06-22	x	[x]
+
+statement error
+MATCH (n) RETURN CAST(n AS INTEGER)
+----
+GQL CAST requires one scalar argument
+
+statement error
+MATCH (n) RETURN CAST('bad' AS INTEGER)
+----
+Could not convert
+
+query R
+SELECT gql_cast_float(INTERVAL '2 days 00:01:00.123')
+----
+172860123
+
+query R
+SELECT gql_cast_float(INTERVAL '-00:00:00.500')
+----
+-500
+
+query R
+SELECT gql_cast_float(NULL::INTERVAL)
+----
+NULL
+
+statement error
+SELECT gql_cast_float(INTERVAL '1 month')
+----
+calendar months
+
+statement error
+MATCH (n) RETURN COLLECT_LIST(COUNT(*))
+----
+Nested GQL aggregate functions are not supported

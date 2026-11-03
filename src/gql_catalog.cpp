@@ -7,9 +7,12 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/table_description.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/storage/object_cache.hpp"
 
 namespace duckdb {
 
@@ -961,7 +964,110 @@ static void LoadLabel(Connection &connection, GqlElementTableBinding &table) {
 	}
 }
 
+// Binding a MATCH otherwise repeats a dozen catalog queries per statement. Only
+// managed graphs are cached: referenced graphs must revalidate external sources.
+struct GqlTableGraphCache : ObjectCacheEntry {
+	static string ObjectType() {
+		return "gql_table_graph_cache";
+	}
+
+	string GetObjectType() override {
+		return ObjectType();
+	}
+
+	optional_idx GetEstimatedCacheMemory() const override {
+		return optional_idx {};
+	}
+
+	struct Entry {
+		uint64_t generation = 0;
+		weak_ptr<AttachedDatabase> database;
+		GqlTableGraphBinding binding;
+	};
+
+	mutex lock;
+	uint64_t generation = 0;
+	unordered_map<string, Entry> entries;
+};
+
+static shared_ptr<GqlTableGraphCache> GetTableGraphCache(ClientContext &context) {
+	return ObjectCache::GetObjectCache(context).GetOrCreate<GqlTableGraphCache>("gql_table_graph_cache");
+}
+
+// Metadata connections resolve gql_internal in the instance default database.
+static shared_ptr<AttachedDatabase> MetadataDatabase(ClientContext &context) {
+	auto &manager = DatabaseManager::Get(context);
+	return manager.GetDatabase(manager.GetDefaultDatabase());
+}
+
+static optional_ptr<const GqlTableGraphBinding> FindCachedTableGraph(const GqlTableGraphCache &cache,
+                                                                     const string &graph_name,
+                                                                     const shared_ptr<AttachedDatabase> &database) {
+	auto entry = cache.entries.find(graph_name);
+	if (entry == cache.entries.end() || entry->second.generation != cache.generation || !database ||
+	    entry->second.database.lock() != database) {
+		return nullptr;
+	}
+	return entry->second.binding;
+}
+
+void GqlInvalidateTableGraphCache(ClientContext &context) {
+	auto cache = GetTableGraphCache(context);
+	lock_guard<mutex> guard(cache->lock);
+	cache->generation++;
+	cache->entries.clear();
+}
+
+uint64_t GqlDatabaseWriteGeneration(ClientContext &context) {
+	auto cache = GetTableGraphCache(context);
+	lock_guard<mutex> guard(cache->lock);
+	return cache->generation;
+}
+
+bool GqlTryGetCachedGraphVersion(ClientContext &context, const string &graph_name, uint64_t &graph_id,
+                                 uint64_t &graph_version) {
+	auto cache = GetTableGraphCache(context);
+	auto database = MetadataDatabase(context);
+	lock_guard<mutex> guard(cache->lock);
+	auto binding = FindCachedTableGraph(*cache, graph_name, database);
+	if (!binding) {
+		return false;
+	}
+	graph_id = binding->graph_id;
+	graph_version = binding->graph_version;
+	return true;
+}
+
+static bool LoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result);
+
 bool GqlTryLoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result) {
+	auto cache = GetTableGraphCache(context);
+	auto database = MetadataDatabase(context);
+	uint64_t generation;
+	{
+		lock_guard<mutex> guard(cache->lock);
+		auto binding = FindCachedTableGraph(*cache, graph_name, database);
+		if (binding) {
+			result = *binding;
+			return true;
+		}
+		// Captured before reading: a commit racing the load then expires this entry.
+		generation = cache->generation;
+	}
+	if (!LoadTableGraph(context, graph_name, result)) {
+		return false;
+	}
+	if (result.source_kind.empty() && StringUtil::CIEquals(result.vertex.ownership, "MANAGED") &&
+	    StringUtil::CIEquals(result.edge.ownership, "MANAGED")) {
+		lock_guard<mutex> guard(cache->lock);
+		if (generation == cache->generation) {
+			cache->entries[graph_name] = {generation, database, result};
+		}
+	}
+	return true;
+}
+
+static bool LoadTableGraph(ClientContext &context, const string &graph_name, GqlTableGraphBinding &result) {
 	Connection connection(*context.db);
 	auto storage =
 	    GqlQuery(connection, "SELECT g.graph_id, gs.storage_mode, g.graph_version FROM gql_internal.graphs g JOIN "

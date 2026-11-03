@@ -1,0 +1,16 @@
+MATCH (source:Person)-[:KNOWS]->{2,2}(friend:Person),
+      (friend)-[:IS_LOCATED_IN]->(city:City)
+WHERE source.id=1131 AND friend.id<>source.id
+OPTIONAL MATCH (source)-[direct:KNOWS]->(friend)
+LET direct_id=element_id(direct)
+FILTER direct_id IS NULL
+LET birth_month=CAST(RIGHT(LEFT(CAST(friend.birthday AS STRING),7),2) AS INTEGER),
+    birth_day=CAST(RIGHT(CAST(friend.birthday AS STRING),2) AS INTEGER)
+FILTER (birth_month=5 AND birth_day>=21) OR (birth_month=6 AND birth_day<22)
+OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(post:Post)
+OPTIONAL MATCH (friend)<-[:HAS_CREATOR]-(common:Post)-[:HAS_TAG]->(tag:Tag)<-[:HAS_INTEREST]-(source)
+RETURN friend.id,friend.firstName,friend.lastName,
+       COUNT(DISTINCT common.id)*2-COUNT(DISTINCT post.id) AS commonInterestScore,
+       friend.gender,city.name
+GROUP BY friend,city
+ORDER BY commonInterestScore DESC,friend.id ASC LIMIT 10;

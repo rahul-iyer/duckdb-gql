@@ -1,0 +1,50 @@
+# LDBC SNB Interactive Complex Read 14 (v1) — Trusted connection paths.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-14-v1.yaml
+# (v2 also exists; v1 is the spec referenced by `interactive-v1.tex`.)
+
+id = 14
+name = "Trusted connection paths (v1)"
+status = "implemented"
+
+# Re-audited 2026-06-04. All gaps cleared:
+#   - `[n IN NODES(path) | n.id]` — list comprehension landed (§2.10).
+#   - Correlated WHERE inside the VALUE subqueries (`pe1 IN NODES(path)`
+#     references the outer `path`) — parameter-correlated subquery bodies
+#     landed in typecheck + runtime (§2.13).
+#   - `MATCH path = ALL SHORTEST (...)`, `NODES(path)`, `VALUE { ... }`,
+#     `COUNT(c) * 1.0`, `pe1 <> pe2` — all already supported.
+#
+# Translation divergence vs the Cypher source: an explicit `GROUP BY path`
+# is added. The query weighs each shortest path independently (one row per
+# path); the SUM aggregates the per-person-pair interaction scores within a
+# path. The Cypher form groups per path implicitly via its structure; ISO
+# GQL needs the grouping element spelled out, and `path` (the named-path
+# binding) is the grouping key. `NODES(path)` is itself a non-ISO
+# translation helper (see §2.9).
+
+params_file = "interactive_14_param.txt"
+param_columns = ["person1Id", "person2Id"]
+param_types = ["int", "int"]
+query = """
+MATCH path = ALL SHORTEST (p1:Person {id: {person1Id}})~[:knows]~*(p2:Person {id: {person2Id}})
+RETURN
+    [n IN NODES(path) | n.id] AS personIdsInPath,
+    SUM(
+        VALUE {
+            /* Case 1: Post replies */
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
+            WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c:Comment)-[:replyOf]->(po:Post)-[:hasCreator]->(pe2)
+            RETURN COUNT(c) * 1.0
+        } + 
+        VALUE {
+            /* Case 2: Comment replies */
+            MATCH (pe1:Person)~[:knows]~(pe2:Person)
+            WHERE pe1 IN NODES(path) AND pe2 IN NODES(path) AND pe1 <> pe2
+            OPTIONAL MATCH (pe1)<-[:hasCreator]-(c1:Comment)-[:replyOf]->(c2:Comment)-[:hasCreator]->(pe2)
+            RETURN COUNT(c1) * 0.5
+        }
+    ) AS pathWeight
+GROUP BY path
+ORDER BY pathWeight DESC
+"""

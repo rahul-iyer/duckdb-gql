@@ -1,0 +1,42 @@
+# LDBC SNB Interactive Complex Read 3 — Friends and friends of friends that have been to given countries.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-03.yaml
+
+id = 3
+name = "Friends and friends of friends that have been to given countries"
+status = "implemented"
+
+params_file = "interactive_3_param.txt"
+param_columns = ["personId", "startDate", "durationDays", "countryXName", "countryYName"]
+param_types = ["int", "int", "int", "string", "string"]
+
+query = """
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)-[:isLocatedIn]->(:City)-[:isPartOf]->(country:Country)
+WHERE country.name <> {countryXName} AND country.name <> {countryYName}
+MATCH (otherPerson)<-[:hasCreator]-(messageX:Comment|Post)-[:isLocatedIn]->(:Country {name: {countryXName}})
+WHERE messageX.creationDate >= {startDate} AND messageX.creationDate < {startDate} + DURATION({days: {durationDays}})
+MATCH (otherPerson)<-[:hasCreator]-(messageY:Comment|Post)-[:isLocatedIn]->(:Country {name: {countryYName}})
+WHERE messageY.creationDate >= {startDate} AND messageY.creationDate < {startDate} + DURATION({days: {durationDays}})
+RETURN
+    otherPerson.id AS otherPersonId,
+    otherPerson.firstName AS otherPersonFirstName,
+    otherPerson.lastName AS otherPersonLastName,
+    COUNT(DISTINCT messageX) AS xCount,
+    COUNT(DISTINCT messageY) AS yCount,
+    COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount
+GROUP BY otherPerson.id, otherPerson.firstName, otherPerson.lastName
+ORDER BY totalCount DESC, CAST(otherPersonId AS INTEGER) ASC
+LIMIT 20
+"""
+
+return_columns = [
+    "otherPersonId", "otherPersonFirstName", "otherPersonLastName",
+    "xCount", "yCount", "totalCount",
+]
+
+[divergences]
+message-union = "spec uses (message:Message); our LDBC loader doesn't synthesize a :Message superlabel, so we use the :Comment|Post ISO GQL alternation. Same logical query (matches IC2's divergence)."
+edge-casing = "spec uses :KNOWS, :HAS_CREATOR, :IS_LOCATED_IN, :IS_PART_OF (uppercase). Our loader produces :knows, :hasCreator, :isLocatedIn, :isPartOf (filename-stem convention). Loader-level."
+groupby-by-expression = "spec GROUP BY uses the RETURN aliases (otherPersonId, ...). gqlite's typechecker structurally matches GROUP BY exprs against RETURN exprs, so we group by the underlying expressions (otherPerson.id, otherPerson.firstName, otherPerson.lastName). Same grouping."
+agg-arithmetic = "`COUNT(DISTINCT messageX) + COUNT(DISTINCT messageY) AS totalCount` requires arithmetic over aggregate results in the RETURN projection — added to froGQL alongside this IC (aggregate-as-Binop-operand)."

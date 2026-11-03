@@ -1,0 +1,33 @@
+# LDBC SNB Interactive Complex Read 11 — Job referral.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-11.yaml
+
+id = 11
+name = "Job referral"
+status = "implemented"
+
+params_file = "interactive_11_param.txt"
+param_columns = ["personId", "countryName", "workFromYear"]
+param_types = ["int", "string", "int"]
+
+query = """
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)-[workAt:workAt]->(company:Company)-[:isLocatedIn]->(country:Country)
+WHERE person <> otherPerson
+  AND country.name = {countryName}
+  AND workAt.workFrom < {workFromYear}
+RETURN
+    otherPerson.id AS personId,
+    otherPerson.firstName AS personFirstName,
+    otherPerson.lastName AS personLastName,
+    company.name AS organizationName,
+    workAt.workFrom AS organizationWorkFromYear
+ORDER BY organizationWorkFromYear ASC, CAST(personId AS INTEGER) ASC, organizationName DESC
+LIMIT 10
+"""
+
+return_columns = ["personId", "personFirstName", "personLastName", "organizationName", "organizationWorkFromYear"]
+
+[divergences]
+sub-label = "spec uses `(:Company)` and `(:Country)`. The LDBC loader synthesizes these sub-labels from the `type` column on Organisation and Place (Company: 1575, University: 6380, Country: 111, City: 1343, Continent: 6 in SF0.1). No divergence at the query level."
+edge-casing = "loader produces lowercase :knows, :workAt, :isLocatedIn. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."
+no-with-distinct = "spec dedups the friends-of-friends set with `WITH DISTINCT friend` between the `KNOWS*1..2` MATCH and the workAt MATCH. gqlite's parser has no `WITH` clause, so we use a flat chain — `MATCH (person)~[:knows]~{1,2}(otherPerson)-[workAt:workAt]->(company)-[isLocatedIn]->(country)` and project at the end. A FoF reachable via multiple `:knows` paths produces multiple `otherPerson` bindings, which can duplicate (otherPerson, company, workAt) result rows. An `EXISTS`-based semi-join would restore spec semantics but invert the join order (company-first), making the iso gql shape less recognizable as the LDBC reference. The kuzu and graphqlite cross-system Cypher mirror this flat-chain form so all three engines run the same variant; cross-system row-content equivalence verifies engine agreement, not spec faithfulness. Same divergence applies to IC5, IC6, IC9."

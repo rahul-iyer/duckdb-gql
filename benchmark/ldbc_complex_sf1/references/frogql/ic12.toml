@@ -1,0 +1,33 @@
+# LDBC SNB Interactive Complex Read 12 — Expert search.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-12.yaml
+
+id = 12
+name = "Expert search"
+status = "implemented"
+
+# Re-audited 2026-06-04. Both former blockers cleared:
+#   - GROUP BY by RETURN alias — resolved in elaboration (see §2.12).
+#   - `[:isSubclassOf]->{0,}` unbounded repetition — wrapped the operand
+#     in the ISO §16.6 `ACYCLIC` path-mode prefix so the repetition is
+#     finite (bare `{0,}` is correctly rejected as infinite under
+#     `WALK ALL`). `isSubclassOf` is a DAG, so ACYCLIC and WALK yield the
+#     same paths; this is a translation divergence, no engine change.
+#
+# Translation divergence vs the Cypher source: `ACYCLIC` prefix added to
+# the operand (Cypher `*0..` is unbounded without a prefix).
+
+params_file = "interactive_12_param.txt"
+param_columns = ["personId", "tagClassName"]
+param_types = ["int", "string"]
+query = """
+MATCH ACYCLIC (person:Person {id: {personId}})~[:knows]~(friend:Person)<-[:hasCreator]-(comment:Comment)-[:replyOf]->(post:Post)-[:hasTag]->(tag:Tag)-[:hasType]->(tagClass:TagClass)-[:isSubclassOf]->{0,}(:TagClass {name: {tagClassName}})
+RETURN 
+    friend.id AS friendId, 
+    friend.firstName AS friendFirstName, 
+    friend.lastName AS friendLastName, 
+    COLLECT_LIST(DISTINCT tag.name) AS tagNames, 
+    COUNT(comment) AS replyCount
+GROUP BY friendId, friendFirstName, friendLastName
+ORDER BY replyCount DESC, CAST(friendId AS INTEGER) ASC
+LIMIT 20
+"""

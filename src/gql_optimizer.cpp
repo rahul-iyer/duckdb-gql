@@ -515,6 +515,55 @@ static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, cons
 // Statistics are read through the caller's catalog/transaction, never by
 // executing aggregate queries while binding. Referenced relations without a
 // single native table deliberately retain an unknown estimate.
+bool GqlProbePropertyIndex(ClientContext &context, TableCatalogEntry &table, const string &column, const Value &literal,
+                           idx_t limit, vector<idx_t> &rowids) {
+	auto &storage = table.Cast<DuckTableEntry>().GetStorage();
+	auto &info = storage.GetDataTableInfo();
+	info->BindIndexes(context, ART::TYPE_NAME);
+	auto &definition = table.GetColumn(Identifier(column));
+	Value value;
+	try {
+		value = literal.DefaultCastAs(definition.Type());
+	} catch (const Exception &) {
+		return false;
+	}
+	if (value.IsNull())
+		return false;
+	for (auto entry : info->GetIndexes().IndexEntries()) {
+		if (entry->GetBindState() != IndexBindState::BOUND || entry->GetIndexType() != ART::TYPE_NAME)
+			continue;
+		auto art = entry->GetReadHandle<ART>();
+		if (art->UnboundExpressionCount() != 1 || art->GetColumnIds().size() != 1 ||
+		    art->GetColumnIds()[0] != definition.StorageOid())
+			continue;
+		auto expression = art->CopyUnboundExpression(0);
+		// Expression indexes are not equivalent to a property equality.
+		if (expression->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF)
+			continue;
+		auto predicate = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, expression->Copy(),
+		                                                   make_uniq<BoundConstantExpression>(value));
+		auto scan = art->TryInitializeScan(*expression, *predicate);
+		set<row_t> matches;
+		if (!scan || !art->Scan(*scan, limit, matches))
+			return false;
+		for (auto delta : {IndexDeltaType::DELETED_ROWS_IN_USE, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT}) {
+			auto extra = art.FindDelta(delta);
+			if (!extra)
+				continue;
+			auto delta_scan = extra->TryInitializeScan(*expression, *predicate);
+			if (!delta_scan || !extra->Scan(*delta_scan, limit, matches))
+				return false;
+		}
+		for (auto row : matches) {
+			if (row < 0)
+				return false;
+			rowids.push_back(static_cast<idx_t>(row));
+		}
+		return true;
+	}
+	return false;
+}
+
 class GqlNativeStatistics {
 public:
 	GqlNativeStatistics(ClientContext &context_p, const GqlElementTableBinding &binding) : context(context_p) {
@@ -566,53 +615,7 @@ public:
 	// executing a planning-time SQL query or scanning a property column. The
 	// caller uses rowids only when the current CSR proves their identity mapping.
 	bool Probe(const string &column, const Value &literal, vector<idx_t> &rowids) {
-		if (!table || !HasIndex(column))
-			return false;
-		auto &storage = table->Cast<DuckTableEntry>().GetStorage();
-		auto &info = storage.GetDataTableInfo();
-		info->BindIndexes(context, ART::TYPE_NAME);
-		auto &definition = table->GetColumn(Identifier(column));
-		Value value;
-		try {
-			value = literal.DefaultCastAs(definition.Type());
-		} catch (const Exception &) {
-			return false;
-		}
-		if (value.IsNull())
-			return false;
-		for (auto entry : info->GetIndexes().IndexEntries()) {
-			if (entry->GetBindState() != IndexBindState::BOUND || entry->GetIndexType() != ART::TYPE_NAME)
-				continue;
-			auto art = entry->GetReadHandle<ART>();
-			if (art->UnboundExpressionCount() != 1 || art->GetColumnIds().size() != 1 ||
-			    art->GetColumnIds()[0] != definition.StorageOid())
-				continue;
-			auto expression = art->CopyUnboundExpression(0);
-			// Expression indexes are not equivalent to a property equality.
-			if (expression->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF)
-				continue;
-			auto predicate = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, expression->Copy(),
-			                                                   make_uniq<BoundConstantExpression>(value));
-			auto scan = art->TryInitializeScan(*expression, *predicate);
-			set<row_t> matches;
-			if (!scan || !art->Scan(*scan, 64, matches))
-				return false;
-			for (auto delta : {IndexDeltaType::DELETED_ROWS_IN_USE, IndexDeltaType::ADDED_DATA_DURING_CHECKPOINT}) {
-				auto extra = art.FindDelta(delta);
-				if (!extra)
-					continue;
-				auto delta_scan = extra->TryInitializeScan(*expression, *predicate);
-				if (!delta_scan || !extra->Scan(*delta_scan, 64, matches))
-					return false;
-			}
-			for (auto row : matches) {
-				if (row < 0)
-					return false;
-				rowids.push_back(static_cast<idx_t>(row));
-			}
-			return true;
-		}
-		return false;
+		return table && HasIndex(column) && GqlProbePropertyIndex(context, *table, column, literal, 64, rowids);
 	}
 
 	double Selectivity(const GqlExpressionProgram &program, idx_t node, idx_t binding,
@@ -686,6 +689,9 @@ public:
 			}
 			if (op != GqlBinaryOperator::LESS_THAN && op != GqlBinaryOperator::LESS_THAN_OR_EQUAL &&
 			    op != GqlBinaryOperator::GREATER_THAN && op != GqlBinaryOperator::GREATER_THAN_OR_EQUAL)
+				return;
+			// A parameter's value is unknown here, so its range stays unknown too.
+			if (static_cast<GqlLiteralType>(program.operators[right]) == GqlLiteralType::PARAMETER)
 				return;
 			auto &definition = table->GetColumn(Identifier(column));
 			auto stats = table->GetStatistics(context, definition.Logical().index);
@@ -843,7 +849,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 	                                    StringUtil::CIEquals(graph.edge.label_column, "__gql_type") &&
 	                                    !graph.edge.label_is_list && snapshot && snapshot->edge_labels_single;
 	const bool can_fetch_vertices =
-	    snapshot && snapshot->vertex_ids_match_rowids && StringUtil::CIEquals(graph.vertex.ownership, "MANAGED");
+	    snapshot && snapshot->HasVertexRowIds() && StringUtil::CIEquals(graph.vertex.ownership, "MANAGED");
 	const bool can_fetch_edges =
 	    snapshot && snapshot->edge_ids_match_rowids && StringUtil::CIEquals(graph.edge.ownership, "MANAGED");
 
@@ -1235,6 +1241,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 				for (const auto &equality : vertex_literal_equalities[binding]) {
 					string column;
 					if (equality.literal_type == GqlLiteralType::NULL_VALUE ||
+					    equality.literal_type == GqlLiteralType::PARAMETER ||
 					    !TryFindCaseInsensitive(graph.vertex.property_columns, equality.property_name, column) ||
 					    !vertex_statistics.HasIndex(column))
 						continue;

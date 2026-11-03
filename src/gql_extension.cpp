@@ -6,9 +6,12 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/main/connection_manager.hpp"
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/extension_callback.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_delete.hpp"
 #include "duckdb/planner/operator/logical_execute.hpp"
@@ -18,11 +21,13 @@
 #include "duckdb/planner/planner_extension.hpp"
 #include "gql_algorithms.hpp"
 #include "gql_catalog.hpp"
+#include "gql_batched_inout.hpp"
 #include "gql_csr.hpp"
 #include "gql_import.hpp"
 #include "gql_mutation.hpp"
 #include "gql_optimizer.hpp"
 #include "gql_parser.hpp"
+#include "gql_plan_reuse.hpp"
 #include "gql_relational.hpp"
 #include "gql_referenced.hpp"
 #include "gql_storage.hpp"
@@ -63,10 +68,22 @@ static void ObserveWrites(ClientContext &context, const LogicalOperator &operati
 
 static void RegisterCsrWriteObserver(PlannerExtensionInput &input, BoundStatement &statement) {
 	GqlRegisterCsrWriteObserver(input.context);
+	GqlPlanReuseObserveBind(input, statement);
+	// Before the commit too, so no reader can pair the new data with an old plan.
+	if (!input.binder.GetStatementProperties().IsReadOnly()) {
+		GqlInvalidateTableGraphCache(input.context);
+	}
 	if (statement.plan) {
 		ObserveWrites(input.context, *statement.plan);
 	}
 }
+
+// Writers that never bind a statement, such as appenders, must still reach the observer.
+struct GqlConnectionObserver : ExtensionCallback {
+	void OnConnectionOpened(ClientContext &context) override {
+		GqlRegisterCsrWriteObserver(context);
+	}
+};
 
 static void RegisterAlgorithmFunctions(ExtensionLoader &loader) {
 	auto &database = loader.GetDatabaseInstance();
@@ -115,9 +132,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlReferencedCacheStatsFunction());
 	loader.RegisterFunction(GqlNeighborsFunction());
 	loader.RegisterFunction(GqlCsrVerticesFunction());
-	loader.RegisterFunction(GqlCsrExpandFunction());
+	loader.RegisterFunction(GqlCsrExpandFunctions());
 	loader.RegisterFunction(GqlCsrPathExpandFunction());
 	loader.RegisterFunction(GqlVertexFetchFunction());
+	loader.RegisterFunction(GqlVertexLookupFunction());
 	loader.RegisterFunction(GqlProjectedVertexFetchFunction());
 	loader.RegisterFunction(GqlEdgeFetchFunction());
 	loader.RegisterFunction(GqlBuildCsrFunction());
@@ -132,6 +150,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlRelationalMatchFunction());
 	loader.RegisterFunction(GqlOptimizerPlanFunction());
 	loader.RegisterFunction(GqlTrailUniqueFunction());
+	loader.RegisterFunction(GqlFloatCastFunction());
 	loader.RegisterFunction(GqlRecursiveMatchFunction());
 	loader.RegisterFunction(GqlAlgorithmCallFunction());
 	loader.RegisterFunction(GqlAlgorithmResultFunction());
@@ -156,9 +175,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 	auto &callbacks = ExtensionCallbackManager::Get(loader.GetDatabaseInstance());
 	callbacks.Register(GqlParserExtension());
+	callbacks.Register(make_shared_ptr<GqlConnectionObserver>());
+	for (auto &connection : ConnectionManager::Get(loader.GetDatabaseInstance()).GetConnectionList()) {
+		GqlRegisterCsrWriteObserver(*connection);
+	}
 	PlannerExtension planner_extension;
 	planner_extension.post_bind_function = RegisterCsrWriteObserver;
 	callbacks.Register(std::move(planner_extension));
+	OptimizerExtension batched_in_out;
+	batched_in_out.optimize_function = GqlBatchInOutFunctions;
+	callbacks.Register(std::move(batched_in_out));
+	OptimizerExtension plan_reuse;
+	plan_reuse.optimize_function = GqlPlanReuseOptimize;
+	callbacks.Register(std::move(plan_reuse));
 }
 
 void DuckgqlExtension::Load(ExtensionLoader &loader) {

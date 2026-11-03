@@ -1,0 +1,108 @@
+# name: test/sql/gql_mapped_vertex_fetch.test
+# description: Projected fetch uses snapshot row mappings for reordered and sparse managed IDs
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT i AS ":ID", i AS "id:int", 'node-' || i AS "name:string",
+      repeat('wide',100) AS "unused:string", 'Node' AS ":LABEL"
+      FROM range(1,5) t(i)) TO '{TEST_DIR}/mapped_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 1 AS ":START_ID", 2 AS ":END_ID", 'R' AS ":TYPE"
+      UNION ALL SELECT 1,2,'R' UNION ALL SELECT 2,3,'R')
+TO '{TEST_DIR}/mapped_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH mapped ANY
+
+statement ok
+COPY GRAPH mapped FROM (VERTICES '{TEST_DIR}/mapped_nodes.csv', EDGES '{TEST_DIR}/mapped_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH mapped
+
+# Give graph IDs the reverse of physical row order and a gap above 100.
+# No scan/fetch implementation may infer a physical row ID from this key.
+statement ok
+UPDATE gql_data.graph_1_vertices SET __gql_id=105-__gql_id
+
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_source_id=105-__gql_source_id, __gql_target_id=105-__gql_target_id
+
+statement ok
+CALL gql_create_property_index('mapped', 'id')
+
+statement ok
+CALL gql_build_csr('mapped')
+
+query IT rowsort
+SELECT fetched.id, fetched.name
+FROM (VALUES (103::UBIGINT), (104::UBIGINT), (103::UBIGINT),
+             (NULL::UBIGINT), (999::UBIGINT), (0::UBIGINT)) seed(id),
+LATERAL gql_vertex_fetch_projected(struct_pack(vertex_id := seed.id,
+    columns := struct_pack(id := NULL, name := NULL))) fetched
+----
+1	node-1
+2	node-2
+2	node-2
+
+# Projected/full fetch agree, and null parent structs cannot expose child IDs.
+query IT
+SELECT id, name FROM gql_vertex_fetch(102::UBIGINT)
+----
+3	node-3
+
+query I
+SELECT count(*) FROM gql_vertex_fetch_projected(NULL::STRUCT(vertex_id UBIGINT, columns STRUCT(id INTEGER)))
+----
+0
+
+# Parallel edges retain bag multiplicity across correlated fetch stages.
+query IT rowsort
+MATCH (a:Node) WHERE a.id=1
+MATCH (a)-[:R]->(b:Node)
+MATCH (b)-[:R]->(c:Node)
+RETURN c.id, c.name
+----
+3	node-3
+3	node-3
+
+statement ok
+SET gql_optimizer='cost'
+
+query IT rowsort
+MATCH (a:Node)-[:R]->(b:Node), (b)-[:R]->(c:Node)
+WHERE a.id=1 RETURN c.id, c.name
+----
+3	node-3
+3	node-3
+
+# A prepared fetch must acquire the current mapping at execution, rather than
+# retain a bind-time row map after a write and rebuild.
+statement ok
+PREPARE mapped_lookup AS SELECT id, name FROM gql_vertex_fetch_projected(
+    struct_pack(vertex_id := 103::UBIGINT, columns := struct_pack(id := NULL, name := NULL)))
+
+statement ok
+UPDATE gql_data.graph_1_vertices SET name='changed' WHERE id=2
+
+statement ok
+DELETE FROM gql_data.graph_1_vertices WHERE id=4
+
+statement ok
+CALL gql_build_csr('mapped')
+
+query IT
+EXECUTE mapped_lookup
+----
+2	changed
+
+query I
+SELECT count(*) FROM gql_vertex_fetch(101::UBIGINT)
+----
+0

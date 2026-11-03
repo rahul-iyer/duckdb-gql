@@ -1,0 +1,20 @@
+# LDBC SNB Interactive Complex Read 13 — Single shortest path.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-13.yaml
+
+id = 13
+name = "Single shortest path"
+status = "implemented"
+
+# Re-audited 2026-06-03 after merging named paths/path functions from main
+# with ISO expression support from this branch. `MATCH path = ANY SHORTEST (...)`,
+# `PATH_LENGTH(path)`, and `CASE WHEN ... END` are all supported now.
+
+params_file = "interactive_13_param.txt"
+param_columns = ["person1Id", "person2Id"]
+param_types = ["int", "int"]
+
+query = """
+MATCH path = ANY SHORTEST (p1:Person {id: {person1Id}})~[:knows]~*(p2:Person {id: {person2Id}})
+RETURN
+    CASE WHEN PATH_LENGTH(path) IS NULL THEN -1 ELSE PATH_LENGTH(path) END AS shortestPathLength
+"""

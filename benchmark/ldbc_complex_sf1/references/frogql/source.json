@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/pleiad/frogql",
+  "commit": "58089e09774ccce3cd907654eca1d59fc96334b1",
+  "path": "bench/ldbc-queries",
+  "license": "MIT; see LICENSE",
+  "sha256": {
+    "LICENSE": "714cddffab9b46411319507645f76011e917f1163c283b787ac7df9be96f0962",
+    "ic1.toml": "d129db1b0d2193a2c3e8a5cd22ddacea71ae3e2c4ab1514a39e15921e4c8da09",
+    "ic10.toml": "def83f8a6c0f6b6ffad9aa0ad0381dd918abdacb72c485d038e8bffce299cb51",
+    "ic11.toml": "560b66a006d42055cd584b24917b62f15514cdbd7bff6e6b336783433b1cd3fc",
+    "ic12.toml": "bc2205e46250c2e6472af3b3e111456f88875b7fd66c2cb37e1bc92a5e4fcbc7",
+    "ic13.toml": "419ec312649e1425e3e6145ba003f24117b8fccd0281140a7a04f92ef6eab13e",
+    "ic14.toml": "b137d398f2450264f69e00480d4ab1dbb94025deb671adc2e4e84a376c60c514",
+    "ic2.toml": "cb3db576b14602d34f3dff2af4eaab8b3543973c91bd2feab8be8a424e55b6b1",
+    "ic3.toml": "082c4dedd0620940149dcf66df128c249300bba791f7f5958232d553ab6bf226",
+    "ic4.toml": "4301717cc79da55b41398e04fa75c4c9a163347cd9598ba088aab756cc4a2813",
+    "ic5.toml": "f427f03666832586fc8a5072d8e876c3a527a43b8035ec0c75f07dde811da121",
+    "ic6.toml": "52b255bed845cb2214ce9c1790618b7746e708fc8783d11d4a7b8572c5b8412e",
+    "ic7.toml": "58a03be4e83a1cd8fa5617cbc05df2a924919ca1fbeef5a6424d365947d7cd60",
+    "ic8.toml": "7f6f3ae9416434399f297dccaa422746845508fad578f20795f3c8364d4a7909",
+    "ic9.toml": "4c046a7beb60594e5413c2177f6289c945af49ab7d9407c5b49ea20ccde631ba"
+  }
+}

@@ -1,0 +1,35 @@
+# LDBC SNB Interactive Complex Read 10 — Friend recommendation.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-10.yaml
+
+id = 10
+name = "Friend recommendation"
+status = "blocked"
+
+blocked_reason = """
+Re-audited 2026-06-03 after the ISO expression support pass.
+
+What is now fine:
+  - searched `CASE WHEN ... THEN ... ELSE ... END`
+  - ISO functional `MOD(a, b)`
+  - `CAST(<return-alias> AS INTEGER)` in ORDER BY
+
+Remaining blocker:
+  - IC10 needs month/day predicates over `Person.birthday`. The previous
+    benchmark sketch used `EXTRACT(MONTH|DAY FROM epochMillis)`, but
+    `EXTRACT` is not ISO GQL in ISO/IEC 39075:2024. Keep IC10 blocked
+    until froGQL has ISO temporal values/functions or another
+    ISO-conformant way to express the birthday window.
+
+The Cypher-style `WITH`/`collect`/`size`/list-comprehension shape can be
+flattened with `OPTIONAL MATCH` + `SUM(CASE ...)`, but the temporal
+predicate still needs a standards-compliant representation.
+"""
+
+required_features = [
+    "ISO temporal values/functions for LDBC birthday predicates",
+    "ISO-conformant month/day component access or equivalent temporal predicate",
+]
+
+params_file = "interactive_10_param.txt"
+param_columns = ["personId", "month"]
+param_types = ["int", "int"]

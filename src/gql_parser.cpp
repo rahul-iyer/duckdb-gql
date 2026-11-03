@@ -5,6 +5,8 @@
 #include "GQLParser.h"
 #include "antlr4-runtime.h"
 
+#include <algorithm>
+
 #ifdef INVALID_INDEX
 #undef INVALID_INDEX
 #endif
@@ -1699,6 +1701,52 @@ static void ValidateExecutionHint(const string &query) {
 	throw ParserException("Unknown GQL execution hint '%s'; expected NATIVE", hint);
 }
 
+// Full-context LL decisions are never cached in ANTLR's DFA, so they repeat on
+// every parse. SLL either returns the same tree as LL or reports an error, so
+// only input that fails SLL needs the LL pass, which also words syntax errors.
+static GQLParser::GqlProgramContext *ParseProgramTwoStage(GQLParser &parser, antlr4::CommonTokenStream &tokens,
+                                                          GqlErrorListener &errors) {
+	auto simulator = parser.getInterpreter<antlr4::atn::ParserATNSimulator>();
+	auto default_handler = parser.getErrorHandler();
+	simulator->setPredictionMode(antlr4::atn::PredictionMode::SLL);
+	parser.setErrorHandler(std::make_shared<antlr4::BailErrorStrategy>());
+	try {
+		return parser.gqlProgram();
+	} catch (const antlr4::ParseCancellationException &) {
+		tokens.seek(0);
+		parser.reset();
+		parser.setErrorHandler(default_handler);
+		parser.addErrorListener(&errors);
+		simulator->setPredictionMode(antlr4::atn::PredictionMode::LL);
+		return parser.gqlProgram();
+	}
+}
+
+// Follows DuckDB: $1 names a position, $name takes the next one, and they do not mix.
+static identifier_map_t<idx_t> GqlParameterMap(const GqlStatement &statement) {
+	identifier_map_t<idx_t> result;
+	if (statement.parameter_names.empty()) {
+		return result;
+	}
+	auto is_position = [](const string &name) {
+		return std::all_of(name.begin(), name.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+	};
+	const bool mutation = statement.type == GqlStatementType::MATCH &&
+	                      statement.Cast<GqlMatchStatement>().has_mutation;
+	if (statement.type != GqlStatementType::MATCH || mutation) {
+		throw NotImplementedException("GQL parameters are only supported in read-only MATCH statements");
+	}
+	const auto positional = is_position(statement.parameter_names[0]);
+	idx_t next = 1;
+	for (const auto &name : statement.parameter_names) {
+		if (is_position(name) != positional) {
+			throw ParserException("Mixing positional and named GQL parameters is not supported");
+		}
+		result[Identifier(name)] = positional ? NumericCast<idx_t>(std::stoull(name)) : next++;
+	}
+	return result;
+}
+
 ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) {
 	if (!StartsWithGqlCommand(query)) {
 		return ParserExtensionParseResult();
@@ -1763,8 +1811,7 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 	lexer.removeErrorListeners();
 	parser.removeErrorListeners();
 	lexer.addErrorListener(&errors);
-	parser.addErrorListener(&errors);
-	auto tree = parser.gqlProgram();
+	auto tree = ParseProgramTwoStage(parser, tokens, errors);
 	if (!errors.error.empty()) {
 		ParserExtensionParseResult result(errors.error);
 		result.error_location = errors.location;
@@ -1779,6 +1826,7 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 	if (!parse_data->statement) {
 		throw InternalException("GQL transformer returned no statement");
 	}
+	parse_data->statement->parameter_names = transformer.ParameterNames();
 	return ParserExtensionParseResult(std::move(parse_data));
 }
 
@@ -2213,8 +2261,10 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 				throw NotImplementedException("DuckGQL EXPLAIN requires one read-only query");
 			}
 			vector<unique_ptr<SQLStatement>> statements;
+			auto named_parameters = lowered.statements[0]->named_param_map;
 			auto statement =
 			    make_uniq<ExplainStatement>(std::move(lowered.statements[0]), explain.type, explain.format);
+			statement->named_param_map = std::move(named_parameters);
 			statement->query = query;
 			statement->stmt_location = QueryLocation(0, query.size());
 			statements.push_back(std::move(statement));
@@ -2250,6 +2300,7 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 	}
 
 	try {
+		const auto parameter_map = GqlParameterMap(*gql_ptr->statement);
 		if (gql_ptr->statement->type == GqlStatementType::INSERT) {
 			auto statements = GqlLowerInsert(gql_ptr->statement->Cast<GqlInsertStatement>());
 			for (auto &statement : statements) {
@@ -2296,6 +2347,7 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 		for (auto &statement : statements) {
 			statement->query = query;
 			statement->stmt_location = QueryLocation(0, query.size());
+			statement->named_param_map = parameter_map;
 		}
 		return ParserOverrideResult(std::move(statements));
 	} catch (std::exception &error) {

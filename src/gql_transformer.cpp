@@ -1641,6 +1641,39 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 	}
 	auto expression = make_shared_ptr<GqlExpression>();
 	expression->source = SourceRange(context);
+	if (auto cast = context.castSpecification()) {
+		if (!cast->castOperand() || !cast->castTarget() || !cast->castTarget()->valueType()) {
+			return false;
+		}
+		auto target = StringUtil::Upper(cast->castTarget()->valueType()->getText());
+		string name;
+		if (target == "INTEGER" || target == "INT" || target == "INT64" || target == "BIGINT") {
+			name = "__gql_cast_integer";
+		} else if (target == "FLOAT" || target == "DOUBLE" || target == "DOUBLEPRECISION") {
+			name = "__gql_cast_float";
+		} else if (target == "STRING" || target == "VARCHAR") {
+			name = "__gql_cast_string";
+		} else if (target == "BOOLEAN" || target == "BOOL") {
+			name = "__gql_cast_boolean";
+		} else {
+			return false;
+		}
+		expression->type = GqlExpressionType::FUNCTION;
+		expression->function_name = std::move(name);
+		shared_ptr<GqlExpression> operand;
+		if (cast->castOperand()->valueExpression()) {
+			if (!TransformExpression(*cast->castOperand()->valueExpression(), operand)) {
+				return false;
+			}
+		} else {
+			operand = make_shared_ptr<GqlExpression>();
+			operand->type = GqlExpressionType::LITERAL;
+			operand->literal.type = GqlLiteralType::NULL_VALUE;
+		}
+		expression->arguments.push_back(std::move(operand));
+		result = std::move(expression);
+		return true;
+	}
 	if (auto aggregate = context.aggregateFunction()) {
 		return TransformAggregate(*aggregate, result);
 	}
@@ -1664,7 +1697,21 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 	if (auto specification = context.unsignedValueSpecification()) {
 		auto literal = specification->unsignedLiteral();
 		if (!literal) {
-			return false;
+			auto general = specification->generalValueSpecification();
+			auto parameter = general ? general->dynamicParameterSpecification() : nullptr;
+			if (!parameter) {
+				return false;
+			}
+			auto name = parameter->GENERAL_PARAMETER_REFERENCE()->getText().substr(1);
+			if (std::find(parameter_names.begin(), parameter_names.end(), name) == parameter_names.end()) {
+				parameter_names.push_back(name);
+			}
+			expression->type = GqlExpressionType::LITERAL;
+			expression->literal.type = GqlLiteralType::PARAMETER;
+			expression->literal.value = std::move(name);
+			expression->literal.source = SourceRange(*parameter);
+			result = std::move(expression);
+			return true;
 		}
 		if (auto general = literal->generalLiteral()) {
 			if (auto list = general->listLiteral()) {

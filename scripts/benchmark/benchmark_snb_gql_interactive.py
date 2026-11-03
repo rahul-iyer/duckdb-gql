@@ -24,6 +24,7 @@ from typing import Any
 from duckdb_profile import normalize_profile
 
 
+OPTIMIZER = "legacy"
 EXPECTED_VERTICES = 29_987_835
 EXPECTED_EDGES = 178_561_949
 
@@ -598,6 +599,7 @@ def query_rows(
             "CALL gql_build_csr('snb_interactive');\n"
             ".once /dev/null\n"
             "SESSION SET GRAPH snb_interactive;\n"
+            f"SET gql_optimizer={sql_literal(OPTIMIZER)};\n"
             "PRAGMA enable_profiling='json';\n"
         )
     completed = run_cli(
@@ -632,6 +634,7 @@ SET preserve_insertion_order=false;
 CALL gql_build_csr('snb_interactive');
 .once /dev/null
 SESSION SET GRAPH snb_interactive;
+SET gql_optimizer={sql_literal(OPTIMIZER)};
 .output /dev/null
 PRAGMA enable_profiling='json';
 {statements}
@@ -1219,11 +1222,11 @@ RETURN distance;
         },
     }
     unsupported = {
-        "interactive-complex-1": "requires shortest-distance selection plus nested collection projections",
-        "interactive-complex-7": "requires a grouped max subquery, temporal arithmetic, and conditional projection",
-        "interactive-complex-10": "requires correlated aggregate subqueries and date extraction",
-        "interactive-complex-12": "requires tag-class recursion and distinct list aggregation",
-        "interactive-complex-14": "requires all shortest paths, edge weighting, and path-list aggregation",
+        "interactive-complex-1": "no validated adaptation: nested collection results and distance/enrichment composition",
+        "interactive-complex-7": "no complete adaptation: OPTIONAL MATCH can select latest likes; numeric minutes latency remains",
+        "interactive-complex-10": "no validated adaptation: birthday month/day extraction remains; scalar aggregates are supported",
+        "interactive-complex-12": "no complete adaptation: hierarchy traversal works, but COLLECT_LIST(DISTINCT ...) is not implemented",
+        "interactive-complex-14": "no complete adaptation: ALL SHORTEST search and quantified path values are not implemented",
     }
     if selected_queries:
         known = set(cases) | set(unsupported)
@@ -1377,6 +1380,7 @@ def main() -> None:
         type=Path,
         default=Path("build/benchmarks/snb10/gql-interactive-results.json"),
     )
+    parser.add_argument("--optimizer", choices=["legacy", "cost"], default="legacy")
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--memory-limit", default="8GB")
     parser.add_argument("--warmups", type=int, default=1)
@@ -1392,6 +1396,8 @@ def main() -> None:
     parser.add_argument("--no-queries", action="store_true")
     args = parser.parse_args()
 
+    global OPTIMIZER
+    OPTIMIZER = args.optimizer
     cli = args.duckdb.resolve()
     source_database = args.source_database.resolve()
     vertices = args.vertices.resolve()

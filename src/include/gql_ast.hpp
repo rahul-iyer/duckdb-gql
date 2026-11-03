@@ -24,7 +24,7 @@ struct GqlIdentifier {
 	}
 };
 
-enum class GqlLiteralType : uint8_t { NULL_VALUE, BOOLEAN, INTEGER, DECIMAL, DOUBLE, STRING, BYTE_STRING };
+enum class GqlLiteralType : uint8_t { NULL_VALUE, BOOLEAN, INTEGER, DECIMAL, DOUBLE, STRING, BYTE_STRING, PARAMETER };
 
 struct GqlLiteral {
 	GqlLiteralType type = GqlLiteralType::STRING;
@@ -288,6 +288,9 @@ public:
 	}
 	virtual ~GqlStatement() {
 	}
+
+	//! Names of dynamic parameters such as $personId, in order of first appearance.
+	vector<string> parameter_names;
 
 	template <class TARGET>
 	const TARGET &Cast() const {

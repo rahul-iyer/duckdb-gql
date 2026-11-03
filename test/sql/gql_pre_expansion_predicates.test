@@ -1,0 +1,114 @@
+# name: test/sql/gql_pre_expansion_predicates.test
+# description: MATCH-local literal predicates precede dependent expansion without crossing optional or OR boundaries
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (
+ SELECT 0 AS ":ID", 0 AS "id:int", NULL::INTEGER AS "score:int", 'Root' AS ":LABEL"
+ UNION ALL SELECT i,i,i,'Middle' FROM range(1,1001) t(i)
+ UNION ALL SELECT i,i,NULL::INTEGER,'Leaf' FROM range(2000,2050) t(i)
+) TO '{TEST_DIR}/pre_expand_nodes.csv' (HEADER)
+
+statement ok
+COPY (
+ SELECT 0 AS ":START_ID", i AS ":END_ID", 'R' AS ":TYPE" FROM range(1,1001) t(i)
+ UNION ALL SELECT 0,999,'R'
+ UNION ALL SELECT i,j,'S' FROM range(1,1001) a(i),range(2000,2050) b(j)
+) TO '{TEST_DIR}/pre_expand_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH pre_expand ANY
+
+statement ok
+COPY GRAPH pre_expand FROM (VERTICES '{TEST_DIR}/pre_expand_nodes.csv', EDGES '{TEST_DIR}/pre_expand_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH pre_expand
+
+statement ok
+CALL gql_create_property_index('pre_expand', 'id')
+
+statement ok
+CALL gql_build_csr('pre_expand')
+
+statement ok
+PRAGMA enable_profiling='json'
+
+statement ok
+PRAGMA profiling_output='{TEST_DIR}/pre_expand.json'
+
+# Only two of 1,000 middles qualify. The parallel R edge contributes another
+# 50 rows. Filtering after expansion would unnecessarily produce 50,000 rows.
+query I
+MATCH (s:Root)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+WHERE s.id=0 AND m.score >= 999
+RETURN count(*)
+----
+150
+
+statement ok
+PRAGMA disable_profiling
+
+query I
+SELECT CAST(regexp_extract(content, '"total_intermediate_rows"\s*:\s*([0-9]+)', 1) AS BIGINT) < 20000
+FROM read_text('{TEST_DIR}/pre_expand.json')
+----
+true
+
+# Reversed comparisons and equalities obey the same stage ownership.
+query I
+MATCH (s:Root)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+WHERE s.id=0 AND 999 <= m.score AND m.score <> 1000
+RETURN count(*)
+----
+100
+
+# A disjunction must stay intact rather than push either arm independently.
+query I
+MATCH (s:Root)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+WHERE s.id=0 AND (m.score=1 OR m.score>=999)
+RETURN count(*)
+----
+200
+
+# Null values do not satisfy a literal comparison.
+query I
+MATCH (m:Leaf), (m)-[:S]->(l:Leaf)
+WHERE m.score > 0 RETURN count(*)
+----
+0
+
+# A MATCH-local optional predicate belongs inside the optional relation.
+query II
+MATCH (s:Root) WHERE s.id=0
+OPTIONAL MATCH (s)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+WHERE m.score>1000
+RETURN s.id, m.id
+----
+0	NULL
+
+# A post-optional comparison rejects the unmatched row; it cannot move into
+# the optional relation and turn into a preserved null-extended outer row.
+query I
+MATCH (s:Root) WHERE s.id=0
+OPTIONAL MATCH (s)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+LET score=m.score
+FILTER score>1000
+RETURN count(*)
+----
+0
+
+# The same non-optional semantics hold under the experimental cost planner.
+statement ok
+SET gql_optimizer='cost'
+
+query I
+MATCH (s:Root)-[:R]->(m:Middle), (m)-[:S]->(l:Leaf)
+WHERE s.id=0 AND m.score>=999 RETURN count(*)
+----
+150

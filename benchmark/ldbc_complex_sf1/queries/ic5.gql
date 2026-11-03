@@ -1,0 +1,11 @@
+
+MATCH (source:Person)-[:KNOWS]->{1,2}(friend:Person),
+      (forum:Forum)-[membership:HAS_MEMBER]->(friend)
+WHERE source.id = 1131
+  AND friend.id <> source.id
+  AND membership.joinDate > '2010-11-01 12:00:00'
+OPTIONAL MATCH (forum)-[:CONTAINER_OF]->(post:Post)-[:HAS_CREATOR]->(friend)
+RETURN forum.title, COUNT(DISTINCT post.id) AS postCount
+GROUP BY forum
+ORDER BY postCount DESC, forum.id ASC
+LIMIT 20;

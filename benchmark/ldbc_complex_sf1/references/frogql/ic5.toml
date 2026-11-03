@@ -1,0 +1,34 @@
+# LDBC SNB Interactive Complex Read 5 — New groups.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-05.yaml
+
+id = 5
+name = "New groups"
+status = "implemented"
+
+params_file = "interactive_5_param.txt"
+param_columns = ["personId", "minDate"]
+param_types = ["int", "int"]
+
+query = """
+MATCH (person:Person {id: {personId}})~[:knows]~{1, 2}(otherPerson:Person)
+WHERE person <> otherPerson
+MATCH (otherPerson)<-[hm:hasMember]-(forum:Forum)
+WHERE hm.joinDate > {minDate}
+OPTIONAL MATCH (otherPerson)<-[:hasCreator]-(post:Post)<-[:containerOf]-(forum)
+RETURN
+    forum.title AS forumName,
+    forum.id AS forumId,
+    COUNT(post) AS postCount
+GROUP BY forum.title, forum.id
+ORDER BY postCount DESC, CAST(forumId AS INTEGER) ASC
+LIMIT 20
+"""
+
+return_columns = ["forumName", "forumId", "postCount"]
+
+[divergences]
+group-by-raw-expr = "spec writes `GROUP BY forumName, forum.id` referencing the RETURN-alias `forumName`. gqlite's parser doesn't visit RETURN aliases when resolving GROUP BY items, so we substitute `GROUP BY forum.title, forum.id` (raw expression). Same group key, same rows."
+return-extra-forumid = "spec returns only forumName + postCount. gqlite's parser rejects ORDER BY items that mix RETURN aliases (`postCount`) with free expressions (`forum.id`); the canonical Cypher reference uses `WITH forum, ...` to keep `forum.id` in scope post-aggregate, but our parser has no WITH. We project `forum.id AS forumId` so the tie-break can sort by a RETURN alias. The cross-system Cypher (graphqlite, Kuzu) projects the same extra column for byte-equal cross-system hashes; same data, one extra column."
+edge-casing = "loader produces lowercase :knows, :hasMember, :hasCreator, :containerOf. Loader-level."
+bare-node-compare = "spec uses `WHERE person <> otherPerson`. gqlite's `<>` on bound nodes is now first-class (PR #42); we run the spec verbatim."
+no-with-distinct = "spec dedups the friends-of-friends set with `WITH DISTINCT friend` between the `KNOWS*1..2` MATCH and the forum-membership MATCH, then collects friends per forum and filters posts via `WHERE friend IN friends`. gqlite's parser has no `WITH` clause, so we use a flat chain — `MATCH (person)~[:knows]~{1,2}(otherPerson)` directly followed by the forum/post MATCHes and `GROUP BY` at the end. A FoF reachable via multiple `:knows` paths produces multiple `otherPerson` bindings, which can inflate `COUNT(post)` per forum when summed over the duplicates. An `EXISTS`-based semi-join would restore spec semantics but invert the join order (forum-first), making the iso gql shape less recognizable as the LDBC reference. The kuzu and graphqlite cross-system Cypher mirror this flat-chain form so all three engines run the same variant; cross-system row-content equivalence (sha256 hashes byte-identical) verifies engine agreement, not spec faithfulness. Same divergence applies to IC6, IC9, IC11."

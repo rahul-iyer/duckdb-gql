@@ -1,0 +1,9 @@
+
+MATCH (source:Person) WHERE source.id = 1131
+MATCH (parent:Message)-[:HAS_CREATOR]->(source)
+MATCH (reply:Comment)-[:REPLY_OF]->(parent)
+MATCH (reply)-[:HAS_CREATOR]->(author:Person)
+RETURN author.id, author.firstName, author.lastName,
+       reply.creationDate, reply.id, reply.content
+ORDER BY reply.creationDate DESC, reply.id ASC
+LIMIT 20;

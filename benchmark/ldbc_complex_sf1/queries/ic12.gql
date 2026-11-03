@@ -1,0 +1,14 @@
+MATCH (source:Person)-[:KNOWS]->(friend:Person),
+      (comment:Comment)-[:HAS_CREATOR]->(friend),
+      (comment)-[:REPLY_OF]->(post:Post),
+      (post)-[:HAS_TAG]->(tag:Tag),
+      (tag)-[:HAS_TYPE]->(class:TagClass)
+WHERE source.id=1131
+OPTIONAL MATCH (class)-[:IS_SUBCLASS_OF]->{1,30}(ancestor:TagClass)
+WHERE ancestor.name='Monarch'
+LET selected_class=COALESCE(ancestor.name,class.name)
+FILTER selected_class='Monarch'
+RETURN friend.id,friend.firstName,friend.lastName,
+       COLLECT_LIST(DISTINCT tag.name),COUNT(DISTINCT comment.id) AS replyCount
+GROUP BY friend
+ORDER BY replyCount DESC,friend.id ASC LIMIT 20;

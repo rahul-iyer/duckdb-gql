@@ -5,6 +5,8 @@
 
 namespace duckdb {
 
+class TableCatalogEntry;
+
 class ClientContext;
 class TableFunction;
 struct GqlTableGraphBinding;
@@ -120,6 +122,11 @@ struct GqlAccessPathPlan {
 // reapplying eligibility or selectivity policy.
 GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
                                          const GqlTableGraphBinding &graph, const GqlAccessPathInput &input);
+
+// Row IDs of an indexed property value, or false when no usable index answers it.
+// These are candidates: the caller's fetch applies visibility and must recheck the value.
+bool GqlProbePropertyIndex(ClientContext &context, TableCatalogEntry &table, const string &column, const Value &literal,
+                           idx_t limit, vector<idx_t> &rowids);
 
 // Inspect the last graph access plan bound on this connection, including EXPLAIN.
 // This reads diagnostics only; it never executes the graph query or builds CSR.

@@ -1,0 +1,209 @@
+# name: test/sql/gql_statement_planning_state.test
+# description: Cached graph metadata never goes stale, MATCH planner settings stay statement-local, and two-stage parsing keeps syntax errors
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'A',10),(2,'A',20)) v(":ID",":LABEL","score:int")) TO '{TEST_DIR}/cache_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/cache_edges.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'A',99,'replacement')) v(":ID",":LABEL","score:int","tag:string")) TO '{TEST_DIR}/cache_nodes2.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,1,'S')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/cache_edges2.csv' (HEADER)
+
+statement ok
+CREATE GRAPH cached ANY
+
+statement ok
+COPY GRAPH cached FROM (VERTICES '{TEST_DIR}/cache_nodes.csv', EDGES '{TEST_DIR}/cache_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cached
+
+# Populate the metadata cache.
+query I rowsort
+MATCH (a:A) RETURN a.score
+----
+10
+20
+
+# A write between statements is visible to the very next bind.
+statement ok
+INSERT (:A {score: 30})
+
+query I
+MATCH (a:A) WHERE a.score = 30 RETURN a.score
+----
+30
+
+# A newly created property index is picked up and returns the same rows.
+statement ok
+CALL gql_create_property_index('cached', 'score')
+
+query I
+MATCH (a:A) WHERE a.score = 20 RETURN a.score
+----
+20
+
+# Metadata changes made on another connection expire this connection's view.
+statement ok con2
+SESSION SET GRAPH cached
+
+query I con2 rowsort
+MATCH (a:A) RETURN a.score
+----
+10
+20
+30
+
+statement ok con2
+INSERT (:A {score: 40})
+
+query I
+MATCH (a:A) WHERE a.score = 40 RETURN a.score
+----
+40
+
+# A rolled-back metadata transaction leaves the graph usable and unchanged.
+statement ok
+BEGIN
+
+statement ok
+UPDATE gql_internal.graphs SET graph_version = graph_version + 1
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (a:A) WHERE a.score = 40 RETURN a.score
+----
+40
+
+# Replacing a graph under the same name must not serve the old binding.
+statement ok
+DROP GRAPH cached
+
+statement ok
+CREATE GRAPH cached ANY
+
+statement ok
+COPY GRAPH cached FROM (VERTICES '{TEST_DIR}/cache_nodes2.csv', EDGES '{TEST_DIR}/cache_edges2.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cached
+
+# con2 kept its selection and must see the replacement too.
+query I con2
+MATCH (a:A) RETURN a.score
+----
+99
+
+query IT
+MATCH (a:A) RETURN a.score, a.tag
+----
+99	replacement
+
+# A cached CSR version also follows the replacement.
+statement ok
+CALL gql_build_csr('cached')
+
+query I
+MATCH (a:A)-[:S]->(b:A) RETURN b.score
+----
+99
+
+# A dropped graph is an error, not a cache hit, for a session still selecting it.
+statement ok
+DROP GRAPH cached
+
+statement error con2
+MATCH (a:A) RETURN a.score
+----
+does not exist
+
+# MATCH plans with plain delim joins without changing the session's setting.
+statement ok
+CREATE GRAPH cached ANY
+
+statement ok
+COPY GRAPH cached FROM (VERTICES '{TEST_DIR}/cache_nodes.csv', EDGES '{TEST_DIR}/cache_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cached
+
+query T
+SELECT current_setting('delim_join_as_cte')
+----
+true
+
+query I
+MATCH (a:A)-[:R]->(b:A) RETURN b.score
+----
+20
+
+query T
+SELECT current_setting('delim_join_as_cte')
+----
+true
+
+# The override is also removed when the statement fails after binding started.
+statement error
+MATCH (a:A) RETURN a.score / 'x'
+----
+
+query T
+SELECT current_setting('delim_join_as_cte')
+----
+true
+
+# An explicit user choice is left alone by MATCH and still gives the same rows.
+statement ok
+SET delim_join_as_cte=true
+
+query I
+MATCH (a:A)-[:R]->(b:A) RETURN b.score
+----
+20
+
+query T
+SELECT current_setting('delim_join_as_cte')
+----
+true
+
+statement ok
+SET delim_join_as_cte=false
+
+query I
+MATCH (a:A)-[:R]->(b:A) RETURN b.score
+----
+20
+
+query T
+SELECT current_setting('delim_join_as_cte')
+----
+false
+
+statement ok
+RESET delim_join_as_cte
+
+# Input that fails the fast SLL parse still reports ANTLR's located LL error.
+statement error
+MATCH (a:A RETURN a.score
+----
+GQL parser error at line 1, column 11: no viable alternative at input 'MATCH (a:A RETURN'
+
+statement error
+MATCH (a:A) RETURN
+----
+GQL parser error at line 1, column
+
+statement ok
+DROP GRAPH cached

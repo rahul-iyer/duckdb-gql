@@ -1,0 +1,17 @@
+
+MATCH (source:Person)-[:KNOWS]->(friend:Person),
+      (recent:Post)-[:HAS_CREATOR]->(friend),
+      (recent)-[:HAS_TAG]->(tag:Tag)
+WHERE source.id = 1131
+  AND recent.creationDate >= '2010-06-01 00:00:00'
+  AND recent.creationDate < '2010-06-30 00:00:00'
+OPTIONAL MATCH (source)-[:KNOWS]->(old_friend:Person),
+               (old_post:Post)-[:HAS_CREATOR]->(old_friend),
+               (old_post)-[:HAS_TAG]->(tag)
+WHERE old_post.creationDate < '2010-06-01 00:00:00'
+LET old_post_id = old_post.id
+FILTER old_post_id IS NULL
+RETURN tag.name, COUNT(DISTINCT recent.id) AS postCount
+GROUP BY tag
+ORDER BY postCount DESC, tag.name ASC
+LIMIT 10;

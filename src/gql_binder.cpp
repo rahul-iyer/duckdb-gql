@@ -83,6 +83,9 @@ static GqlType LiteralType(const GqlLiteral &literal) {
 		return {GqlTypeId::STRING, false};
 	case GqlLiteralType::BYTE_STRING:
 		return {GqlTypeId::BYTE_STRING, false};
+	case GqlLiteralType::PARAMETER:
+		// The value and its type are known only when the statement executes.
+		return {GqlTypeId::PROPERTY_VALUE, true};
 	}
 	throw InternalException("Unknown GQL literal type");
 }
@@ -280,6 +283,25 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			result->arguments.push_back(std::move(bound));
 		}
 		auto name = StringUtil::Lower(expression.function_name);
+		if (StringUtil::StartsWith(name, "__gql_cast_")) {
+			if (result->arguments.size() != 1 || !IsScalar(result->arguments[0]->result_type.id) ||
+			    result->arguments[0]->result_type.id == GqlTypeId::LIST) {
+				throw BinderException("GQL CAST requires one scalar argument");
+			}
+			result->result_type = {name == "__gql_cast_integer"   ? GqlTypeId::INTEGER
+			                       : name == "__gql_cast_float"   ? GqlTypeId::DOUBLE
+			                       : name == "__gql_cast_string"  ? GqlTypeId::STRING
+			                                                      : GqlTypeId::BOOLEAN,
+			                       result->arguments[0]->result_type.nullable};
+			return result;
+		}
+		if (name == "collect_list") {
+			if (result->arguments.size() != 1) {
+				throw BinderException("GQL COLLECT_LIST requires one argument");
+			}
+			result->result_type = {GqlTypeId::LIST, false};
+			return result;
+		}
 		if (name == "count") {
 			result->result_type = {GqlTypeId::INTEGER, false};
 			return result;

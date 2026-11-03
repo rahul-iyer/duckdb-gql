@@ -1,0 +1,11 @@
+
+MATCH (source:Person)-[:KNOWS]->{1,2}(friend:Person),
+      (friend)-[work:WORK_AT]->(organisation:Organisation)-[:IS_LOCATED_IN]->(country:Country)
+WHERE source.id = 1131
+  AND friend.id <> source.id
+  AND work.workFrom < 2011
+  AND country.name = 'Hungary'
+RETURN DISTINCT friend.id, friend.firstName, friend.lastName,
+       organisation.name, work.workFrom
+ORDER BY work.workFrom ASC, friend.id ASC, organisation.name DESC
+LIMIT 10;

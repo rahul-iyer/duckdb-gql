@@ -1,0 +1,61 @@
+# name: test/sql/gql_mapped_label_postings.test
+# description: Independent selective label frontiers fetch projected rows with sparse reordered IDs
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT i AS ":ID",i AS "id:int",'node-' || i AS "name:string",
+ repeat('unused',100) AS "wide:string",CASE WHEN i<4 THEN 'Rare' ELSE 'Common' END AS ":LABEL"
+ FROM range(1,4097) t(i)) TO '{TEST_DIR}/posting_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R'),(1,2,'R'),(2,3,'R'),(3,4,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/posting_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH mapped_postings ANY
+
+statement ok
+COPY GRAPH mapped_postings FROM (VERTICES '{TEST_DIR}/posting_nodes.csv', EDGES '{TEST_DIR}/posting_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH mapped_postings
+
+statement ok
+UPDATE gql_data.graph_1_vertices SET __gql_id=10000-__gql_id
+
+statement ok
+UPDATE gql_data.graph_1_edges SET __gql_source_id=10000-__gql_source_id,__gql_target_id=10000-__gql_target_id
+
+statement ok
+CALL gql_build_csr('mapped_postings')
+
+query TT rowsort
+MATCH (a:Rare),(a)-[:R]->(b:Rare) WHERE b.id>1
+RETURN a.name,b.name
+----
+node-1	node-2
+node-1	node-2
+node-2	node-3
+
+query I
+SELECT count(*)>0 FROM gql_optimizer_plan() WHERE access_path='LABEL_POSTING_FETCH'
+----
+true
+
+statement ok
+UPDATE gql_data.graph_1_vertices SET name='changed' WHERE id=2
+
+statement ok
+CALL gql_build_csr('mapped_postings')
+
+query TT rowsort
+MATCH (a:Rare),(a)-[:R]->(b:Rare) WHERE b.id>1
+RETURN a.name,b.name
+----
+changed	node-3
+node-1	changed
+node-1	changed

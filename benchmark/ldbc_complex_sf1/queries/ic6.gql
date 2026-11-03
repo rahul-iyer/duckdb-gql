@@ -1,0 +1,13 @@
+
+MATCH (source:Person)-[:KNOWS]->{1,2}(friend:Person),
+      (post:Post)-[:HAS_CREATOR]->(friend),
+      (post)-[:HAS_TAG]->(tag:Tag),
+      (post)-[:HAS_TAG]->(required_tag:Tag)
+WHERE source.id = 1131
+  AND friend.id <> source.id
+  AND tag.name <> 'Carl_Gustaf_Emil_Mannerheim'
+  AND required_tag.name = 'Carl_Gustaf_Emil_Mannerheim'
+RETURN tag.name, COUNT(DISTINCT post.id) AS postCount
+GROUP BY tag
+ORDER BY postCount DESC, tag.name ASC
+LIMIT 10;

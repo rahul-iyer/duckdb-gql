@@ -15,5 +15,6 @@ unique_ptr<ParsedExpression> GqlLowerProjectedExpression(const GqlBoundExpressio
 TableFunction GqlRelationalMatchFunction();
 TableFunction GqlRecursiveMatchFunction();
 ScalarFunction GqlTrailUniqueFunction();
+ScalarFunction GqlFloatCastFunction();
 
 } // namespace duckdb

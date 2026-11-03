@@ -1,6 +1,7 @@
 #include "gql_csr.hpp"
 
 #include "gql_catalog.hpp"
+#include "gql_optimizer.hpp"
 #include "gql_sql_utils.hpp"
 #include "gql_storage.hpp"
 
@@ -9,7 +10,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_context.hpp"
+#include "duckdb/function/function_set.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
@@ -21,6 +24,7 @@
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/object_cache.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 
 #include <algorithm>
@@ -95,10 +99,17 @@ static void AdvanceCsrTableWriteGeneration(ClientContext &context, const string 
 }
 
 struct GqlCsrWriteObserverState : ClientContextState {
+	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
+		if (transaction.ModifiedDatabase()) {
+			GqlInvalidateTableGraphCache(context);
+		}
+	}
+
 	RebindQueryInfo OnRebindPreparedStatement(ClientContext &context, BindPreparedStatementCallbackInfo &info,
 	                                          RebindQueryInfo current_rebind) override {
 		if (!info.prepared_statement.properties.IsReadOnly()) {
 			AdvanceCsrWriteGeneration(context);
+			GqlInvalidateTableGraphCache(context);
 		}
 		return current_rebind;
 	}
@@ -160,8 +171,8 @@ static shared_ptr<GqlDerivedGraphStorageState> GetDerivedGraphStorageState(Clien
 }
 
 struct GraphVersion {
-	uint64_t graph_id;
-	uint64_t graph_version;
+	uint64_t graph_id = 0;
+	uint64_t graph_version = 0;
 	bool has_source_snapshot = false;
 	uint64_t source_snapshot_id = 0;
 	string source_catalog;
@@ -326,6 +337,16 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	snapshot->write_generation = ReadCsrWriteGeneration(context);
 	snapshot->vertex_table_key =
 	    CsrTableKey(binding.vertex.catalog_name, binding.vertex.schema_name, binding.vertex.table_name);
+	if (StringUtil::CIEquals(binding.vertex.ownership, "MANAGED")) {
+		snapshot->vertex_catalog_name = binding.vertex.catalog_name;
+		snapshot->vertex_schema_name = binding.vertex.schema_name;
+		snapshot->vertex_table_name = binding.vertex.table_name;
+	}
+	if (StringUtil::CIEquals(binding.edge.ownership, "MANAGED")) {
+		snapshot->edge_catalog_name = binding.edge.catalog_name;
+		snapshot->edge_schema_name = binding.edge.schema_name;
+		snapshot->edge_table_name = binding.edge.table_name;
+	}
 	snapshot->edge_table_key =
 	    CsrTableKey(binding.edge.catalog_name, binding.edge.schema_name, binding.edge.table_name);
 	snapshot->vertex_write_generation = ReadCsrTableWriteGeneration(context, snapshot->vertex_table_key);
@@ -351,8 +372,18 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	snapshot->source_snapshot_id = graph.source_snapshot_id;
 	snapshot->source_catalog = graph.source_catalog;
 
-	auto vertex_count = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + QualifiedTable(binding.vertex));
+	const bool managed_vertices = StringUtil::CIEquals(binding.vertex.ownership, "MANAGED");
+	const bool build_vertex_row_ids = managed_vertices && (capabilities & GQL_CSR_VERTEX_ROW_IDS);
+	auto vertex_count = GqlQuery(connection, "SELECT count(*)::UBIGINT" +
+	                                            string(build_vertex_row_ids ? ", coalesce(max(rowid), 0)::UBIGINT" : "") +
+	                                            " FROM " + QualifiedTable(binding.vertex));
 	snapshot->vertex_ids.reserve(NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()));
+	if (build_vertex_row_ids) {
+		snapshot->has_vertex_row_ids = true;
+		snapshot->vertex_row_ids.Resize(NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()),
+		                                vertex_count->GetValue(1, 0).GetValue<uint64_t>() <=
+		                                    std::numeric_limits<uint32_t>::max());
+	}
 	string vertex_label_projection = "CAST(NULL AS VARCHAR[])";
 	if (build_vertex_labels && !binding.vertex.static_labels.empty()) {
 		vertex_label_projection = "[";
@@ -401,6 +432,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				throw InvalidInputException("Table-backed CSR vertex keys must not contain NULL values");
 			}
 			auto vertex_id = ids[index];
+			if (build_vertex_row_ids) {
+				snapshot->vertex_row_ids.Set(snapshot->vertex_ids.size(), row_ids[row_id_index]);
+			}
 			snapshot->vertex_ids_match_rowids =
 			    snapshot->vertex_ids_match_rowids && vertex_id > 0 && row_ids[row_id_index] == vertex_id - 1;
 			if (!snapshot->vertex_ids.empty() && snapshot->vertex_ids.back() == vertex_id) {
@@ -431,6 +465,10 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				snapshot->vertex_label_offsets.push_back(snapshot->vertex_label_ids.size());
 			}
 		}
+	}
+	if (snapshot->vertex_ids_match_rowids) {
+		// Preserve the zero-allocation shortcut for ordered managed tables.
+		snapshot->vertex_row_ids = GqlCsrOrdinals();
 	}
 	snapshot->dense_vertex_ids = true;
 	for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
@@ -805,6 +843,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    snapshot->incoming_offsets.capacity() * sizeof(uint64_t) + snapshot->incoming_neighbors.AllocatedBytes() +
 	    snapshot->outgoing_degrees.AllocatedBytes();
 	snapshot->identity_bytes = snapshot->vertex_ids.AllocatedBytes() +
+	                           snapshot->vertex_row_ids.AllocatedBytes() +
 	                           snapshot->outgoing_edge_ids.capacity() * sizeof(uint64_t) +
 	                           snapshot->incoming_edge_ids.capacity() * sizeof(uint64_t);
 	snapshot->label_bytes =
@@ -822,6 +861,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->source_write_generations);
 	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->label_fanout_stats);
 	snapshot->auxiliary_bytes += snapshot->endpoint_statistics_status.capacity();
+	snapshot->auxiliary_bytes += snapshot->vertex_catalog_name.capacity() + snapshot->vertex_schema_name.capacity() +
+	                             snapshot->vertex_table_name.capacity() + snapshot->edge_catalog_name.capacity() +
+	                             snapshot->edge_schema_name.capacity() + snapshot->edge_table_name.capacity();
 	if (snapshot->endpoint_statistics)
 		snapshot->auxiliary_bytes += snapshot->endpoint_statistics->AllocatedBytes();
 	for (const auto &source : snapshot->source_write_generations) {
@@ -843,20 +885,24 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	return snapshot;
 }
 
-static bool CsrSnapshotIsCurrent(ClientContext &context, const GqlCsrSnapshot &snapshot, const GraphVersion &graph) {
+static bool CsrSnapshotSourcesAreCurrent(ClientContext &context, const GqlCsrSnapshot &snapshot) {
 	for (const auto &source : snapshot.source_write_generations) {
 		if (source.second != ReadCsrTableWriteGeneration(context, source.first)) {
 			return false;
 		}
 	}
 
-	return snapshot.graph_id == graph.graph_id && snapshot.graph_version == graph.graph_version &&
-	       snapshot.has_source_snapshot == graph.has_source_snapshot &&
-	       (!snapshot.has_source_snapshot || (snapshot.source_snapshot_id == graph.source_snapshot_id &&
-	                                          StringUtil::CIEquals(snapshot.source_catalog, graph.source_catalog))) &&
-	       snapshot.write_generation == ReadCsrWriteGeneration(context) &&
+	return snapshot.write_generation == ReadCsrWriteGeneration(context) &&
 	       snapshot.vertex_write_generation == ReadCsrTableWriteGeneration(context, snapshot.vertex_table_key) &&
 	       snapshot.edge_write_generation == ReadCsrTableWriteGeneration(context, snapshot.edge_table_key);
+}
+
+static bool CsrSnapshotIsCurrent(ClientContext &context, const GqlCsrSnapshot &snapshot, const GraphVersion &graph) {
+	return CsrSnapshotSourcesAreCurrent(context, snapshot) && snapshot.graph_id == graph.graph_id &&
+	       snapshot.graph_version == graph.graph_version &&
+	       snapshot.has_source_snapshot == graph.has_source_snapshot &&
+	       (!snapshot.has_source_snapshot || (snapshot.source_snapshot_id == graph.source_snapshot_id &&
+	                                          StringUtil::CIEquals(snapshot.source_catalog, graph.source_catalog)));
 }
 
 static shared_ptr<GqlCsrSnapshot>
@@ -892,8 +938,12 @@ static shared_ptr<GqlCsrSnapshot> GetPreparedTableSnapshot(ClientContext &contex
                                                            GqlDerivedGraphStorageState &storage,
                                                            GqlCsrCapabilities required_capabilities,
                                                            const string &weight_property = string()) {
-	Connection connection(*context.db);
-	auto graph = ReadGraphVersion(connection, graph_name);
+	// A cached binding implies a managed graph, which has no source snapshot.
+	GraphVersion graph;
+	if (!GqlTryGetCachedGraphVersion(context, graph_name, graph.graph_id, graph.graph_version)) {
+		Connection connection(*context.db);
+		graph = ReadGraphVersion(connection, graph_name);
+	}
 	lock_guard<mutex> guard(storage.lock);
 	auto snapshot = FindPreparedTableSnapshotLocked(context, storage, graph, required_capabilities, weight_property);
 	if (snapshot) {
@@ -946,13 +996,46 @@ static uint64_t ReadCsrBuildCount(GqlDerivedGraphStorageState &storage) {
 	return storage.build_count;
 }
 
+uint64_t GqlCsrBuildCount(ClientContext &context) {
+	return ReadCsrBuildCount(*GetDerivedGraphStorageState(context));
+}
+
+struct GqlCsrQueryLeases : ClientContextState {
+	mutex lock;
+	unordered_map<string, shared_ptr<const GqlCsrSnapshot>> snapshots;
+
+	void QueryEnd() override {
+		lock_guard<mutex> guard(lock);
+		snapshots.clear();
+	}
+};
+
+static shared_ptr<const GqlCsrSnapshot> AcquireFullSnapshot(ClientContext &context, const string &graph_name,
+                                                           GqlDerivedGraphStorageState &storage) {
+	auto leases = context.registered_state->GetOrCreate<GqlCsrQueryLeases>("gql_csr_query_leases");
+	lock_guard<mutex> guard(leases->lock);
+	auto entry = leases->snapshots.find(graph_name);
+	if (entry != leases->snapshots.end() && CsrSnapshotSourcesAreCurrent(context, *entry->second)) {
+		return entry->second;
+	}
+	auto snapshot = GetPreparedTableSnapshot(context, graph_name, storage, GQL_CSR_FULL);
+	// A managed graph's lease is shared by binding and physical operators only
+	// within this statement. Recheck write generations on reuse and clear it at
+	// QueryEnd. External LIVE snapshots retain their version checks on every
+	// acquisition, since their changes need not pass through our write observer.
+	if (!snapshot->vertex_table_name.empty() && !snapshot->edge_table_name.empty() && !snapshot->has_source_snapshot) {
+		leases->snapshots[graph_name] = snapshot;
+	}
+	return snapshot;
+}
+
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name) {
 	if (!context.transaction.IsAutoCommit()) {
 		throw NotImplementedException("CSR algorithms are not eligible inside an explicit transaction");
 	}
 	auto storage = GetDerivedGraphStorageState(context);
 	storage->acquisition_count++;
-	return GetPreparedTableSnapshot(context, graph_name, *storage, GQL_CSR_FULL);
+	return AcquireFullSnapshot(context, graph_name, *storage);
 }
 
 shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context, const string &graph_name,
@@ -1016,7 +1099,7 @@ shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, co
 	}
 	auto storage = GetDerivedGraphStorageState(context);
 	try {
-		return GetPreparedTableSnapshot(context, graph_name, *storage, GQL_CSR_FULL);
+		return AcquireFullSnapshot(context, graph_name, *storage);
 	} catch (const InvalidInputException &) {
 		return nullptr;
 	}
@@ -1151,24 +1234,37 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
 }
 
 struct CsrExpandLocalState : LocalTableFunctionState {
+	CsrExpandLocalState() : selection(STANDARD_VECTOR_SIZE) {
+	}
+
 	shared_ptr<const GqlCsrSnapshot> snapshot;
 	string graph_name;
+	string direction;
 	string edge_label;
+	string raw_edge_label;
+	string raw_neighbor_label;
+	//! Input row whose adjacency range is being emitted, and the next one to start.
+	idx_t current_row = 0;
+	idx_t next_row = 0;
 	idx_t cursor = 0;
 	idx_t end = 0;
-	bool initialized = false;
+	bool input_ready = false;
 	bool active = false;
 	bool outgoing = true;
 	bool label_exists = true;
 	uint32_t label_id = 0;
+	bool filter_neighbors = false;
+	bool neighbor_label_exists = true;
+	vector<uint32_t> neighbor_label_ids;
 	uint64_t vertex_id = 0;
+	SelectionVector selection;
 };
 
 static unique_ptr<FunctionData> CsrExpandBind(ClientContext &, TableFunctionBindInput &,
                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type"};
 	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR};
-	return make_uniq<TableFunctionData>();
+	return make_uniq<GqlBatchedInOutBindData>();
 }
 
 struct CsrExpandGlobalState : GlobalTableFunctionState {
@@ -1201,104 +1297,180 @@ AcquireCsrOperatorSnapshot(ExecutionContext &context, CsrExpandGlobalState &glob
 	return snapshot;
 }
 
-static void ResetCsrExpansionInput(CsrExpandLocalState &state) {
-	state.cursor = 0;
-	state.end = 0;
-	state.initialized = false;
-	state.active = false;
-	state.outgoing = true;
-	state.vertex_id = 0;
+static bool SameString(const string_t &value, const string &other) {
+	return value.GetSize() == other.size() && memcmp(value.GetData(), other.data(), other.size()) == 0;
 }
 
-static void InitializeCsrExpansion(ExecutionContext &context, DataChunk &input, CsrExpandGlobalState &global,
-                                   CsrExpandLocalState &state) {
-	if (input.size() != 1 || input.ColumnCount() != 1) {
-		throw InternalException("GQL CSR expansion requires one lateral input row");
+// Emits the input columns a lateral join expects back, aligned with the output.
+static void EmitBatchedPassthrough(const GqlBatchedInOutBindData &bind, DataChunk &input, DataChunk &output,
+                                   const SelectionVector &selection, idx_t count) {
+	const auto base = output.ColumnCount() - bind.passthrough_input.size();
+	for (idx_t index = 0; index < bind.passthrough_input.size(); index++) {
+		output.data[base + index].Slice(input.data[bind.passthrough_input[index]], selection, count);
 	}
-	auto packed = input.data[0].GetValue(0);
-	if (packed.IsNull()) {
-		state.initialized = true;
-		return;
+}
+
+//! Starts the adjacency range of one input row. Returns false when the row
+//! changes the edge label, so the caller can flush its constant type column.
+static bool BeginCsrExpansionRow(ExecutionContext &context, const DataChunk &input, idx_t row, idx_t emitted,
+                                 CsrExpandGlobalState &global, CsrExpandLocalState &state) {
+	state.active = false;
+	if (!FlatVector::Validity(input.data[0]).RowIsValid(row)) {
+		return true;
 	}
-	auto &fields = StructValue::GetChildren(packed);
-	if (fields.size() != 4 || fields[0].IsNull() || fields[2].IsNull() || fields[3].IsNull()) {
+	auto &fields = StructVector::GetEntries(input.data[0]);
+	if (fields.size() < 4 || !FlatVector::Validity(fields[0]).RowIsValid(row) ||
+	    !FlatVector::Validity(fields[2]).RowIsValid(row) || !FlatVector::Validity(fields[3]).RowIsValid(row)) {
 		throw InvalidInputException("GQL CSR expansion requires graph, direction, and edge label");
 	}
-	auto graph_name = fields[0].GetValue<string>();
-	auto direction = StringUtil::Lower(fields[2].GetValue<string>());
-	auto edge_label = StringUtil::Lower(fields[3].GetValue<string>());
-	if (direction != "out" && direction != "in") {
-		throw InvalidInputException("GQL CSR expansion direction must be 'out' or 'in'");
+	const auto &raw_label = FlatVector::GetData<string_t>(fields[3])[row];
+	if (emitted > 0 && !SameString(raw_label, state.raw_edge_label)) {
+		return false;
 	}
-	if (edge_label.empty()) {
-		throw InvalidInputException("GQL CSR expansion requires one edge label");
+	const auto &raw_direction = FlatVector::GetData<string_t>(fields[2])[row];
+	if (!SameString(raw_direction, state.direction)) {
+		state.direction = raw_direction.GetString();
+		auto direction = StringUtil::Lower(state.direction);
+		if (direction != "out" && direction != "in") {
+			throw InvalidInputException("GQL CSR expansion direction must be 'out' or 'in'");
+		}
+		state.outgoing = direction == "out";
 	}
-	state.outgoing = direction == "out";
-	if (!state.snapshot || state.graph_name != graph_name) {
-		state.snapshot = AcquireCsrOperatorSnapshot(context, global, graph_name);
-		state.graph_name = std::move(graph_name);
+	const auto &raw_graph = FlatVector::GetData<string_t>(fields[0])[row];
+	if (!state.snapshot || !SameString(raw_graph, state.graph_name)) {
+		state.graph_name = raw_graph.GetString();
+		state.snapshot = AcquireCsrOperatorSnapshot(context, global, state.graph_name);
+		state.raw_edge_label.clear();
 		state.edge_label.clear();
+		state.raw_neighbor_label.clear();
+		state.filter_neighbors = false;
+		state.neighbor_label_exists = true;
 	}
-	if (state.edge_label != edge_label) {
-		state.edge_label = std::move(edge_label);
+	if (state.edge_label.empty() || !SameString(raw_label, state.raw_edge_label)) {
+		state.raw_edge_label = raw_label.GetString();
+		state.edge_label = StringUtil::Lower(state.raw_edge_label);
+		if (state.edge_label.empty()) {
+			throw InvalidInputException("GQL CSR expansion requires one edge label");
+		}
 		auto label = state.snapshot->label_ids.find(state.edge_label);
 		state.label_exists = label != state.snapshot->label_ids.end();
 		state.label_id = state.label_exists ? label->second : 0;
 	}
-	if (fields[1].IsNull()) {
-		state.initialized = true;
-		return;
+	if (fields.size() == 5 && !FlatVector::Validity(fields[4]).RowIsValid(row)) {
+		state.raw_neighbor_label.clear();
+		state.filter_neighbors = false;
+		state.neighbor_label_exists = true;
+	} else if (fields.size() == 5) {
+		const auto &raw_neighbor = FlatVector::GetData<string_t>(fields[4])[row];
+		if (!SameString(raw_neighbor, state.raw_neighbor_label)) {
+			state.raw_neighbor_label = raw_neighbor.GetString();
+			const auto &snapshot = *state.snapshot;
+			state.neighbor_label_exists = true;
+			state.neighbor_label_ids.clear();
+			for (const auto &name : StringUtil::Split(state.raw_neighbor_label, ';')) {
+				auto label = snapshot.label_ids.find(StringUtil::Lower(name));
+				state.neighbor_label_exists &= label != snapshot.label_ids.end();
+				if (label != snapshot.label_ids.end()) {
+					state.neighbor_label_ids.push_back(label->second);
+				}
+			}
+			state.filter_neighbors = GqlCsrHasVertexLabels(snapshot);
+		}
 	}
-	state.vertex_id = fields[1].GetValue<uint64_t>();
+	if (!FlatVector::Validity(fields[1]).RowIsValid(row)) {
+		return true;
+	}
+	state.vertex_id = FlatVector::GetData<uint64_t>(fields[1])[row];
 	idx_t vertex;
 	if (!GqlTryGetCsrOrdinal(*state.snapshot, state.vertex_id, vertex)) {
-		state.initialized = true;
-		return;
+		return true;
 	}
 	const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
 	state.cursor = offsets[vertex];
 	state.end = offsets[vertex + 1];
-	state.active = state.label_exists;
-	state.initialized = true;
+	state.active = state.label_exists && (!state.filter_neighbors || state.neighbor_label_exists);
+	state.current_row = row;
+	return true;
 }
 
+// Emits whole vectors across input rows. Stopping after each seed would make all
+// downstream operators run a vectorized loop per seed instead of per 2048 rows.
 static OperatorResultType CsrExpandFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
                                             DataChunk &output) {
 	auto &state = data_p.local_state->Cast<CsrExpandLocalState>();
-	if (!state.initialized) {
-		auto &global = data_p.global_state->Cast<CsrExpandGlobalState>();
-		InitializeCsrExpansion(context, input, global, state);
+	auto &global = data_p.global_state->Cast<CsrExpandGlobalState>();
+	auto &bind = data_p.bind_data->Cast<GqlBatchedInOutBindData>();
+	if (input.ColumnCount() < 1) {
+		throw InternalException("GQL CSR expansion requires a struct input column");
 	}
-	if (!state.active) {
-		ResetCsrExpansionInput(state);
-		return OperatorResultType::NEED_MORE_INPUT;
+	if (!state.input_ready) {
+		input.data[0].Flatten();
+		state.next_row = 0;
+		state.active = false;
+		state.input_ready = true;
 	}
-
-	const auto &neighbors = state.outgoing ? state.snapshot->outgoing_neighbors : state.snapshot->incoming_neighbors;
-	const auto &edge_ids = state.outgoing ? state.snapshot->outgoing_edge_ids : state.snapshot->incoming_edge_ids;
-	const auto &label_ids = state.outgoing ? state.snapshot->outgoing_label_ids : state.snapshot->incoming_label_ids;
+	auto edge_output = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto source_output = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto target_output = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
 	idx_t count = 0;
-	while (state.cursor < state.end && count < STANDARD_VECTOR_SIZE) {
-		auto index = state.cursor++;
-		if (label_ids[index] != state.label_id) {
-			continue;
+	bool label_changed = false;
+	while (count < STANDARD_VECTOR_SIZE) {
+		if (!state.active) {
+			if (state.next_row >= input.size()) {
+				break;
+			}
+			if (!BeginCsrExpansionRow(context, input, state.next_row, count, global, state)) {
+				label_changed = true;
+				break;
+			}
+			state.next_row++;
+			if (!state.active) {
+				continue;
+			}
 		}
-		auto neighbor_id = state.snapshot->vertex_ids[neighbors[index]];
-		output.SetValue(0, count, Value::UBIGINT(edge_ids[index]));
-		output.SetValue(1, count, Value::UBIGINT(state.outgoing ? state.vertex_id : neighbor_id));
-		output.SetValue(2, count, Value::UBIGINT(state.outgoing ? neighbor_id : state.vertex_id));
-		output.SetValue(3, count, Value(state.edge_label));
-		count++;
+		const auto &snapshot = *state.snapshot;
+		const auto &neighbors = state.outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
+		const auto &edge_ids = state.outgoing ? snapshot.outgoing_edge_ids : snapshot.incoming_edge_ids;
+		const auto &label_ids = state.outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
+		while (state.cursor < state.end && count < STANDARD_VECTOR_SIZE) {
+			auto index = state.cursor++;
+			if (label_ids[index] != state.label_id) {
+				continue;
+			}
+			if (state.filter_neighbors) {
+				const auto neighbor = neighbors[index];
+				const auto labels_begin = snapshot.vertex_label_ids.begin() + snapshot.vertex_label_offsets[neighbor];
+				const auto labels_end = snapshot.vertex_label_ids.begin() + snapshot.vertex_label_offsets[neighbor + 1];
+				bool matches = true;
+				for (const auto required : state.neighbor_label_ids) {
+					matches = matches && std::find(labels_begin, labels_end, required) != labels_end;
+				}
+				if (!matches) {
+					continue;
+				}
+			}
+			auto neighbor_id = snapshot.vertex_ids[neighbors[index]];
+			edge_output[count] = edge_ids[index];
+			source_output[count] = state.outgoing ? state.vertex_id : neighbor_id;
+			target_output[count] = state.outgoing ? neighbor_id : state.vertex_id;
+			state.selection.set_index(count, state.current_row);
+			count++;
+		}
+		state.active = state.cursor < state.end;
+	}
+	if (count > 0) {
+		output.data[3].Reference(Value(state.edge_label), count_t(count));
+		EmitBatchedPassthrough(bind, input, output, state.selection, count);
 	}
 	output.SetChildCardinality(count);
-	if (state.cursor < state.end) {
+	if (label_changed || state.active || state.next_row < input.size()) {
 		return OperatorResultType::HAVE_MORE_OUTPUT;
 	}
-	ResetCsrExpansionInput(state);
+	state.input_ready = false;
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
-struct ElementFetchBindData : TableFunctionData {
+struct ElementFetchBindData : GqlBatchedInOutBindData {
 	ElementFetchBindData(string graph_name_p, string element_kind_p, TableCatalogEntry &table_p)
 	    : graph_name(std::move(graph_name_p)), element_kind(std::move(element_kind_p)), table(table_p) {
 	}
@@ -1307,13 +1479,15 @@ struct ElementFetchBindData : TableFunctionData {
 		auto result = make_uniq<ElementFetchBindData>(graph_name, element_kind, table);
 		result->column_ids = column_ids;
 		result->projected = projected;
+		result->passthrough_input = passthrough_input;
 		return std::move(result);
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<ElementFetchBindData>();
 		return graph_name == other.graph_name && element_kind == other.element_kind && &table == &other.table &&
-		       column_ids == other.column_ids && projected == other.projected;
+		       column_ids == other.column_ids && projected == other.projected &&
+		       passthrough_input == other.passthrough_input;
 	}
 
 	string graph_name;
@@ -1329,21 +1503,21 @@ static unique_ptr<FunctionData> ElementFetchBind(ClientContext &context, TableFu
 	const bool projected = input.table_function.GetName() == "gql_vertex_fetch_projected";
 	string element_kind = input.table_function.GetName() == "gql_vertex_fetch" || projected ? "vertex" : "edge";
 
-	GqlTableGraphBinding graph;
-	if (!GqlTryLoadTableGraph(context, graph_name, graph)) {
-		throw BinderException("GQL element fetch requires a table-backed graph");
-	}
+	// The prepared snapshot already records the native managed table. Reloading
+	// all graph metadata here repeats catalog SQL for every projected fetch.
 	auto snapshot = GqlGetCsrSnapshot(context, graph_name);
-	auto &binding = element_kind == "vertex" ? graph.vertex : graph.edge;
-	auto ids_match_rowids =
-	    element_kind == "vertex" ? snapshot->vertex_ids_match_rowids : snapshot->edge_ids_match_rowids;
-	if (!StringUtil::CIEquals(binding.ownership, "MANAGED") || !ids_match_rowids) {
-		throw BinderException("GQL element fetch requires managed canonical IDs that match physical row IDs");
+	const bool vertex = element_kind == "vertex";
+	const auto &catalog_name = vertex ? snapshot->vertex_catalog_name : snapshot->edge_catalog_name;
+	const auto &schema_name = vertex ? snapshot->vertex_schema_name : snapshot->edge_schema_name;
+	const auto &table_name = vertex ? snapshot->vertex_table_name : snapshot->edge_table_name;
+	auto has_row_ids = element_kind == "vertex" ? snapshot->HasVertexRowIds() : snapshot->edge_ids_match_rowids;
+	if (table_name.empty() || !has_row_ids) {
+		throw BinderException("GQL element fetch requires a managed graph with a current physical row mapping");
 	}
 
-	auto &catalog = Catalog::GetCatalog(context, Identifier(binding.catalog_name));
-	auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(binding.schema_name),
-	                                    Identifier(binding.table_name), OnEntryNotFound::THROW_EXCEPTION);
+	auto &catalog = Catalog::GetCatalog(context, Identifier(catalog_name));
+	auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(schema_name),
+	                                    Identifier(table_name), OnEntryNotFound::THROW_EXCEPTION);
 	auto &table = table_entry->Cast<TableCatalogEntry>();
 	if (!table.IsDuckTable()) {
 		throw BinderException("GQL element fetch requires native DuckDB table storage");
@@ -1384,11 +1558,15 @@ struct ElementFetchGlobalState : GlobalTableFunctionState {
 
 	TableCatalogEntry &table;
 	vector<StorageIndex> column_ids;
+	shared_ptr<const GqlCsrSnapshot> snapshot;
 };
 
-static unique_ptr<GlobalTableFunctionState> ElementFetchGlobalInit(ClientContext &, TableFunctionInitInput &input) {
+static unique_ptr<GlobalTableFunctionState> ElementFetchGlobalInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<ElementFetchBindData>();
 	auto result = make_uniq<ElementFetchGlobalState>(data.table);
+	// Validate once per execution, then pin the immutable identity mapping for
+	// all lateral batches. Writes invalidate the snapshot before the next query.
+	result->snapshot = GqlGetCsrSnapshot(context, data.graph_name);
 	for (const auto &column : input.column_indexes) {
 		if (column.IsVirtualColumn()) {
 			throw NotImplementedException("GQL element fetch does not expose virtual columns");
@@ -1400,8 +1578,13 @@ static unique_ptr<GlobalTableFunctionState> ElementFetchGlobalInit(ClientContext
 }
 
 struct ElementFetchLocalState : LocalTableFunctionState {
+	ElementFetchLocalState() : selection(STANDARD_VECTOR_SIZE) {
+	}
+
 	ColumnFetchState fetch_state;
+	vector<pair<row_t, sel_t>> requests;
 	vector<row_t> row_ids;
+	SelectionVector selection;
 	bool emitted = false;
 };
 
@@ -1410,51 +1593,229 @@ static unique_ptr<LocalTableFunctionState> ElementFetchLocalInit(ExecutionContex
 	return make_uniq<ElementFetchLocalState>();
 }
 
+// Storage merges consecutive row IDs of one row group, so a sorted batch decodes
+// each segment once. A chunk stays bounded by the vector size of its input.
 static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
                                                DataChunk &output) {
 	auto &local = data_p.local_state->Cast<ElementFetchLocalState>();
+	auto &bind = data_p.bind_data->Cast<ElementFetchBindData>();
+	auto &global = data_p.global_state->Cast<ElementFetchGlobalState>();
+	// A constant-argument call repeats on the same input until a call returns no
+	// rows, so every chunk of rows must be followed by an empty NEED_MORE_INPUT.
 	if (local.emitted) {
 		local.emitted = false;
+		output.SetChildCardinality(0);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
-	if (input.ColumnCount() != 1) {
-		throw InternalException("GQL element fetch requires one canonical-ID input column");
-	}
-	local.row_ids.clear();
-	local.row_ids.reserve(input.size());
-	auto &bind = data_p.bind_data->Cast<ElementFetchBindData>();
-	if (bind.projected) {
-		// Resolve dictionary/constant selection before accessing the ID child.
-		input.data[0].Flatten(input.size());
-	}
-	auto &ids = bind.projected ? StructVector::GetEntries(input.data[0])[0] : input.data[0];
+	input.data[0].Flatten();
+	const auto &id_vector = bind.projected ? StructVector::GetEntries(input.data[0])[0] : input.data[0];
+	const auto ids = FlatVector::GetData<uint64_t>(id_vector);
+	const auto &id_validity = FlatVector::Validity(id_vector);
+	const auto &input_validity = FlatVector::Validity(input.data[0]);
+	const bool vertex = bind.element_kind == "vertex";
+	local.requests.clear();
 	for (idx_t row = 0; row < input.size(); row++) {
-		if (bind.projected && !FlatVector::Validity(input.data[0]).RowIsValid(row)) {
+		if (!input_validity.RowIsValid(row) || !id_validity.RowIsValid(row)) {
 			continue;
 		}
-		auto element_id = ids.GetValue(row);
-		if (element_id.IsNull()) {
-			continue;
-		}
-		auto canonical_id = element_id.GetValue<uint64_t>();
-		if (canonical_id != 0) {
-			local.row_ids.push_back(NumericCast<row_t>(canonical_id - 1));
+		const auto canonical_id = ids[row];
+		if (vertex) {
+			idx_t ordinal;
+			if (!GqlTryGetCsrOrdinal(*global.snapshot, canonical_id, ordinal)) {
+				continue;
+			}
+			auto row_id = global.snapshot->vertex_ids_match_rowids ? canonical_id - 1
+			                                                       : global.snapshot->vertex_row_ids[ordinal];
+			local.requests.emplace_back(NumericCast<row_t>(row_id), NumericCast<sel_t>(row));
+		} else if (canonical_id != 0) {
+			local.requests.emplace_back(NumericCast<row_t>(canonical_id - 1), NumericCast<sel_t>(row));
 		}
 	}
-	if (local.row_ids.empty()) {
+	if (local.requests.empty()) {
+		output.SetChildCardinality(0);
 		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	std::sort(local.requests.begin(), local.requests.end());
+	local.row_ids.resize(local.requests.size());
+	for (idx_t index = 0; index < local.requests.size(); index++) {
+		local.row_ids[index] = local.requests[index].first;
+		local.selection.set_index(index, local.requests[index].second);
 	}
 
-	auto &global = data_p.global_state->Cast<ElementFetchGlobalState>();
 	auto &table = global.table.Cast<DuckTableEntry>();
+	auto &storage = table.GetStorage();
 	auto &transaction = DuckTransaction::Get(context.client, table.catalog);
 	Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(local.row_ids.data()), local.row_ids.size());
-	table.GetStorage().Fetch(transaction, output, global.column_ids, row_ids, local.row_ids.size(), local.fetch_state);
-	if (output.size() == 0) {
+	storage.Fetch(transaction, output, global.column_ids, row_ids, local.row_ids.size(), local.fetch_state);
+	auto count = output.size();
+	if (count != local.row_ids.size() && !bind.passthrough_input.empty()) {
+		// Fetch packs its result when a row is invisible to this transaction, which
+		// loses the row-to-seed alignment. Recover it by fetching rows individually.
+		vector<LogicalType> fetched_types;
+		for (idx_t column = 0; column < global.column_ids.size(); column++) {
+			fetched_types.push_back(output.data[column].GetType());
+		}
+		DataChunk single;
+		single.Initialize(Allocator::Get(context.client), fetched_types);
+		count = 0;
+		for (idx_t index = 0; index < local.row_ids.size(); index++) {
+			single.Reset();
+			Vector single_row_id(LogicalType::ROW_TYPE, data_ptr_cast(&local.row_ids[index]), 1);
+			storage.Fetch(transaction, single, global.column_ids, single_row_id, 1, local.fetch_state);
+			if (single.size() == 0) {
+				continue;
+			}
+			for (idx_t column = 0; column < fetched_types.size(); column++) {
+				VectorOperations::Copy(single.data[column], output.data[column], 1, 0, count);
+			}
+			local.selection.set_index(count, local.requests[index].second);
+			count++;
+		}
+	}
+	output.SetChildCardinality(count);
+	if (count == 0) {
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
+	EmitBatchedPassthrough(bind, input, output, local.selection, count);
+	output.SetChildCardinality(count);
 	local.emitted = true;
 	return OperatorResultType::HAVE_MORE_OUTPUT;
+}
+
+struct VertexLookupBindData : ElementFetchBindData {
+	using ElementFetchBindData::ElementFetchBindData;
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<VertexLookupBindData>(graph_name, element_kind, table);
+		result->column_ids = column_ids;
+		result->projected = projected;
+		result->index_column = index_column;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		return ElementFetchBindData::Equals(other_p) &&
+		       index_column == other_p.Cast<VertexLookupBindData>().index_column;
+	}
+
+	string index_column;
+};
+
+static unique_ptr<FunctionData> VertexLookupBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto graph_name = GqlGetSelectedGraph(context);
+	GqlTableGraphBinding binding;
+	if (!GqlTryLoadTableGraph(context, graph_name, binding) ||
+	    !StringUtil::CIEquals(binding.vertex.ownership, "MANAGED")) {
+		throw BinderException("GQL vertex lookup requires a managed graph");
+	}
+	auto &catalog = Catalog::GetCatalog(context, Identifier(binding.vertex.catalog_name));
+	auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(binding.vertex.schema_name),
+	                              Identifier(binding.vertex.table_name), OnEntryNotFound::THROW_EXCEPTION);
+	auto &table = entry->Cast<TableCatalogEntry>();
+	if (!table.IsDuckTable()) {
+		throw BinderException("GQL vertex lookup requires native DuckDB table storage");
+	}
+	if (input.input_table_types.size() != 1 || input.input_table_types[0].id() != LogicalTypeId::STRUCT) {
+		throw BinderException("GQL vertex lookup requires a value, index, and column-schema struct");
+	}
+	const auto &fields = StructType::GetChildTypes(input.input_table_types[0]);
+	if (fields.size() != 3 || fields[0].first != "value" || fields[1].first != "index" ||
+	    fields[1].second.id() != LogicalTypeId::STRUCT || fields[2].first != "columns" ||
+	    fields[2].second.id() != LogicalTypeId::STRUCT) {
+		throw BinderException("GQL vertex lookup requires value, index STRUCT, and columns STRUCT");
+	}
+	auto result = make_uniq<VertexLookupBindData>(std::move(graph_name), "vertex", table);
+	result->projected = true;
+	result->index_column = StructType::GetChildTypes(fields[1].second)[0].first.GetIdentifierName();
+	unordered_set<string> requested;
+	for (const auto &field : StructType::GetChildTypes(fields[2].second)) {
+		requested.insert(StringUtil::Lower(field.first.GetIdentifierName()));
+	}
+	for (const auto &column : table.GetColumns().Logical()) {
+		if (requested.erase(StringUtil::Lower(column.Name().GetIdentifierName())) == 0) {
+			continue;
+		}
+		names.push_back(column.Name());
+		return_types.push_back(column.Type());
+		result->column_ids.push_back(column.Logical().index);
+	}
+	if (!requested.empty()) {
+		throw BinderException("Unknown GQL vertex lookup column '%s'", *requested.begin());
+	}
+	return std::move(result);
+}
+
+static unique_ptr<GlobalTableFunctionState> VertexLookupGlobalInit(ClientContext &, TableFunctionInitInput &input) {
+	auto &data = input.bind_data->Cast<VertexLookupBindData>();
+	auto result = make_uniq<ElementFetchGlobalState>(data.table);
+	for (const auto &column : input.column_indexes) {
+		if (column.IsVirtualColumn()) {
+			throw NotImplementedException("GQL vertex lookup does not expose virtual columns");
+		}
+		auto mapped = ColumnIndex(data.column_ids.at(column.GetPrimaryIndex()), column.GetChildIndexes());
+		result->column_ids.push_back(data.table.GetStorageIndex(mapped));
+	}
+	return std::move(result);
+}
+
+struct VertexLookupLocalState : LocalTableFunctionState {
+	ColumnFetchState fetch_state;
+	vector<row_t> row_ids;
+	idx_t cursor = 0;
+	bool probed = false;
+};
+
+static unique_ptr<LocalTableFunctionState> VertexLookupLocalInit(ExecutionContext &, TableFunctionInitInput &,
+                                                                 GlobalTableFunctionState *) {
+	return make_uniq<VertexLookupLocalState>();
+}
+
+// Candidates only: Fetch applies visibility and the MATCH predicate stays above this.
+static OperatorResultType VertexLookupFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                               DataChunk &output) {
+	auto &local = data_p.local_state->Cast<VertexLookupLocalState>();
+	auto &bind = data_p.bind_data->Cast<VertexLookupBindData>();
+	auto &global = data_p.global_state->Cast<ElementFetchGlobalState>();
+	auto &table = global.table.Cast<DuckTableEntry>();
+	if (!local.probed) {
+		local.probed = true;
+		local.row_ids.clear();
+		local.cursor = 0;
+		input.data[0].Flatten();
+		const auto &values = StructVector::GetEntries(input.data[0])[0];
+		vector<idx_t> matches;
+		for (idx_t row = 0; row < input.size(); row++) {
+			auto value = values.GetValue(row);
+			if (value.IsNull()) {
+				continue;
+			}
+			matches.clear();
+			if (!GqlProbePropertyIndex(context.client, table, bind.index_column, value,
+			                           NumericLimits<idx_t>::Maximum(), matches)) {
+				throw InvalidInputException("GQL property index on '%s' is unavailable; prepare the statement again",
+				                            bind.index_column);
+			}
+			for (const auto match : matches) {
+				local.row_ids.push_back(NumericCast<row_t>(match));
+			}
+		}
+		std::sort(local.row_ids.begin(), local.row_ids.end());
+	}
+	// Each call that emits rows is followed by another, which ends this input when empty.
+	while (local.cursor < local.row_ids.size()) {
+		const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, local.row_ids.size() - local.cursor);
+		Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(local.row_ids.data() + local.cursor), count);
+		auto &transaction = DuckTransaction::Get(context.client, table.catalog);
+		table.GetStorage().Fetch(transaction, output, global.column_ids, row_ids, count, local.fetch_state);
+		local.cursor += count;
+		if (output.size() > 0) {
+			return OperatorResultType::HAVE_MORE_OUTPUT;
+		}
+	}
+	local.probed = false;
+	output.SetChildCardinality(0);
+	return OperatorResultType::NEED_MORE_INPUT;
 }
 
 struct CsrPathFrame {
@@ -1889,15 +2250,52 @@ TableFunction GqlCsrVerticesFunction() {
 	return function;
 }
 
-TableFunction GqlCsrExpandFunction() {
-	auto input_type = LogicalType::STRUCT({{"graph_name", LogicalType::VARCHAR},
-	                                       {"vertex_id", LogicalType::UBIGINT},
-	                                       {"direction", LogicalType::VARCHAR},
-	                                       {"edge_label", LogicalType::VARCHAR}});
-	TableFunction function("gql_csr_expand", {input_type}, nullptr, CsrExpandBind, CsrExpandGlobalInit,
-	                       CsrExpandLocalInit);
-	function.in_out_function = CsrExpandFunction;
-	return function;
+TableFunctionSet GqlCsrExpandFunctions() {
+	TableFunctionSet functions("gql_csr_expand");
+	child_list_t<LogicalType> fields {{"graph_name", LogicalType::VARCHAR},
+	                                  {"vertex_id", LogicalType::UBIGINT},
+	                                  {"direction", LogicalType::VARCHAR},
+	                                  {"edge_label", LogicalType::VARCHAR}};
+	auto add_overload = [&]() {
+		TableFunction function("gql_csr_expand", {LogicalType::STRUCT(fields)}, nullptr, CsrExpandBind,
+		                       CsrExpandGlobalInit, CsrExpandLocalInit);
+		function.in_out_function = CsrExpandFunction;
+		functions.AddFunction(std::move(function));
+	};
+	add_overload();
+	// Lowering passes a label the pattern requires, so the rows dropped here would
+	// otherwise be expanded, joined, and only then rejected by the label predicate.
+	fields.emplace_back("neighbor_label", LogicalType::VARCHAR);
+	add_overload();
+	return functions;
+}
+
+bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot) {
+	return snapshot.vertex_label_offsets.size() == snapshot.vertex_ids.size() + 1;
+}
+
+// A label check costs cache misses per row, so it must remove enough rows to pay.
+static constexpr double GQL_NEIGHBOR_LABEL_MAX_MATCHING = 0.9;
+
+bool GqlNeighborLabelIsSelective(const GqlCsrSnapshot &snapshot, const string &edge_label, const string &direction,
+                                 const string &neighbor_label) {
+	if (!snapshot.has_label_fanout_stats) {
+		return true;
+	}
+	auto edge = snapshot.label_ids.find(StringUtil::Lower(edge_label));
+	auto vertex = snapshot.label_ids.find(StringUtil::Lower(neighbor_label));
+	if (edge == snapshot.label_ids.end() || vertex == snapshot.label_ids.end() ||
+	    edge->second >= snapshot.edge_label_stats.size()) {
+		return true;
+	}
+	auto stats = snapshot.label_fanout_stats.find(GqlCsrLabelFanoutKey(vertex->second, edge->second));
+	if (stats == snapshot.label_fanout_stats.end()) {
+		return true;
+	}
+	// The neighbor is the far endpoint: the target of an outgoing expansion.
+	const auto matching = direction == "out" ? stats->second.incoming_edges : stats->second.outgoing_edges;
+	return static_cast<double>(matching) <
+	       GQL_NEIGHBOR_LABEL_MAX_MATCHING * static_cast<double>(snapshot.edge_label_stats[edge->second].edge_count);
 }
 
 TableFunction GqlCsrPathExpandFunction() {
@@ -1934,6 +2332,14 @@ TableFunction GqlProjectedVertexFetchFunction() {
 
 TableFunction GqlEdgeFetchFunction() {
 	return GqlElementFetchFunction("gql_edge_fetch");
+}
+
+TableFunction GqlVertexLookupFunction() {
+	TableFunction function(Identifier("gql_vertex_lookup"), {LogicalType::ANY}, nullptr, VertexLookupBind,
+	                       VertexLookupGlobalInit, VertexLookupLocalInit);
+	function.in_out_function = VertexLookupFunction;
+	function.projection_pushdown = true;
+	return function;
 }
 
 TableFunction GqlBuildCsrFunction() {

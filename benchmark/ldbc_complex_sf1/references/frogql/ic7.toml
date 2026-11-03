@@ -1,0 +1,50 @@
+# LDBC SNB Interactive Complex Read 7 — Recent likers.
+# Spec: https://github.com/ldbc/ldbc_snb_docs/blob/main/query-specifications/interactive-complex-read-07.yaml
+# Reference Cypher: https://github.com/ldbc/ldbc_snb_interactive_v1_impls/blob/main/cypher/queries/interactive-complex-7.cypher
+
+id = 7
+name = "Recent likers of a person's messages"
+status = "implemented"
+
+# IC7 needs "the LATEST like per liker" — an arg-max per group. The
+# canonical Cypher uses `WITH ... ORDER BY ... head(collect(...))`; ISO GQL
+# expresses the same with a `<value query expression>`
+# (`VALUE { MATCH ... ORDER BY ... LIMIT 1 }`) that yields one record per
+# liker. The six primitives this needs (VALUE subquery, RECORD constructor,
+# CAST, FLOOR, division, GROUP BY by binding variable) all landed together.
+#
+# ISO conformance note: GQL `<grouping element> ::= <binding variable
+# reference>`, so the grouping is `GROUP BY liker, person` (the two binding
+# variables the projections depend on), not the RETURN-clause aliases.
+
+params_file = "interactive_7_param.txt"
+param_columns = ["personId"]
+param_types = ["int"]
+
+query = """
+MATCH (person:Person {id: {personId}})<-[:hasCreator]-(:Comment|Post)<-[:likes]-(liker:Person)
+RETURN
+    liker.id AS personId,
+    liker.firstName AS personFirstName,
+    liker.lastName AS personLastName,
+    VALUE {
+        MATCH (person)<-[:hasCreator]-(m:Comment|Post)<-[l:likes]-(liker)
+        RETURN RECORD {
+            likeCreationDate: l.creationDate,
+            commentOrPostId: m.id,
+            commentOrPostContent: COALESCE(m.content, m.imageFile),
+            minutesLatency: CAST(FLOOR(CAST(l.creationDate - m.creationDate AS FLOAT) / 60000.0) AS INTEGER)
+        } AS latest
+        ORDER BY latest.likeCreationDate DESC, latest.commentOrPostId ASC
+        LIMIT 1
+    } AS latestLike,
+    NOT EXISTS { MATCH (liker)~[:knows]~(person) } AS isNew
+GROUP BY liker, person
+ORDER BY latestLike.likeCreationDate DESC, personId ASC
+LIMIT 20
+"""
+
+[divergences]
+message-union = "spec uses (message:Message); we use (:Comment|Post). Loader-level."
+edge-casing = "loader produces lowercase :knows / :hasCreator / :likes. Spec uses uppercase. No semantic difference."
+group-by-binding-var = "ISO §14 groups by binding variable references (liker, person), not RETURN aliases. Projections are functionally determined by the grouped node identities."

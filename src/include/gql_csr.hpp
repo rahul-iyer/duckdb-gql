@@ -22,11 +22,13 @@ enum GqlCsrCapability : GqlCsrCapabilities {
 	GQL_CSR_EDGE_STATS = 1U << 6U,
 	GQL_CSR_OUT_DEGREES = 1U << 7U,
 	GQL_CSR_ENDPOINT_STATS = 1U << 8U,
+	GQL_CSR_VERTEX_ROW_IDS = 1U << 9U,
 };
 
 static constexpr GqlCsrCapabilities GQL_CSR_FULL = GQL_CSR_OUTGOING | GQL_CSR_INCOMING | GQL_CSR_EDGE_IDS |
                                                    GQL_CSR_EDGE_LABELS | GQL_CSR_VERTEX_LABELS |
-                                                   GQL_CSR_VERTEX_LABEL_POSTINGS | GQL_CSR_EDGE_STATS;
+                                                   GQL_CSR_VERTEX_LABEL_POSTINGS | GQL_CSR_EDGE_STATS |
+                                                   GQL_CSR_VERTEX_ROW_IDS;
 
 class GqlCsrVertexIds {
 public:
@@ -250,6 +252,13 @@ struct GqlCsrSnapshot {
 	string edge_table_key;
 	bool dense_vertex_ids = false;
 	bool vertex_ids_match_rowids = false;
+	bool has_vertex_row_ids = false;
+	//! Native table identities captured with the versioned managed snapshot.
+	string vertex_catalog_name, vertex_schema_name, vertex_table_name;
+	string edge_catalog_name, edge_schema_name, edge_table_name;
+	//! Physical row IDs by CSR ordinal, independent of parallel import order.
+	//! Empty when canonical IDs already encode physical row IDs.
+	GqlCsrOrdinals vertex_row_ids;
 	bool edge_ids_match_rowids = false;
 	idx_t edge_count = 0;
 	GqlCsrVertexIds vertex_ids;
@@ -280,6 +289,10 @@ struct GqlCsrSnapshot {
 	idx_t auxiliary_bytes = 0;
 	idx_t build_auxiliary_bytes = 0;
 	idx_t memory_bytes = 0;
+
+	bool HasVertexRowIds() const {
+		return vertex_ids_match_rowids || has_vertex_row_ids;
+	}
 };
 
 unique_ptr<GqlEndpointStatistics> GqlCollectEndpointStatistics(ClientContext &context, const GqlCsrSnapshot &snapshot,
@@ -287,6 +300,23 @@ unique_ptr<GqlEndpointStatistics> GqlCollectEndpointStatistics(ClientContext &co
 bool GqlSummarizeEndpointStatistics(const GqlCsrSnapshot &snapshot, const vector<uint32_t> &source_labels,
                                     uint32_t edge_label, const vector<uint32_t> &target_labels,
                                     GqlEndpointSummary &result);
+
+//! Bind data of in-out functions that can consume whole input chunks in a lateral
+//! join. DuckDB drives projected inputs row by row; GqlBatchInOutFunctions replaces
+//! that and has the function emit these child columns, in order, after its own.
+struct GqlBatchedInOutBindData : TableFunctionData {
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<GqlBatchedInOutBindData>();
+		result->passthrough_input = passthrough_input;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		return passthrough_input == other_p.Cast<GqlBatchedInOutBindData>().passthrough_input;
+	}
+
+	vector<column_t> passthrough_input;
+};
 
 bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
 
@@ -316,7 +346,15 @@ void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);
 
 TableFunction GqlNeighborsFunction();
 TableFunction GqlCsrVerticesFunction();
-TableFunction GqlCsrExpandFunction();
+TableFunctionSet GqlCsrExpandFunctions();
+TableFunction GqlVertexLookupFunction();
+//! Snapshots built in this database instance so far.
+uint64_t GqlCsrBuildCount(ClientContext &context);
+//! Whether expansion can test neighbor labels, which it does for its neighbor_label argument.
+bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot);
+//! Whether filtering an expansion by the far endpoint's label removes enough rows.
+bool GqlNeighborLabelIsSelective(const GqlCsrSnapshot &snapshot, const string &edge_label, const string &direction,
+                                 const string &neighbor_label);
 TableFunction GqlCsrPathExpandFunction();
 TableFunction GqlVertexFetchFunction();
 TableFunction GqlProjectedVertexFetchFunction();

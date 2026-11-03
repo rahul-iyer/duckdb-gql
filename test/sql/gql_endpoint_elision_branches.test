@@ -1,0 +1,270 @@
+# name: test/sql/gql_endpoint_elision_branches.test
+# description: Vertices read only through their identity skip their table, and independent OPTIONAL branches avoid their product, with unchanged results
+# group: [gql]
+
+require duckgql
+
+# Hub 1 has posts 10,11 (11 twice via parallel edge) and tags 20,21 on post 10.
+# Hub 2 has one post and no tags. Hub 3 has neither. Post 12 has a NULL score.
+statement ok
+COPY (SELECT * FROM (VALUES
+ (1,'Hub',1,NULL,'a'),(2,'Hub',2,NULL,'b'),(3,'Hub',3,NULL,'b'),
+ (10,'Post;Message',10,5,NULL),(11,'Post;Message',11,7,NULL),(12,'Post;Message',12,NULL,NULL),
+ (13,'Comment;Message',13,9,NULL),(20,'Tag',20,1,NULL),(21,'Tag',21,2,NULL)
+) v(":ID",":LABEL","id:int","score:int","grp:string")) TO '{TEST_DIR}/branch_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES
+ (1,10,'POSTED'),(1,11,'POSTED'),(1,11,'POSTED'),(1,13,'POSTED'),(2,12,'POSTED'),
+ (10,20,'TAGGED'),(10,21,'TAGGED'),(1,20,'LIKES'),(1,21,'LIKES'),(2,20,'LIKES')
+) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/branch_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH branches ANY
+
+statement ok
+COPY GRAPH branches FROM (VERTICES '{TEST_DIR}/branch_nodes.csv', EDGES '{TEST_DIR}/branch_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH branches
+
+statement ok
+CALL gql_create_property_index('branches', 'id')
+
+statement ok
+CALL gql_build_csr('branches')
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# --- Endpoint elision: the far vertex is never read, only its identity and label.
+query I
+MATCH (a:Hub)-[:POSTED]->(p:Post) WHERE a.id=1 RETURN count(*)
+----
+3
+
+query I
+MATCH (a:Hub)-[:POSTED]->(p:Post&Message) WHERE a.id=1 RETURN count(*)
+----
+3
+
+query I
+MATCH (a:Hub)-[:POSTED]->(p:Post&Comment) WHERE a.id=1 RETURN count(*)
+----
+0
+
+query I
+MATCH (a:Hub)-[:POSTED]->(p) WHERE a.id=1 RETURN count(*)
+----
+4
+
+query I
+MATCH (a:Hub)-[:POSTED]->(p:Nonexistent) WHERE a.id=1 RETURN count(*)
+----
+0
+
+# An elided vertex can seed the next hop and be compared by identity.
+query I rowsort
+MATCH (a:Hub)-[:POSTED]->(p:Post)-[:TAGGED]->(t:Tag) WHERE a.id=1 RETURN t.id
+----
+20
+21
+
+query II rowsort
+MATCH (a:Hub)-[:LIKES]->(t:Tag), (p:Post)-[:TAGGED]->(t) WHERE a.id=1 RETURN t.id, element_id(p)=element_id(p)
+----
+20	true
+21	true
+
+# A later stage's label on the vertex still applies, and reading a property still works.
+query I
+MATCH (a:Hub)-[:POSTED]->(p) WHERE a.id=1 MATCH (p:Comment) RETURN count(*)
+----
+1
+
+query I rowsort
+MATCH (a:Hub)-[:POSTED]->(p:Message) WHERE a.id=1 RETURN p.id
+----
+10
+11
+11
+13
+
+# OPTIONAL null-extends an elided vertex, visible through its identity.
+query II rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+RETURN a.id, COUNT(DISTINCT element_id(p))
+GROUP BY a
+----
+1	2
+2	1
+3	0
+
+# Whole vertex values must still materialize the row.
+query I
+MATCH (a:Hub)-[:POSTED]->(p:Comment) WHERE a.id=1 RETURN p.score
+----
+9
+
+# --- Independent OPTIONAL branches: results include empty branches on either side.
+query III rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(DISTINCT p.id) AS posts, COUNT(DISTINCT t.id) AS tags
+GROUP BY a
+----
+1	2	2
+2	1	1
+3	0	0
+
+# Arithmetic across aggregates of different branches.
+query II rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(DISTINCT t.id)*2-COUNT(DISTINCT p.id) AS score
+GROUP BY a
+----
+1	2
+2	1
+3	0
+
+# NULL properties stay ignored; MIN and MAX see the same values.
+query III rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, MIN(p.score), MAX(t.score)
+GROUP BY a
+----
+1	5	2
+2	NULL	1
+3	NULL	NULL
+
+# Three branches, and an aggregate over the common base.
+query IIII rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+OPTIONAL MATCH (a)-[:POSTED]->(c:Comment)
+RETURN a.id, COUNT(DISTINCT p.id), COUNT(DISTINCT t.id), COUNT(DISTINCT c.id)
+GROUP BY a
+----
+1	2	2	1
+2	1	1	0
+3	0	0	0
+
+# Grouping that merges several base rows, including a base with no branch matches.
+query III rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.grp, COUNT(DISTINCT p.id), COUNT(DISTINCT t.id)
+----
+a	2	2
+b	1	1
+
+# A global aggregate, with and without base rows.
+query II
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN COUNT(DISTINCT p.id), COUNT(DISTINCT t.id)
+----
+3	2
+
+query II
+MATCH (a:Hub) WHERE a.id=999
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN COUNT(DISTINCT p.id), COUNT(DISTINCT t.id)
+----
+0	0
+
+# A base filter applies to every branch.
+query III
+MATCH (a:Hub) WHERE a.id=1
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(DISTINCT p.id), COUNT(DISTINCT t.id)
+GROUP BY a
+----
+1	2	2
+
+# --- Shapes that observe the product must keep it.
+# Non-DISTINCT COUNT multiplies: 3 posts x 2 tags for hub 1.
+query III rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(p.id), COUNT(t.id)
+GROUP BY a
+----
+1	6	6
+2	1	1
+3	0	0
+
+# COUNT(*) counts the product rows.
+query II rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(*)
+GROUP BY a
+----
+1	6
+2	1
+3	1
+
+# An aggregate across two branches needs rows holding both.
+query II rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN a.id, COUNT(DISTINCT p.id + t.id)
+GROUP BY a
+----
+1	3
+2	1
+3	0
+
+# A branch that uses another branch's binding is not independent.
+query III rowsort
+MATCH (a:Hub)
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (p)-[:TAGGED]->(t:Tag)
+RETURN a.id, COUNT(DISTINCT p.id), COUNT(DISTINCT t.id)
+GROUP BY a
+----
+1	2	2
+2	1	0
+3	0	0
+
+# A grouping key from a branch needs each pairing of that key.
+query III rowsort
+MATCH (a:Hub) WHERE a.id=1
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN p.id, COUNT(DISTINCT t.id), COUNT(DISTINCT a.id)
+GROUP BY p
+----
+10	2	1
+11	2	1
+
+# Rows without aggregation show every pairing.
+query I
+MATCH (a:Hub) WHERE a.id=1
+OPTIONAL MATCH (a)-[:POSTED]->(p:Post)
+OPTIONAL MATCH (a)-[:LIKES]->(t:Tag)
+RETURN count(*)
+----
+6
+
+endloop
+
+statement ok
+DROP GRAPH branches
