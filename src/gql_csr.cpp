@@ -64,6 +64,8 @@ struct GqlCsrGenerationState : ObjectCacheEntry {
 	mutex lock;
 	uint64_t write_generation = 0;
 	unordered_map<string, uint64_t> table_write_generations;
+	//! The subset of those writes that may do more than insert rows.
+	unordered_map<string, uint64_t> table_destructive_generations;
 };
 
 static string CsrTableKey(const string &catalog_name, const string &schema_name, const string &table_name) {
@@ -92,27 +94,59 @@ static uint64_t ReadCsrTableWriteGeneration(ClientContext &context, const string
 	return state->table_write_generations[table_key];
 }
 
-static void AdvanceCsrTableWriteGeneration(ClientContext &context, const string &table_key) {
+static uint64_t ReadCsrTableDestructiveGeneration(ClientContext &context, const string &table_key) {
+	auto state = GetCsrGenerationState(context);
+	lock_guard<mutex> guard(state->lock);
+	return state->table_destructive_generations[table_key];
+}
+
+static void AdvanceCsrTableWriteGeneration(ClientContext &context, const string &table_key, bool inserts_only) {
 	auto state = GetCsrGenerationState(context);
 	lock_guard<mutex> guard(state->lock);
 	state->table_write_generations[table_key]++;
+	if (!inserts_only) {
+		state->table_destructive_generations[table_key]++;
+	}
 }
 
+// Generations also advance after the commit. Otherwise a snapshot built between the plan
+// and the commit would record the new generation and read the old rows.
 struct GqlCsrWriteObserverState : ClientContextState {
 	void TransactionCommit(MetaTransaction &transaction, ClientContext &context) override {
+		for (const auto &table : planned_table_writes) {
+			AdvanceCsrTableWriteGeneration(context, table.first, table.second);
+		}
+		if (planned_prepared_write) {
+			AdvanceCsrWriteGeneration(context);
+		}
+		ClearPlannedWrites();
 		if (transaction.ModifiedDatabase()) {
 			GqlInvalidateTableGraphCache(context);
 		}
+	}
+
+	void TransactionRollback(MetaTransaction &, ClientContext &) override {
+		ClearPlannedWrites();
 	}
 
 	RebindQueryInfo OnRebindPreparedStatement(ClientContext &context, BindPreparedStatementCallbackInfo &info,
 	                                          RebindQueryInfo current_rebind) override {
 		if (!info.prepared_statement.properties.IsReadOnly()) {
 			AdvanceCsrWriteGeneration(context);
+			planned_prepared_write = true;
 			GqlInvalidateTableGraphCache(context);
 		}
 		return current_rebind;
 	}
+
+	void ClearPlannedWrites() {
+		planned_table_writes.clear();
+		planned_prepared_write = false;
+	}
+
+	//! Table to whether its writes in this transaction only inserted.
+	unordered_map<string, bool> planned_table_writes;
+	bool planned_prepared_write = false;
 };
 
 void GqlRegisterCsrWriteObserver(ClientContext &context) {
@@ -120,14 +154,18 @@ void GqlRegisterCsrWriteObserver(ClientContext &context) {
 }
 
 void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog_name, const string &schema_name,
-                                   const string &table_name) {
-	GqlRegisterCsrWriteObserver(context);
-	AdvanceCsrTableWriteGeneration(context, CsrTableKey(catalog_name, schema_name, table_name));
+                                   const string &table_name, bool inserts_only) {
+	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
+	auto key = CsrTableKey(catalog_name, schema_name, table_name);
+	AdvanceCsrTableWriteGeneration(context, key, inserts_only);
+	auto planned = observer->planned_table_writes.emplace(key, inserts_only);
+	planned.first->second = planned.first->second && inserts_only;
 }
 
 void GqlNotifyCsrPreparedWriteExecution(ClientContext &context) {
-	GqlRegisterCsrWriteObserver(context);
+	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
 	AdvanceCsrWriteGeneration(context);
+	observer->planned_prepared_write = true;
 }
 
 static string QualifiedTable(const GqlElementTableBinding &table) {
@@ -158,6 +196,8 @@ struct GqlDerivedGraphStorageState : ObjectCacheEntry {
 	}
 
 	mutex lock;
+	//! Held across a delta catch-up's queries, so readers don't repeat each other's scan.
+	mutex delta_catch_up_lock;
 	std::condition_variable build_finished;
 	unordered_map<uint64_t, vector<shared_ptr<GqlCsrSnapshot>>> snapshots;
 	unordered_set<uint64_t> builds_in_progress;
@@ -253,6 +293,92 @@ bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx
 	return true;
 }
 
+static bool CsrTryGetOrdinal(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, uint64_t vertex_id,
+                             idx_t &ordinal) {
+	if (GqlTryGetCsrOrdinal(snapshot, vertex_id, ordinal)) {
+		return true;
+	}
+	if (!delta) {
+		return false;
+	}
+	auto entry = delta->ordinal_by_id.find(vertex_id);
+	if (entry == delta->ordinal_by_id.end()) {
+		return false;
+	}
+	ordinal = entry->second;
+	return true;
+}
+
+static uint64_t CsrVertexId(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t ordinal) {
+	const auto base_vertices = snapshot.vertex_ids.size();
+	return ordinal < base_vertices ? snapshot.vertex_ids[ordinal] : delta->vertex_ids[ordinal - base_vertices];
+}
+
+static uint64_t CsrVertexRowId(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t ordinal) {
+	const auto base_vertices = snapshot.vertex_ids.size();
+	if (ordinal >= base_vertices) {
+		return delta->vertex_row_ids[ordinal - base_vertices];
+	}
+	return snapshot.vertex_ids_match_rowids ? snapshot.vertex_ids[ordinal] - 1 : snapshot.vertex_row_ids[ordinal];
+}
+
+static const vector<GqlCsrDeltaEdge> *CsrDeltaEdges(const GqlCsrDelta *delta, idx_t ordinal, bool outgoing) {
+	if (!delta) {
+		return nullptr;
+	}
+	const auto &edges = outgoing ? delta->outgoing : delta->incoming;
+	if (edges.empty()) {
+		return nullptr;
+	}
+	auto entry = edges.find(ordinal);
+	return entry == edges.end() ? nullptr : &entry->second;
+}
+
+static bool CsrVertexHasLabels(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t ordinal,
+                               const vector<uint32_t> &required) {
+	const auto base_vertices = snapshot.vertex_ids.size();
+	const uint32_t *begin;
+	const uint32_t *end;
+	if (ordinal < base_vertices) {
+		begin = snapshot.vertex_label_ids.data() + snapshot.vertex_label_offsets[ordinal];
+		end = snapshot.vertex_label_ids.data() + snapshot.vertex_label_offsets[ordinal + 1];
+	} else {
+		const auto &labels = delta->vertex_labels[ordinal - base_vertices];
+		begin = labels.data();
+		end = labels.data() + labels.size();
+	}
+	for (const auto label : required) {
+		if (std::find(begin, end, label) == end) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Calls function(neighbor, edge_id) for each edge of one label, in the CSR and then the delta.
+template <class FUNCTION>
+static void CsrForEachEdge(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t vertex, bool outgoing,
+                           uint32_t label_id, FUNCTION &&function) {
+	if (vertex < snapshot.vertex_ids.size()) {
+		const auto &offsets = outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
+		const auto &neighbors = outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
+		const auto &labels = outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
+		const auto &edge_ids = outgoing ? snapshot.outgoing_edge_ids : snapshot.incoming_edge_ids;
+		for (auto index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
+			if (labels[index] == label_id) {
+				function(neighbors[index], edge_ids[index]);
+			}
+		}
+	}
+	if (const auto *edges = CsrDeltaEdges(delta, vertex, outgoing)) {
+		for (const auto &edge : *edges) {
+			if (edge.label_id == label_id) {
+				function(edge.neighbor, edge.edge_id);
+			}
+		}
+	}
+}
+
 static uint32_t CsrLabelId(GqlCsrSnapshot &snapshot, const string &label) {
 	if (label.empty()) {
 		return 0;
@@ -309,6 +435,46 @@ static GqlCsrCapabilities NormalizeCsrCapabilities(GqlCsrCapabilities capabiliti
 	return capabilities;
 }
 
+static string CsrVertexLabelProjection(const GqlElementTableBinding &vertex) {
+	if (!vertex.static_labels.empty()) {
+		string projection = "[";
+		for (idx_t index = 0; index < vertex.static_labels.size(); index++) {
+			if (index > 0) {
+				projection += ", ";
+			}
+			projection += GqlQuoteLiteral(vertex.static_labels[index]);
+		}
+		return projection + "]::VARCHAR[]";
+	}
+	if (!vertex.label_column.empty()) {
+		return vertex.label_is_list ? GqlQuoteIdentifier(vertex.label_column)
+		                            : "string_split(CAST(" + GqlQuoteIdentifier(vertex.label_column) + " AS VARCHAR), ';')";
+	}
+	return "CAST(NULL AS VARCHAR[])";
+}
+
+static string CsrEdgeLabelProjection(const GqlElementTableBinding &edge) {
+	if (!edge.static_labels.empty()) {
+		return GqlQuoteLiteral(edge.static_labels[0]);
+	}
+	if (!edge.label_column.empty()) {
+		return "CAST(" + GqlQuoteIdentifier(edge.label_column) + " AS VARCHAR)";
+	}
+	return "CAST(NULL AS VARCHAR)";
+}
+
+static uint64_t ReadCsrSchemaVersion(Connection &connection, uint64_t graph_id) {
+	auto result = GqlQuery(connection, "SELECT schema_version FROM gql_internal.graph_storage WHERE graph_id = " +
+	                                       to_string(graph_id));
+	return result->RowCount() == 1 ? result->GetValue(0, 0).GetValue<uint64_t>() : 0;
+}
+
+static uint64_t ReadCsrRowWatermark(Connection &connection, const string &table) {
+	return GqlQuery(connection, "SELECT coalesce(max(rowid) + 1, 0)::UBIGINT FROM " + table)
+	    ->GetValue(0, 0)
+	    .GetValue<uint64_t>();
+}
+
 static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, const string &graph_name,
                                                      GqlCsrCapabilities requested_capabilities,
                                                      const string &weight_property = string()) {
@@ -351,6 +517,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    CsrTableKey(binding.edge.catalog_name, binding.edge.schema_name, binding.edge.table_name);
 	snapshot->vertex_write_generation = ReadCsrTableWriteGeneration(context, snapshot->vertex_table_key);
 	snapshot->edge_write_generation = ReadCsrTableWriteGeneration(context, snapshot->edge_table_key);
+	snapshot->vertex_destructive_generation = ReadCsrTableDestructiveGeneration(context, snapshot->vertex_table_key);
+	snapshot->edge_destructive_generation = ReadCsrTableDestructiveGeneration(context, snapshot->edge_table_key);
+	snapshot->synced_generation = GqlDatabaseWriteGeneration(context);
 	// Referenced unions depend on every physical node and edge table, rather
 	// than the synthetic union name used by the relational binding.
 	for (const auto *table : {&binding.vertex, &binding.edge}) {
@@ -371,6 +540,15 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	snapshot->has_source_snapshot = graph.has_source_snapshot;
 	snapshot->source_snapshot_id = graph.source_snapshot_id;
 	snapshot->source_catalog = graph.source_catalog;
+	snapshot->supports_delta = (capabilities & GQL_CSR_FULL) == GQL_CSR_FULL && weight_property.empty() &&
+	                           !snapshot->vertex_table_name.empty() && !snapshot->edge_table_name.empty() &&
+	                           !graph.has_source_snapshot && binding.vertex.source_tables.empty() &&
+	                           binding.edge.source_tables.empty();
+	if (snapshot->supports_delta) {
+		snapshot->schema_version = ReadCsrSchemaVersion(connection, graph.graph_id);
+		snapshot->vertex_row_watermark = ReadCsrRowWatermark(connection, QualifiedTable(binding.vertex));
+		snapshot->edge_row_watermark = ReadCsrRowWatermark(connection, QualifiedTable(binding.edge));
+	}
 
 	const bool managed_vertices = StringUtil::CIEquals(binding.vertex.ownership, "MANAGED");
 	const bool build_vertex_row_ids = managed_vertices && (capabilities & GQL_CSR_VERTEX_ROW_IDS);
@@ -384,22 +562,8 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		                                vertex_count->GetValue(1, 0).GetValue<uint64_t>() <=
 		                                    std::numeric_limits<uint32_t>::max());
 	}
-	string vertex_label_projection = "CAST(NULL AS VARCHAR[])";
-	if (build_vertex_labels && !binding.vertex.static_labels.empty()) {
-		vertex_label_projection = "[";
-		for (idx_t index = 0; index < binding.vertex.static_labels.size(); index++) {
-			if (index > 0) {
-				vertex_label_projection += ", ";
-			}
-			vertex_label_projection += GqlQuoteLiteral(binding.vertex.static_labels[index]);
-		}
-		vertex_label_projection += "]::VARCHAR[]";
-	} else if (build_vertex_labels && !binding.vertex.label_column.empty()) {
-		vertex_label_projection =
-		    binding.vertex.label_is_list
-		        ? GqlQuoteIdentifier(binding.vertex.label_column)
-		        : "string_split(CAST(" + GqlQuoteIdentifier(binding.vertex.label_column) + " AS VARCHAR), ';')";
-	}
+	auto vertex_label_projection =
+	    build_vertex_labels ? CsrVertexLabelProjection(binding.vertex) : string("CAST(NULL AS VARCHAR[])");
 	auto vertex_rowid_projection =
 	    StringUtil::CIEquals(binding.vertex.ownership, "MANAGED") ? "CAST(rowid AS UBIGINT)" : "CAST(0 AS UBIGINT)";
 	auto vertices = make_uniq<QueryResultStream<>>(
@@ -510,12 +674,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		}
 	}
 
-	string label_projection = "CAST(NULL AS VARCHAR)";
-	if (build_edge_labels && !binding.edge.static_labels.empty()) {
-		label_projection = GqlQuoteLiteral(binding.edge.static_labels[0]);
-	} else if (build_edge_labels && !binding.edge.label_column.empty()) {
-		label_projection = "CAST(" + GqlQuoteIdentifier(binding.edge.label_column) + " AS VARCHAR)";
-	}
+	auto label_projection = build_edge_labels ? CsrEdgeLabelProjection(binding.edge) : string("CAST(NULL AS VARCHAR)");
 	auto edge_count = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + QualifiedTable(binding.edge));
 	auto expected_edges = NumericCast<idx_t>(edge_count->GetValue(0, 0).GetValue<uint64_t>());
 	snapshot->edge_count = expected_edges;
@@ -878,7 +1037,8 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	connection.Commit();
 	Connection validation_connection(*context.db);
 	auto current_graph = ReadGraphVersion(validation_connection, graph_name);
-	if (!SameGraphVersion(graph, current_graph)) {
+	// Inserts that raced construction are the delta's to follow, and generations catch the rest.
+	if (!snapshot->supports_delta && !SameGraphVersion(graph, current_graph)) {
 		throw InvalidInputException("Graph '%s' changed while its CSR snapshot was being built; retry the operation",
 		                            graph_name);
 	}
@@ -905,6 +1065,15 @@ static bool CsrSnapshotIsCurrent(ClientContext &context, const GqlCsrSnapshot &s
 	                                          StringUtil::CIEquals(snapshot.source_catalog, graph.source_catalog)));
 }
 
+// Whether every change since the build can only have been an insert, so a delta can follow.
+static bool CsrSnapshotCanCatchUp(ClientContext &context, const GqlCsrSnapshot &snapshot, const GraphVersion &graph) {
+	return snapshot.supports_delta && snapshot.graph_id == graph.graph_id && !graph.has_source_snapshot &&
+	       snapshot.write_generation == ReadCsrWriteGeneration(context) &&
+	       snapshot.vertex_destructive_generation ==
+	           ReadCsrTableDestructiveGeneration(context, snapshot.vertex_table_key) &&
+	       snapshot.edge_destructive_generation == ReadCsrTableDestructiveGeneration(context, snapshot.edge_table_key);
+}
+
 static shared_ptr<GqlCsrSnapshot>
 FindPreparedTableSnapshotLocked(ClientContext &context, GqlDerivedGraphStorageState &storage, const GraphVersion &graph,
                                 GqlCsrCapabilities required_capabilities, const string &weight_property = string()) {
@@ -915,13 +1084,15 @@ FindPreparedTableSnapshotLocked(ClientContext &context, GqlDerivedGraphStorageSt
 	auto &snapshots = entry->second;
 	snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(),
 	                               [&](const shared_ptr<GqlCsrSnapshot> &snapshot) {
-		                               return !CsrSnapshotIsCurrent(context, *snapshot, graph);
+		                               return !CsrSnapshotIsCurrent(context, *snapshot, graph) &&
+		                                      !CsrSnapshotCanCatchUp(context, *snapshot, graph);
 	                               }),
 	                snapshots.end());
 	shared_ptr<GqlCsrSnapshot> best;
 	for (const auto &snapshot : snapshots) {
 		if (snapshot->weight_property != weight_property ||
-		    !CsrHasCapabilities(snapshot->capabilities, required_capabilities)) {
+		    !CsrHasCapabilities(snapshot->capabilities, required_capabilities) ||
+		    !CsrSnapshotIsCurrent(context, *snapshot, graph)) {
 			continue;
 		}
 		if (!best || snapshot->memory_bytes < best->memory_bytes) {
@@ -958,19 +1129,24 @@ static shared_ptr<GqlCsrSnapshot> PublishTableSnapshot(GqlDerivedGraphStorageSta
                                                        shared_ptr<GqlCsrSnapshot> snapshot) {
 	lock_guard<mutex> guard(storage.lock);
 	auto &snapshots = storage.snapshots[snapshot->graph_id];
+	auto same_generations = [&](const GqlCsrSnapshot &entry) {
+		return entry.graph_version == snapshot->graph_version &&
+		       entry.has_source_snapshot == snapshot->has_source_snapshot &&
+		       (!entry.has_source_snapshot || (entry.source_snapshot_id == snapshot->source_snapshot_id &&
+		                                       StringUtil::CIEquals(entry.source_catalog, snapshot->source_catalog))) &&
+		       entry.write_generation == snapshot->write_generation &&
+		       entry.vertex_write_generation == snapshot->vertex_write_generation &&
+		       entry.edge_write_generation == snapshot->edge_write_generation &&
+		       entry.source_write_generations == snapshot->source_write_generations;
+	};
 	snapshots.erase(std::remove_if(snapshots.begin(), snapshots.end(),
 	                               [&](const shared_ptr<GqlCsrSnapshot> &entry) {
-		                               const bool stale =
-		                                   entry->graph_version != snapshot->graph_version ||
-		                                   entry->has_source_snapshot != snapshot->has_source_snapshot ||
-		                                   (entry->has_source_snapshot &&
-		                                    (entry->source_snapshot_id != snapshot->source_snapshot_id ||
-		                                     !StringUtil::CIEquals(entry->source_catalog, snapshot->source_catalog))) ||
-		                                   entry->write_generation != snapshot->write_generation ||
-		                                   entry->vertex_write_generation != snapshot->vertex_write_generation ||
-		                                   entry->edge_write_generation != snapshot->edge_write_generation ||
-		                                   entry->source_write_generations != snapshot->source_write_generations;
-		                               return stale ||
+		                               // A snapshot a delta can still follow stays until a full one replaces it.
+		                               const bool can_catch_up =
+		                                   entry->supports_delta && entry->write_generation == snapshot->write_generation &&
+		                                   entry->vertex_destructive_generation == snapshot->vertex_destructive_generation &&
+		                                   entry->edge_destructive_generation == snapshot->edge_destructive_generation;
+		                               return (!can_catch_up && !same_generations(*entry)) ||
 		                                      (entry->weight_property == snapshot->weight_property &&
 		                                       CsrHasCapabilities(snapshot->capabilities, entry->capabilities));
 	                               }),
@@ -978,7 +1154,7 @@ static shared_ptr<GqlCsrSnapshot> PublishTableSnapshot(GqlDerivedGraphStorageSta
 	storage.build_count++;
 	shared_ptr<GqlCsrSnapshot> best;
 	for (const auto &entry : snapshots) {
-		if (entry->weight_property == snapshot->weight_property &&
+		if (entry->weight_property == snapshot->weight_property && same_generations(*entry) &&
 		    CsrHasCapabilities(entry->capabilities, snapshot->capabilities) &&
 		    (!best || entry->memory_bytes < best->memory_bytes)) {
 			best = entry;
@@ -1000,42 +1176,312 @@ uint64_t GqlCsrBuildCount(ClientContext &context) {
 	return ReadCsrBuildCount(*GetDerivedGraphStorageState(context));
 }
 
+struct GqlCsrLease {
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
+};
+
 struct GqlCsrQueryLeases : ClientContextState {
 	mutex lock;
-	unordered_map<string, shared_ptr<const GqlCsrSnapshot>> snapshots;
+	unordered_map<string, GqlCsrLease> leases;
 
 	void QueryEnd() override {
 		lock_guard<mutex> guard(lock);
-		snapshots.clear();
+		leases.clear();
 	}
 };
 
-static shared_ptr<const GqlCsrSnapshot> AcquireFullSnapshot(ClientContext &context, const string &graph_name,
-                                                           GqlDerivedGraphStorageState &storage) {
+// Builds and publishes one snapshot, unless another build of this graph is running, in
+// which case it waits for that one. Returns whether it built. Callers look the result up,
+// so that a write that raced construction invalidates it before anyone can lease it.
+static bool BuildAndPublishTableSnapshot(ClientContext &context, GqlDerivedGraphStorageState &storage, uint64_t graph_id,
+                                         const string &graph_name, GqlCsrCapabilities capabilities,
+                                         const string &weight_property = string()) {
+	{
+		unique_lock<mutex> guard(storage.lock);
+		if (storage.builds_in_progress.find(graph_id) != storage.builds_in_progress.end()) {
+			storage.build_finished.wait(guard, [&] {
+				return storage.builds_in_progress.find(graph_id) == storage.builds_in_progress.end();
+			});
+			return false;
+		}
+		storage.builds_in_progress.insert(graph_id);
+	}
+	try {
+		PublishTableSnapshot(storage, BuildTableSnapshot(context, graph_name, capabilities, weight_property));
+	} catch (...) {
+		{
+			lock_guard<mutex> guard(storage.lock);
+			storage.builds_in_progress.erase(graph_id);
+		}
+		storage.build_finished.notify_all();
+		throw;
+	}
+	{
+		lock_guard<mutex> guard(storage.lock);
+		storage.builds_in_progress.erase(graph_id);
+	}
+	storage.build_finished.notify_all();
+	return true;
+}
+
+static idx_t CsrDeltaRowLimit(const GqlCsrSnapshot &snapshot) {
+	return MaxValue<idx_t>(4096, snapshot.edge_count / 1024);
+}
+
+// Reads the rows past the watermarks. Every check that fails means rows a delta can't
+// express, or that the table isn't laid out as assumed, and returns false for a rebuild.
+// Comparing row counts covers anything the watermarks would miss: rows of a transaction
+// that commits after one with higher row IDs, row IDs moved by a checkpoint, or a table
+// replaced outside of this extension.
+static bool ScanCsrDelta(ClientContext &context, const string &graph_name, const GqlCsrSnapshot &snapshot,
+                         const shared_ptr<const GqlCsrDelta> &previous, shared_ptr<const GqlCsrDelta> &result) {
+	GqlTableGraphBinding binding;
+	if (!GqlTryLoadTableGraph(context, graph_name, binding) ||
+	    !StringUtil::CIEquals(binding.vertex.table_name, snapshot.vertex_table_name) ||
+	    !StringUtil::CIEquals(binding.edge.table_name, snapshot.edge_table_name)) {
+		return false;
+	}
+	const auto vertex_table = QualifiedTable(binding.vertex);
+	const auto edge_table = QualifiedTable(binding.edge);
+	const auto previous_vertices = previous ? previous->vertex_ids.size() : 0;
+	const auto previous_edges = previous ? previous->edge_count : 0;
+	const auto vertex_watermark = previous ? previous->vertex_row_watermark : snapshot.vertex_row_watermark;
+	const auto edge_watermark = previous ? previous->edge_row_watermark : snapshot.edge_row_watermark;
+	const auto base_vertices = snapshot.vertex_ids.size();
+
+	Connection connection(*context.db);
+	connection.BeginTransaction();
+	if (ReadCsrSchemaVersion(connection, snapshot.graph_id) != snapshot.schema_version) {
+		connection.Rollback();
+		return false;
+	}
+	const auto vertex_total = GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + vertex_table)
+	                              ->GetValue(0, 0)
+	                              .GetValue<uint64_t>();
+	const auto edge_total =
+	    GqlQuery(connection, "SELECT count(*)::UBIGINT FROM " + edge_table)->GetValue(0, 0).GetValue<uint64_t>();
+	const auto known_vertices = base_vertices + previous_vertices;
+	const auto known_edges = snapshot.edge_count + previous_edges;
+	if (vertex_total < known_vertices || edge_total < known_edges ||
+	    vertex_total - base_vertices + edge_total - snapshot.edge_count > CsrDeltaRowLimit(snapshot)) {
+		connection.Rollback();
+		return false;
+	}
+	unique_ptr<GqlQueryResult> new_vertices;
+	unique_ptr<GqlQueryResult> new_edges;
+	if (vertex_total > known_vertices) {
+		new_vertices = GqlQuery(connection, "SELECT CAST(" + GqlQuoteIdentifier(binding.vertex.key_column) +
+		                                        " AS UBIGINT), " + CsrVertexLabelProjection(binding.vertex) +
+		                                        ", CAST(rowid AS UBIGINT) FROM " + vertex_table +
+		                                        " WHERE rowid >= " + to_string(vertex_watermark) + " ORDER BY rowid");
+	}
+	if (edge_total > known_edges) {
+		new_edges = GqlQuery(connection,
+		                     "SELECT CAST(" + GqlQuoteIdentifier(binding.edge.key_column) + " AS UBIGINT), CAST(" +
+		                         GqlQuoteIdentifier(binding.edge_source_column) + " AS UBIGINT), CAST(" +
+		                         GqlQuoteIdentifier(binding.edge_target_column) + " AS UBIGINT), " +
+		                         CsrEdgeLabelProjection(binding.edge) + ", CAST(rowid AS UBIGINT) FROM " + edge_table +
+		                         " WHERE rowid >= " + to_string(edge_watermark) + " ORDER BY rowid");
+	}
+	connection.Commit();
+	const auto new_vertex_count = new_vertices ? new_vertices->RowCount() : 0;
+	const auto new_edge_count = new_edges ? new_edges->RowCount() : 0;
+	if (known_vertices + new_vertex_count != vertex_total || known_edges + new_edge_count != edge_total) {
+		return false;
+	}
+	if (new_vertex_count == 0 && new_edge_count == 0) {
+		result = previous;
+		return true;
+	}
+
+	auto delta = previous ? make_shared_ptr<GqlCsrDelta>(*previous) : make_shared_ptr<GqlCsrDelta>();
+	if (!previous) {
+		delta->vertex_row_watermark = snapshot.vertex_row_watermark;
+		delta->edge_row_watermark = snapshot.edge_row_watermark;
+	}
+	for (idx_t row = 0; row < new_vertex_count; row++) {
+		const auto vertex_id = new_vertices->GetValue(0, row);
+		const auto labels = new_vertices->GetValue(1, row);
+		if (vertex_id.IsNull()) {
+			return false;
+		}
+		const auto id = vertex_id.GetValue<uint64_t>();
+		idx_t existing;
+		if (CsrTryGetOrdinal(snapshot, delta.get(), id, existing)) {
+			return false;
+		}
+		vector<uint32_t> label_ids;
+		if (!labels.IsNull()) {
+			for (const auto &label : ListValue::GetChildren(labels)) {
+				if (label.IsNull() || label.GetValue<string>().empty()) {
+					continue;
+				}
+				// A label with no vertices may be planned as an empty scan, so it needs new statistics.
+				auto entry = snapshot.label_ids.find(StringUtil::Lower(label.GetValue<string>()));
+				if (entry == snapshot.label_ids.end() ||
+				    entry->second + 1 >= snapshot.vertex_label_posting_offsets.size() ||
+				    snapshot.vertex_label_posting_offsets[entry->second] ==
+				        snapshot.vertex_label_posting_offsets[entry->second + 1]) {
+					return false;
+				}
+				if (std::find(label_ids.begin(), label_ids.end(), entry->second) == label_ids.end()) {
+					label_ids.push_back(entry->second);
+				}
+			}
+		}
+		for (const auto label : label_ids) {
+			delta->vertex_ids_by_label[label].push_back(id);
+		}
+		delta->ordinal_by_id.emplace(id, base_vertices + delta->vertex_ids.size());
+		delta->vertex_ids.push_back(id);
+		delta->vertex_row_ids.push_back(new_vertices->GetValue(2, row).GetValue<uint64_t>());
+		delta->vertex_labels.push_back(std::move(label_ids));
+		delta->vertex_row_watermark = delta->vertex_row_ids.back() + 1;
+	}
+	for (idx_t row = 0; row < new_edge_count; row++) {
+		const auto edge_id = new_edges->GetValue(0, row);
+		const auto source_id = new_edges->GetValue(1, row);
+		const auto target_id = new_edges->GetValue(2, row);
+		const auto label = new_edges->GetValue(3, row);
+		const auto row_id = new_edges->GetValue(4, row).GetValue<uint64_t>();
+		if (edge_id.IsNull() || source_id.IsNull() || target_id.IsNull() || label.IsNull()) {
+			return false;
+		}
+		// Plans fetch edge rows by ID when the snapshot says they match row IDs.
+		if (snapshot.edge_ids_match_rowids && edge_id.GetValue<uint64_t>() != row_id + 1) {
+			return false;
+		}
+		auto entry = snapshot.label_ids.find(StringUtil::Lower(label.GetValue<string>()));
+		idx_t source;
+		idx_t target;
+		if (entry == snapshot.label_ids.end() || entry->second >= snapshot.edge_label_stats.size() ||
+		    snapshot.edge_label_stats[entry->second].edge_count == 0 ||
+		    !CsrTryGetOrdinal(snapshot, delta.get(), source_id.GetValue<uint64_t>(), source) ||
+		    !CsrTryGetOrdinal(snapshot, delta.get(), target_id.GetValue<uint64_t>(), target)) {
+			return false;
+		}
+		delta->outgoing[source].push_back({target, edge_id.GetValue<uint64_t>(), entry->second});
+		delta->incoming[target].push_back({source, edge_id.GetValue<uint64_t>(), entry->second});
+		delta->edge_count++;
+		delta->edge_row_watermark = row_id + 1;
+	}
+	result = std::move(delta);
+	return true;
+}
+
+static GqlCsrLease ResolveFullLease(ClientContext &context, const string &graph_name,
+                                    GqlDerivedGraphStorageState &storage) {
+	bool rebuilt = false;
+	while (true) {
+		// A cached binding implies a managed graph, which has no source snapshot.
+		GraphVersion graph;
+		if (!GqlTryGetCachedGraphVersion(context, graph_name, graph.graph_id, graph.graph_version)) {
+			Connection connection(*context.db);
+			graph = ReadGraphVersion(connection, graph_name);
+		}
+		shared_ptr<GqlCsrSnapshot> snapshot;
+		{
+			lock_guard<mutex> guard(storage.lock);
+			snapshot = FindPreparedTableSnapshotLocked(context, storage, graph, GQL_CSR_FULL);
+			if (!snapshot) {
+				auto entry = storage.snapshots.find(graph.graph_id);
+				if (entry != storage.snapshots.end()) {
+					for (const auto &candidate : entry->second) {
+						if (CsrSnapshotCanCatchUp(context, *candidate, graph)) {
+							snapshot = candidate;
+							break;
+						}
+					}
+				}
+			}
+		}
+		if (!snapshot) {
+			throw InvalidInputException("CSR for table-backed graph '%s' has not been built in this database instance; "
+			                            "run CALL gql_build_csr('%s') first",
+			                            graph_name, graph_name);
+		}
+		if (!snapshot->supports_delta) {
+			return {snapshot, nullptr};
+		}
+		bool caught_up = false;
+		{
+			lock_guard<mutex> catch_up(storage.delta_catch_up_lock);
+			// Read before the scan: a write that commits during it advances this again,
+			// so the next reader scans once more instead of missing the write's rows.
+			const auto generation = GqlDatabaseWriteGeneration(context);
+			shared_ptr<const GqlCsrDelta> previous;
+			{
+				lock_guard<mutex> guard(storage.lock);
+				if (snapshot->synced_generation == generation) {
+					return {snapshot, snapshot->delta};
+				}
+				previous = snapshot->delta;
+			}
+			shared_ptr<const GqlCsrDelta> delta;
+			caught_up = ScanCsrDelta(context, graph_name, *snapshot, previous, delta);
+			if (caught_up) {
+				lock_guard<mutex> guard(storage.lock);
+				snapshot->delta = delta;
+				snapshot->synced_generation = generation;
+				return {snapshot, delta};
+			}
+		}
+		// Without progress after one rebuild, other writers are outrunning it.
+		if (rebuilt) {
+			throw InvalidInputException("Graph '%s' changed while its CSR snapshot was being built; retry the operation",
+			                            graph_name);
+		}
+		BuildAndPublishTableSnapshot(context, storage, graph.graph_id, graph_name, snapshot->capabilities);
+		rebuilt = true;
+	}
+}
+
+static GqlCsrLease AcquireFullLease(ClientContext &context, const string &graph_name,
+                                    GqlDerivedGraphStorageState &storage) {
 	auto leases = context.registered_state->GetOrCreate<GqlCsrQueryLeases>("gql_csr_query_leases");
 	lock_guard<mutex> guard(leases->lock);
-	auto entry = leases->snapshots.find(graph_name);
-	if (entry != leases->snapshots.end() && CsrSnapshotSourcesAreCurrent(context, *entry->second)) {
+	auto entry = leases->leases.find(graph_name);
+	// Inserts committed during a statement don't end its lease, so it reads one version.
+	if (entry != leases->leases.end() &&
+	    entry->second.snapshot->write_generation == ReadCsrWriteGeneration(context) &&
+	    entry->second.snapshot->vertex_destructive_generation ==
+	        ReadCsrTableDestructiveGeneration(context, entry->second.snapshot->vertex_table_key) &&
+	    entry->second.snapshot->edge_destructive_generation ==
+	        ReadCsrTableDestructiveGeneration(context, entry->second.snapshot->edge_table_key)) {
 		return entry->second;
 	}
-	auto snapshot = GetPreparedTableSnapshot(context, graph_name, storage, GQL_CSR_FULL);
+	auto lease = ResolveFullLease(context, graph_name, storage);
 	// A managed graph's lease is shared by binding and physical operators only
 	// within this statement. Recheck write generations on reuse and clear it at
 	// QueryEnd. External LIVE snapshots retain their version checks on every
 	// acquisition, since their changes need not pass through our write observer.
-	if (!snapshot->vertex_table_name.empty() && !snapshot->edge_table_name.empty() && !snapshot->has_source_snapshot) {
-		leases->snapshots[graph_name] = snapshot;
+	if (lease.snapshot->supports_delta) {
+		leases->leases[graph_name] = lease;
 	}
-	return snapshot;
+	return lease;
 }
 
-shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name) {
+static GqlCsrLease GqlGetCsrLease(ClientContext &context, const string &graph_name) {
 	if (!context.transaction.IsAutoCommit()) {
 		throw NotImplementedException("CSR algorithms are not eligible inside an explicit transaction");
 	}
 	auto storage = GetDerivedGraphStorageState(context);
 	storage->acquisition_count++;
-	return AcquireFullSnapshot(context, graph_name, *storage);
+	return AcquireFullLease(context, graph_name, *storage);
+}
+
+shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name) {
+	return GqlGetCsrLease(context, graph_name).snapshot;
+}
+
+shared_ptr<const GqlCsrSnapshot> GqlGetUnchangedCsrSnapshot(ClientContext &context, const string &graph_name) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw NotImplementedException("CSR algorithms are not eligible inside an explicit transaction");
+	}
+	auto storage = GetDerivedGraphStorageState(context);
+	storage->acquisition_count++;
+	return GetPreparedTableSnapshot(context, graph_name, *storage, GQL_CSR_FULL);
 }
 
 shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context, const string &graph_name,
@@ -1055,7 +1501,7 @@ shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context
 		Connection connection(*context.db);
 		auto graph = ReadGraphVersion(connection, graph_name);
 		{
-			unique_lock<mutex> guard(storage->lock);
+			lock_guard<mutex> guard(storage->lock);
 			auto snapshot = FindPreparedTableSnapshotLocked(context, *storage, graph, capabilities,
 			                                                StringUtil::Lower(weight_property));
 			if (snapshot) {
@@ -1064,32 +1510,9 @@ shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context
 				}
 				return snapshot;
 			}
-			if (storage->builds_in_progress.find(graph.graph_id) != storage->builds_in_progress.end()) {
-				storage->build_finished.wait(guard, [&] {
-					return storage->builds_in_progress.find(graph.graph_id) == storage->builds_in_progress.end();
-				});
-				continue;
-			}
-			storage->builds_in_progress.insert(graph.graph_id);
 		}
-		try {
-			PublishTableSnapshot(*storage, BuildTableSnapshot(context, graph_name, capabilities, weight_property));
-			performed_build = true;
-		} catch (...) {
-			{
-				lock_guard<mutex> guard(storage->lock);
-				storage->builds_in_progress.erase(graph.graph_id);
-			}
-			storage->build_finished.notify_all();
-			throw;
-		}
-		{
-			lock_guard<mutex> guard(storage->lock);
-			storage->builds_in_progress.erase(graph.graph_id);
-		}
-		storage->build_finished.notify_all();
-		// Re-enter lookup so a write that raced construction invalidates the new
-		// projection before any consumer can lease it.
+		performed_build |=
+		    BuildAndPublishTableSnapshot(context, *storage, graph.graph_id, graph_name, capabilities, weight_property);
 	}
 }
 
@@ -1099,7 +1522,7 @@ shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, co
 	}
 	auto storage = GetDerivedGraphStorageState(context);
 	try {
-		return AcquireFullSnapshot(context, graph_name, *storage);
+		return AcquireFullLease(context, graph_name, *storage).snapshot;
 	} catch (const InvalidInputException &) {
 		return nullptr;
 	}
@@ -1151,15 +1574,27 @@ static unique_ptr<FunctionData> CsrVerticesBind(ClientContext &context, TableFun
 
 struct CsrVerticesState : GlobalTableFunctionState {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
+	const vector<uint64_t> *delta_vertices = nullptr;
 	idx_t cursor = 0;
 	idx_t end = 0;
+	idx_t delta_cursor = 0;
 };
 
 static unique_ptr<GlobalTableFunctionState> CsrVerticesInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<CsrVerticesBindData>();
 	auto result = make_uniq<CsrVerticesState>();
-	result->snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	auto lease = GqlGetCsrLease(context, data.graph_name);
+	result->snapshot = lease.snapshot;
+	result->delta = lease.delta;
 	TryCsrVertexLabelRange(*result->snapshot, data.label, result->cursor, result->end);
+	auto label = result->snapshot->label_ids.find(data.label);
+	if (result->delta && label != result->snapshot->label_ids.end()) {
+		auto vertices = result->delta->vertex_ids_by_label.find(label->second);
+		if (vertices != result->delta->vertex_ids_by_label.end()) {
+			result->delta_vertices = &vertices->second;
+		}
+	}
 	return std::move(result);
 }
 
@@ -1171,6 +1606,15 @@ static void CsrVerticesFunction(ClientContext &, TableFunctionInput &input, Data
 		output.SetValue(0, index, Value::UBIGINT(state.snapshot->vertex_ids[vertex]));
 	}
 	state.cursor += count;
+	if (state.delta_vertices) {
+		const auto delta_count =
+		    MinValue<idx_t>(STANDARD_VECTOR_SIZE - count, state.delta_vertices->size() - state.delta_cursor);
+		for (idx_t index = 0; index < delta_count; index++) {
+			output.SetValue(0, count + index, Value::UBIGINT((*state.delta_vertices)[state.delta_cursor + index]));
+		}
+		state.delta_cursor += delta_count;
+		count += delta_count;
+	}
 	output.SetChildCardinality(count);
 }
 
@@ -1211,15 +1655,24 @@ static void NeighborsFunction(ClientContext &context, TableFunctionInput &input,
 	auto &state = input.global_state->Cast<NeighborRowsState>();
 	if (!state.initialized) {
 		auto &data = input.bind_data->Cast<CsrBindData>();
-		auto snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+		auto lease = GqlGetCsrLease(context, data.graph_name);
+		const auto &snapshot = lease.snapshot;
+		const auto *delta = lease.delta.get();
 		idx_t vertex;
-		if (GqlTryGetCsrOrdinal(*snapshot, data.vertex_id, vertex)) {
-			const auto &offsets = data.direction == "out" ? snapshot->outgoing_offsets : snapshot->incoming_offsets;
-			const auto &neighbors =
-			    data.direction == "out" ? snapshot->outgoing_neighbors : snapshot->incoming_neighbors;
-			const auto &edge_ids = data.direction == "out" ? snapshot->outgoing_edge_ids : snapshot->incoming_edge_ids;
-			for (idx_t index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
-				state.rows.emplace_back(snapshot->vertex_ids[neighbors[index]], edge_ids[index]);
+		if (CsrTryGetOrdinal(*snapshot, delta, data.vertex_id, vertex)) {
+			const bool outgoing = data.direction == "out";
+			if (vertex < snapshot->vertex_ids.size()) {
+				const auto &offsets = outgoing ? snapshot->outgoing_offsets : snapshot->incoming_offsets;
+				const auto &neighbors = outgoing ? snapshot->outgoing_neighbors : snapshot->incoming_neighbors;
+				const auto &edge_ids = outgoing ? snapshot->outgoing_edge_ids : snapshot->incoming_edge_ids;
+				for (idx_t index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
+					state.rows.emplace_back(snapshot->vertex_ids[neighbors[index]], edge_ids[index]);
+				}
+			}
+			if (const auto *edges = CsrDeltaEdges(delta, vertex, outgoing)) {
+				for (const auto &edge : *edges) {
+					state.rows.emplace_back(CsrVertexId(*snapshot, delta, edge.neighbor), edge.edge_id);
+				}
 			}
 		}
 		state.initialized = true;
@@ -1238,6 +1691,10 @@ struct CsrExpandLocalState : LocalTableFunctionState {
 	}
 
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
+	//! Delta edges of the current row, emitted after its adjacency range.
+	const vector<GqlCsrDeltaEdge> *delta_edges = nullptr;
+	idx_t delta_cursor = 0;
 	string graph_name;
 	string direction;
 	string edge_label;
@@ -1273,7 +1730,7 @@ struct CsrExpandGlobalState : GlobalTableFunctionState {
 	// the operator lifetime so seed processing never repeats catalog/version
 	// validation.
 	mutex lock;
-	unordered_map<string, shared_ptr<const GqlCsrSnapshot>> snapshots;
+	unordered_map<string, GqlCsrLease> leases;
 };
 
 static unique_ptr<GlobalTableFunctionState> CsrExpandGlobalInit(ClientContext &, TableFunctionInitInput &) {
@@ -1285,16 +1742,16 @@ static unique_ptr<LocalTableFunctionState> CsrExpandLocalInit(ExecutionContext &
 	return make_uniq<CsrExpandLocalState>();
 }
 
-static shared_ptr<const GqlCsrSnapshot>
-AcquireCsrOperatorSnapshot(ExecutionContext &context, CsrExpandGlobalState &global, const string &graph_name) {
+static GqlCsrLease AcquireCsrOperatorLease(ExecutionContext &context, CsrExpandGlobalState &global,
+                                           const string &graph_name) {
 	lock_guard<mutex> guard(global.lock);
-	auto entry = global.snapshots.find(graph_name);
-	if (entry != global.snapshots.end()) {
+	auto entry = global.leases.find(graph_name);
+	if (entry != global.leases.end()) {
 		return entry->second;
 	}
-	auto snapshot = GqlGetCsrSnapshot(context.client, graph_name);
-	global.snapshots.emplace(graph_name, snapshot);
-	return snapshot;
+	auto lease = GqlGetCsrLease(context.client, graph_name);
+	global.leases.emplace(graph_name, lease);
+	return lease;
 }
 
 static bool SameString(const string_t &value, const string &other) {
@@ -1339,7 +1796,9 @@ static bool BeginCsrExpansionRow(ExecutionContext &context, const DataChunk &inp
 	const auto &raw_graph = FlatVector::GetData<string_t>(fields[0])[row];
 	if (!state.snapshot || !SameString(raw_graph, state.graph_name)) {
 		state.graph_name = raw_graph.GetString();
-		state.snapshot = AcquireCsrOperatorSnapshot(context, global, state.graph_name);
+		auto lease = AcquireCsrOperatorLease(context, global, state.graph_name);
+		state.snapshot = lease.snapshot;
+		state.delta = lease.delta;
 		state.raw_edge_label.clear();
 		state.edge_label.clear();
 		state.raw_neighbor_label.clear();
@@ -1382,12 +1841,15 @@ static bool BeginCsrExpansionRow(ExecutionContext &context, const DataChunk &inp
 	}
 	state.vertex_id = FlatVector::GetData<uint64_t>(fields[1])[row];
 	idx_t vertex;
-	if (!GqlTryGetCsrOrdinal(*state.snapshot, state.vertex_id, vertex)) {
+	if (!CsrTryGetOrdinal(*state.snapshot, state.delta.get(), state.vertex_id, vertex)) {
 		return true;
 	}
 	const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
-	state.cursor = offsets[vertex];
-	state.end = offsets[vertex + 1];
+	const bool in_base = vertex < state.snapshot->vertex_ids.size();
+	state.cursor = in_base ? offsets[vertex] : 0;
+	state.end = in_base ? offsets[vertex + 1] : 0;
+	state.delta_edges = CsrDeltaEdges(state.delta.get(), vertex, state.outgoing);
+	state.delta_cursor = 0;
 	state.active = state.label_exists && (!state.filter_neighbors || state.neighbor_label_exists);
 	state.current_row = row;
 	return true;
@@ -1456,7 +1918,24 @@ static OperatorResultType CsrExpandFunction(ExecutionContext &context, TableFunc
 			state.selection.set_index(count, state.current_row);
 			count++;
 		}
-		state.active = state.cursor < state.end;
+		if (state.delta_edges && state.cursor >= state.end) {
+			const auto *delta = state.delta.get();
+			while (state.delta_cursor < state.delta_edges->size() && count < STANDARD_VECTOR_SIZE) {
+				const auto &edge = (*state.delta_edges)[state.delta_cursor++];
+				if (edge.label_id != state.label_id ||
+				    (state.filter_neighbors &&
+				     !CsrVertexHasLabels(snapshot, delta, edge.neighbor, state.neighbor_label_ids))) {
+					continue;
+				}
+				auto neighbor_id = CsrVertexId(snapshot, delta, edge.neighbor);
+				edge_output[count] = edge.edge_id;
+				source_output[count] = state.outgoing ? state.vertex_id : neighbor_id;
+				target_output[count] = state.outgoing ? neighbor_id : state.vertex_id;
+				state.selection.set_index(count, state.current_row);
+				count++;
+			}
+		}
+		state.active = state.cursor < state.end || (state.delta_edges && state.delta_cursor < state.delta_edges->size());
 	}
 	if (count > 0) {
 		output.data[3].Reference(Value(state.edge_label), count_t(count));
@@ -1559,6 +2038,7 @@ struct ElementFetchGlobalState : GlobalTableFunctionState {
 	TableCatalogEntry &table;
 	vector<StorageIndex> column_ids;
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
 };
 
 static unique_ptr<GlobalTableFunctionState> ElementFetchGlobalInit(ClientContext &context, TableFunctionInitInput &input) {
@@ -1566,7 +2046,9 @@ static unique_ptr<GlobalTableFunctionState> ElementFetchGlobalInit(ClientContext
 	auto result = make_uniq<ElementFetchGlobalState>(data.table);
 	// Validate once per execution, then pin the immutable identity mapping for
 	// all lateral batches. Writes invalidate the snapshot before the next query.
-	result->snapshot = GqlGetCsrSnapshot(context, data.graph_name);
+	auto lease = GqlGetCsrLease(context, data.graph_name);
+	result->snapshot = lease.snapshot;
+	result->delta = lease.delta;
 	for (const auto &column : input.column_indexes) {
 		if (column.IsVirtualColumn()) {
 			throw NotImplementedException("GQL element fetch does not expose virtual columns");
@@ -1621,11 +2103,10 @@ static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableF
 		const auto canonical_id = ids[row];
 		if (vertex) {
 			idx_t ordinal;
-			if (!GqlTryGetCsrOrdinal(*global.snapshot, canonical_id, ordinal)) {
+			if (!CsrTryGetOrdinal(*global.snapshot, global.delta.get(), canonical_id, ordinal)) {
 				continue;
 			}
-			auto row_id = global.snapshot->vertex_ids_match_rowids ? canonical_id - 1
-			                                                       : global.snapshot->vertex_row_ids[ordinal];
+			auto row_id = CsrVertexRowId(*global.snapshot, global.delta.get(), ordinal);
 			local.requests.emplace_back(NumericCast<row_t>(row_id), NumericCast<sel_t>(row));
 		} else if (canonical_id != 0) {
 			local.requests.emplace_back(NumericCast<row_t>(canonical_id - 1), NumericCast<sel_t>(row));
@@ -1687,6 +2168,7 @@ static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableF
 // minimum length a vertex may be revisited, since a longer walk can still qualify.
 struct CsrShortestLocalState : LocalTableFunctionState {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
 	string edge_label;
 	bool outgoing = true;
 	uint64_t start_id = 0;
@@ -1733,20 +2215,20 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 	}
 	state.outgoing = direction == "out";
 	state.edge_label = StringUtil::Lower(fields[3].GetValue<string>());
-	state.snapshot = AcquireCsrOperatorSnapshot(context, global, fields[0].GetValue<string>());
+	auto lease = AcquireCsrOperatorLease(context, global, fields[0].GetValue<string>());
+	state.snapshot = lease.snapshot;
+	state.delta = lease.delta;
 	state.start_id = fields[1].GetValue<uint64_t>();
 	const auto &snapshot = *state.snapshot;
+	const auto *delta = state.delta.get();
 	const auto label = snapshot.label_ids.find(state.edge_label);
 	idx_t start;
-	if (label == snapshot.label_ids.end() || !GqlTryGetCsrOrdinal(snapshot, state.start_id, start)) {
+	if (label == snapshot.label_ids.end() || !CsrTryGetOrdinal(snapshot, delta, state.start_id, start)) {
 		return;
 	}
 	const auto minimum = fields[4].GetValue<uint64_t>();
 	const auto maximum = fields[5].GetValue<uint64_t>();
 	const auto unbounded = fields[6].GetValue<bool>();
-	const auto &offsets = state.outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
-	const auto &neighbors = state.outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
-	const auto &labels = state.outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
 	unordered_set<idx_t> settled;
 	vector<idx_t> frontier {start};
 	for (uint64_t depth = 1; !frontier.empty() && (unbounded || depth <= maximum); depth++) {
@@ -1754,19 +2236,15 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 		vector<idx_t> next;
 		unordered_set<idx_t> level;
 		for (const auto vertex : frontier) {
-			for (auto index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
-				if (labels[index] != label->second) {
-					continue;
-				}
-				const idx_t neighbor = neighbors[index];
+			CsrForEachEdge(snapshot, delta, vertex, state.outgoing, label->second, [&](idx_t neighbor, uint64_t) {
 				if (settled.count(neighbor) != 0 || !level.insert(neighbor).second) {
-					continue;
+					return;
 				}
 				next.push_back(neighbor);
 				if (depth >= minimum) {
 					state.reached.emplace_back(neighbor, NumericCast<uint32_t>(depth));
 				}
-			}
+			});
 		}
 		if (depth >= minimum) {
 			settled.insert(next.begin(), next.end());
@@ -1795,7 +2273,7 @@ static OperatorResultType CsrShortestFunction(ExecutionContext &context, TableFu
 	output.data[3].Reference(Value(state.edge_label), count_t(count));
 	for (idx_t index = 0; index < count; index++) {
 		const auto &entry = state.reached[state.cursor + index];
-		const auto end_id = state.snapshot->vertex_ids[entry.first];
+		const auto end_id = CsrVertexId(*state.snapshot, state.delta.get(), entry.first);
 		edges[index] = 0;
 		sources[index] = state.outgoing ? state.start_id : end_id;
 		targets[index] = state.outgoing ? end_id : state.start_id;
@@ -1832,7 +2310,8 @@ struct CsrAllShortestBindData : TableFunctionData {
 
 struct CsrAllShortestStep {
 	idx_t vertex;
-	idx_t adjacency;
+	idx_t neighbor;
+	uint64_t edge_id;
 };
 
 struct CsrAllShortestRow {
@@ -1844,6 +2323,7 @@ struct CsrAllShortestRow {
 
 struct CsrAllShortestLocalState : LocalTableFunctionState {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
 	string edge_label;
 	bool searched = false;
 	uint64_t length = 0;
@@ -1914,18 +2394,17 @@ static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, co
 	const auto unbounded = fields[6].GetValue<bool>();
 	const auto per_step = fields[7].GetValue<bool>();
 	const auto from_left = fields[8].GetValue<bool>();
-	state.snapshot = AcquireCsrOperatorSnapshot(context, global, fields[0].GetValue<string>());
+	auto lease = AcquireCsrOperatorLease(context, global, fields[0].GetValue<string>());
+	state.snapshot = lease.snapshot;
+	state.delta = lease.delta;
 	const auto &snapshot = *state.snapshot;
+	const auto *delta = state.delta.get();
 	const auto label = snapshot.label_ids.find(state.edge_label);
 	idx_t start, target;
-	if (label == snapshot.label_ids.end() || !GqlTryGetCsrOrdinal(snapshot, fields[1].GetValue<uint64_t>(), start) ||
-	    !GqlTryGetCsrOrdinal(snapshot, fields[2].GetValue<uint64_t>(), target)) {
+	if (label == snapshot.label_ids.end() || !CsrTryGetOrdinal(snapshot, delta, fields[1].GetValue<uint64_t>(), start) ||
+	    !CsrTryGetOrdinal(snapshot, delta, fields[2].GetValue<uint64_t>(), target)) {
 		return;
 	}
-	const auto &offsets = outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
-	const auto &neighbors = outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
-	const auto &labels = outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
-	const auto &edge_ids = outgoing ? snapshot.outgoing_edge_ids : snapshot.incoming_edge_ids;
 	// The start is not settled, so that it can be its own target through a cycle.
 	unordered_map<idx_t, vector<CsrAllShortestStep>> predecessors;
 	vector<idx_t> frontier {start};
@@ -1936,15 +2415,11 @@ static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, co
 		depth++;
 		unordered_map<idx_t, vector<CsrAllShortestStep>> level;
 		for (const auto vertex : frontier) {
-			for (auto index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
-				if (labels[index] != label->second) {
-					continue;
-				}
-				const idx_t neighbor = neighbors[index];
+			CsrForEachEdge(snapshot, delta, vertex, outgoing, label->second, [&](idx_t neighbor, uint64_t edge_id) {
 				if (predecessors.count(neighbor) == 0) {
-					level[neighbor].push_back({vertex, index});
+					level[neighbor].push_back({vertex, neighbor, edge_id});
 				}
-			}
+			});
 		}
 		frontier.clear();
 		for (auto &entry : level) {
@@ -1972,7 +2447,7 @@ static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, co
 			}
 			vector<idx_t> nodes {start};
 			for (const auto &step : path) {
-				nodes.push_back(neighbors[step.adjacency]);
+				nodes.push_back(step.neighbor);
 			}
 			if (!from_left) {
 				std::reverse(nodes.begin(), nodes.end());
@@ -1981,12 +2456,13 @@ static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, co
 				node_paths.push_back(std::move(nodes));
 			}
 			if (!per_step) {
-				state.rows.push_back({0, snapshot.vertex_ids[start], snapshot.vertex_ids[target], path_index});
+				state.rows.push_back(
+				    {0, CsrVertexId(snapshot, delta, start), CsrVertexId(snapshot, delta, target), path_index});
 			} else {
 				for (const auto &step : path) {
-					const auto from = snapshot.vertex_ids[step.vertex];
-					const auto to = snapshot.vertex_ids[neighbors[step.adjacency]];
-					state.rows.push_back({edge_ids[step.adjacency], outgoing ? from : to, outgoing ? to : from, path_index});
+					const auto from = CsrVertexId(snapshot, delta, step.vertex);
+					const auto to = CsrVertexId(snapshot, delta, step.neighbor);
+					state.rows.push_back({step.edge_id, outgoing ? from : to, outgoing ? to : from, path_index});
 				}
 			}
 			path_index++;
@@ -2011,7 +2487,7 @@ static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, co
 	for (const auto &nodes : node_paths) {
 		for (const auto node : nodes) {
 			if (value_by_vertex.emplace(node, Value(bind.value_type)).second) {
-				const auto row_id = snapshot.vertex_ids_match_rowids ? snapshot.vertex_ids[node] - 1 : snapshot.vertex_row_ids[node];
+				const auto row_id = CsrVertexRowId(snapshot, delta, node);
 				requests.emplace_back(NumericCast<row_t>(row_id), node);
 			}
 		}
@@ -2210,14 +2686,18 @@ static OperatorResultType VertexLookupFunction(ExecutionContext &context, TableF
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
+// A cursor at or past base_end indexes delta_edges.
 struct CsrPathFrame {
 	idx_t vertex = 0;
 	idx_t cursor = 0;
 	idx_t end = 0;
+	idx_t base_end = 0;
+	const vector<GqlCsrDeltaEdge> *delta_edges = nullptr;
 };
 
 struct CsrPathExpandLocalState : LocalTableFunctionState {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
 	string graph_name;
 	string edge_label;
 	vector<CsrPathFrame> frames;
@@ -2267,6 +2747,19 @@ static void ResetCsrPathExpansionInput(CsrPathExpandLocalState &state) {
 	state.current_end_id = 0;
 }
 
+static CsrPathFrame MakeCsrPathFrame(const CsrPathExpandLocalState &state, idx_t vertex) {
+	CsrPathFrame frame;
+	frame.vertex = vertex;
+	if (vertex < state.snapshot->vertex_ids.size()) {
+		const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
+		frame.cursor = NumericCast<idx_t>(offsets[vertex]);
+		frame.base_end = NumericCast<idx_t>(offsets[vertex + 1]);
+	}
+	frame.delta_edges = CsrDeltaEdges(state.delta.get(), vertex, state.outgoing);
+	frame.end = frame.base_end + (frame.delta_edges ? frame.delta_edges->size() : 0);
+	return frame;
+}
+
 static void InitializeCsrPathExpansion(ExecutionContext &context, DataChunk &input, CsrExpandGlobalState &global,
                                        CsrPathExpandLocalState &state) {
 	if (input.size() != 1 || input.ColumnCount() != 1) {
@@ -2297,7 +2790,9 @@ static void InitializeCsrPathExpansion(ExecutionContext &context, DataChunk &inp
 	}
 	state.outgoing = direction == "out";
 	if (!state.snapshot || state.graph_name != graph_name) {
-		state.snapshot = AcquireCsrOperatorSnapshot(context, global, graph_name);
+		auto lease = AcquireCsrOperatorLease(context, global, graph_name);
+		state.snapshot = lease.snapshot;
+		state.delta = lease.delta;
 		state.graph_name = std::move(graph_name);
 		state.edge_label.clear();
 	}
@@ -2314,12 +2809,11 @@ static void InitializeCsrPathExpansion(ExecutionContext &context, DataChunk &inp
 	state.start_id = fields[1].GetValue<uint64_t>();
 	state.zero_pending = state.minimum_repetitions == 0;
 	idx_t vertex;
-	if (!GqlTryGetCsrOrdinal(*state.snapshot, state.start_id, vertex)) {
+	if (!CsrTryGetOrdinal(*state.snapshot, state.delta.get(), state.start_id, vertex)) {
 		state.initialized = true;
 		return;
 	}
-	const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
-	state.frames.push_back({vertex, NumericCast<idx_t>(offsets[vertex]), NumericCast<idx_t>(offsets[vertex + 1])});
+	state.frames.push_back(MakeCsrPathFrame(state, vertex));
 	state.active = state.label_exists;
 	state.initialized = true;
 }
@@ -2330,7 +2824,6 @@ static bool NextCsrPath(CsrPathExpandLocalState &state) {
 		state.current_end_id = state.start_id;
 		return true;
 	}
-	const auto &offsets = state.outgoing ? state.snapshot->outgoing_offsets : state.snapshot->incoming_offsets;
 	const auto &neighbors = state.outgoing ? state.snapshot->outgoing_neighbors : state.snapshot->incoming_neighbors;
 	const auto &edge_ids = state.outgoing ? state.snapshot->outgoing_edge_ids : state.snapshot->incoming_edge_ids;
 	const auto &label_ids = state.outgoing ? state.snapshot->outgoing_label_ids : state.snapshot->incoming_label_ids;
@@ -2347,10 +2840,12 @@ static bool NextCsrPath(CsrPathExpandLocalState &state) {
 			continue;
 		}
 		auto edge_offset = frame.cursor++;
-		if (label_ids[edge_offset] != state.label_id) {
+		const bool in_base = edge_offset < frame.base_end;
+		const auto *delta_edge = in_base ? nullptr : &(*frame.delta_edges)[edge_offset - frame.base_end];
+		if ((in_base ? label_ids[edge_offset] : delta_edge->label_id) != state.label_id) {
 			continue;
 		}
-		auto edge_id = edge_ids[edge_offset];
+		auto edge_id = in_base ? edge_ids[edge_offset] : delta_edge->edge_id;
 		static constexpr idx_t EDGE_MEMBERSHIP_THRESHOLD = 64;
 		if (!state.indexed_edges && state.edge_ids.size() >= EDGE_MEMBERSHIP_THRESHOLD) {
 			state.active_edge_ids.insert(state.edge_ids.begin(), state.edge_ids.end());
@@ -2365,13 +2860,14 @@ static bool NextCsrPath(CsrPathExpandLocalState &state) {
 				continue;
 			}
 		}
-		auto neighbor = neighbors[edge_offset];
+		idx_t neighbor = in_base ? neighbors[edge_offset] : delta_edge->neighbor;
 		state.edge_ids.push_back(edge_id);
 		auto depth = state.edge_ids.size();
 		auto descend = state.unbounded || depth < state.maximum_repetitions;
-		state.frames.push_back({neighbor, descend ? NumericCast<idx_t>(offsets[neighbor]) : 0,
-		                        descend ? NumericCast<idx_t>(offsets[neighbor + 1]) : 0});
-		state.current_end_id = state.snapshot->vertex_ids[neighbor];
+		CsrPathFrame next;
+		next.vertex = neighbor;
+		state.frames.push_back(descend ? MakeCsrPathFrame(state, neighbor) : next);
+		state.current_end_id = CsrVertexId(*state.snapshot, state.delta.get(), neighbor);
 		if (depth >= state.minimum_repetitions) {
 			return true;
 		}
@@ -2454,7 +2950,9 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
 	         "endpoint_statistics_status",
 	         "endpoint_label_groups",
 	         "endpoint_combinations",
-	         "endpoint_statistics_bytes"};
+	         "endpoint_statistics_bytes",
+	         "delta_vertex_count",
+	         "delta_edge_count"};
 	return_types = {
 	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
 	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
@@ -2462,7 +2960,7 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
 	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
 	    LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::UBIGINT,
 	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::VARCHAR,
-	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
+	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
 	return std::move(result);
 }
 
@@ -2500,10 +2998,10 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 	PublishTableSnapshot(*storage,
 	                     BuildTableSnapshot(context, data.graph_name,
 	                                        GQL_CSR_FULL | (data.endpoint_statistics ? GQL_CSR_ENDPOINT_STATS : 0)));
-	// Publication is followed by the same generation check used by consumers.
-	// If a write raced construction, CALL must not report a stale projection as
-	// successfully prepared.
-	auto snapshot = GetPreparedTableSnapshot(context, data.graph_name, *storage, GQL_CSR_FULL);
+	// Publication is followed by the same acquisition used by consumers. If a write
+	// raced construction, CALL must not report a stale projection as successfully
+	// prepared, unless a delta follows it.
+	auto snapshot = AcquireFullLease(context, data.graph_name, *storage).snapshot;
 	auto build_count = ReadCsrBuildCount(*storage);
 
 	output.SetChildCardinality(1);
@@ -2523,13 +3021,27 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	}
 	auto &data = input.bind_data->Cast<CsrBindData>();
 	auto storage = GetDerivedGraphStorageState(context);
-	auto snapshot = GetPreparedTableSnapshot(context, data.graph_name, *storage, 0, data.weight_property);
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	shared_ptr<const GqlCsrDelta> delta;
+	try {
+		snapshot = GetPreparedTableSnapshot(context, data.graph_name, *storage, 0, data.weight_property);
+	} catch (const InvalidInputException &) {
+		// The only CSR left may be one that a delta extends.
+		if (!data.weight_property.empty()) {
+			throw;
+		}
+		auto lease = AcquireFullLease(context, data.graph_name, *storage);
+		snapshot = lease.snapshot;
+		delta = lease.delta;
+	}
 	auto build_count = ReadCsrBuildCount(*storage);
+	const idx_t delta_vertices = delta ? delta->vertex_ids.size() : 0;
+	const idx_t delta_edges = delta ? delta->edge_count : 0;
 	output.SetChildCardinality(1);
 	output.SetValue(0, 0, Value(data.graph_name));
 	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
-	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size()));
-	output.SetValue(3, 0, Value::UBIGINT(snapshot->edge_count));
+	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size() + delta_vertices));
+	output.SetValue(3, 0, Value::UBIGINT(snapshot->edge_count + delta_edges));
 	output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
 	output.SetValue(5, 0, Value::UBIGINT(build_count));
 	output.SetValue(6, 0, Value(true));
@@ -2567,6 +3079,8 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	output.SetValue(24, 0, Value::UBIGINT(storage->acquisition_count.load()));
 	output.SetValue(25, 0, snapshot->has_source_snapshot ? Value(snapshot->source_catalog) : Value());
 	output.SetValue(26, 0, snapshot->has_source_snapshot ? Value::UBIGINT(snapshot->source_snapshot_id) : Value());
+	output.SetValue(33, 0, Value::UBIGINT(delta_vertices));
+	output.SetValue(34, 0, Value::UBIGINT(delta_edges));
 	state.done = true;
 }
 

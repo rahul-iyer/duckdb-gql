@@ -26,6 +26,6 @@ The following filter-pushdown step preserves the preceding build in `before-filt
 
 `run.py` measures the cost planner by default; pass `--optimizer legacy` for the engine's current default. The `differential_*.py` scripts compare DuckGQL under both planners with Ladybug's original Cypher on other person IDs, outside benchmark timing; see `HANDOFF.md`.
 
-`run.py --prepared` compiles each query once and reuses the plan, as Ladybug's client does implicitly, and writes `results-prepared.json`. `test_prepared_reuse.py` checks that prepared plans never outlive what they depend on.
+`run.py --prepared` compiles each query once and reuses the plan, as Ladybug's client does implicitly, and writes `results-prepared.json`. `test_prepared_reuse.py` checks that prepared plans never outlive what they depend on. `test_csr_delta.py` checks that inserts reach reads without a rebuild, with prepared plans, appenders and concurrent connections.
 
 `run.py --parameterized` also compiles once, and binds the upstream values as `$name` parameters instead of writing them as literals; it writes `results-parameterized.json`.

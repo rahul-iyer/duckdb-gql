@@ -252,7 +252,7 @@ unique_ptr<FunctionData> EndpointBindFunction(ClientContext &, TableFunctionBind
 }
 unique_ptr<GlobalTableFunctionState> EndpointInit(ClientContext &context, TableFunctionInitInput &input) {
 	auto result = make_uniq<EndpointScan>();
-	result->snapshot = GqlGetCsrSnapshot(context, input.bind_data->Cast<EndpointBind>().graph_name);
+	result->snapshot = GqlGetUnchangedCsrSnapshot(context, input.bind_data->Cast<EndpointBind>().graph_name);
 	if (!result->snapshot->endpoint_statistics)
 		throw InvalidInputException("Endpoint statistics unavailable (%s); build CSR with endpoint_statistics := true",
 		                            result->snapshot->endpoint_statistics_status);

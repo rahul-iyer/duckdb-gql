@@ -1,0 +1,520 @@
+# name: test/sql/gql_csr_delta.test
+# description: Inserts reach reads through a delta over the immutable CSR, without a rebuild, and everything else still forces one
+# group: [gql]
+
+require duckgql
+
+# 1 -> 2 -> 3, where 3 has label B and the rest have label A.
+statement ok
+COPY (SELECT * FROM (VALUES (1,'A',10),(2,'A',20),(3,'B',30)) v(":ID",":LABEL","score:int")) TO '{TEST_DIR}/delta_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R'),(2,3,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/delta_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH delta ANY
+
+statement ok
+COPY GRAPH delta FROM (VERTICES '{TEST_DIR}/delta_nodes.csv', EDGES '{TEST_DIR}/delta_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH delta
+
+statement ok
+CALL gql_build_csr('delta')
+
+statement ok
+SET VARIABLE builds = (SELECT build_count FROM gql_csr_stats('delta'))
+
+query II
+SELECT vertex_count, edge_count FROM gql_csr_stats('delta')
+----
+3	2
+
+statement ok
+INSERT (:A {score: 40})
+
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 20 AND b.score = 40 INSERT (a)-[:R]->(b)
+
+# The functions below have no relational fallback, so they fail without a current CSR.
+query I rowsort
+SELECT neighbor_id FROM gql_neighbors('delta', 2, 'out')
+----
+3
+4
+
+query I
+SELECT neighbor_id FROM gql_neighbors('delta', 4, 'in')
+----
+2
+
+query I rowsort
+SELECT __gql_id FROM gql_csr_vertices('delta', 'A')
+----
+1
+2
+4
+
+# Reported totals follow the inserts, and the rows are held in the delta.
+query IIII
+SELECT vertex_count, edge_count, delta_vertex_count, delta_edge_count FROM gql_csr_stats('delta')
+----
+4	3	1	1
+
+query I
+SELECT build_count = getvariable('builds') FROM gql_csr_stats('delta')
+----
+true
+
+# A graph this small plans hash joins, so the operators are also called directly.
+query III rowsort
+SELECT e.__gql_source_id, e.__gql_target_id, e.__gql_type FROM (VALUES (2::UBIGINT)) seed(id),
+LATERAL gql_csr_expand(struct_pack(graph_name := 'delta', vertex_id := seed.id, direction := 'out', edge_label := 'R')) e
+----
+2	3	r
+2	4	r
+
+query II
+SELECT e.__gql_source_id, e.__gql_target_id FROM (VALUES (4::UBIGINT)) seed(id),
+LATERAL gql_csr_expand(struct_pack(graph_name := 'delta', vertex_id := seed.id, direction := 'in', edge_label := 'R')) e
+----
+2	4
+
+query I
+SELECT e.__gql_target_id FROM (VALUES (2::UBIGINT)) seed(id),
+LATERAL gql_csr_expand(struct_pack(graph_name := 'delta', vertex_id := seed.id, direction := 'out', edge_label := 'R', neighbor_label := 'A')) e
+----
+4
+
+query I
+SELECT e.__gql_target_id FROM (VALUES (2::UBIGINT)) seed(id),
+LATERAL gql_csr_expand(struct_pack(graph_name := 'delta', vertex_id := seed.id, direction := 'out', edge_label := 'R', neighbor_label := 'B')) e
+----
+3
+
+query I
+SELECT f.score FROM (VALUES (4::UBIGINT)) seed(id), LATERAL gql_vertex_fetch(seed.id) f
+----
+40
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Expansion out of an old vertex reaches the new one, and its row can be read.
+query I rowsort
+MATCH (a:A)-[:R]->(b) WHERE a.score = 20 RETURN b.score
+----
+30
+40
+
+# Expansion against the direction, starting from the new vertex.
+query I
+MATCH (a)<-[:R]-(b) WHERE a.score = 40 RETURN b.score
+----
+20
+
+# Requiring the far label tests both old and new neighbors.
+query I
+MATCH (a:A)-[:R]->(b:A) WHERE a.score = 20 RETURN b.score
+----
+40
+
+query I
+MATCH (a:A)-[:R]->(b:B) WHERE a.score = 20 RETURN b.score
+----
+30
+
+# A label scan finds the new vertex.
+query I rowsort
+MATCH (a:A) RETURN a.score
+----
+10
+20
+40
+
+query I
+MATCH (a:A)-[e:R]->(b) WHERE b.score = 40 RETURN a.score
+----
+20
+
+endloop
+
+# A new vertex can start an expansion, and edges can link new vertices to each other.
+statement ok
+INSERT (:B {score: 50})
+
+statement ok
+MATCH (a:A), (b:B) WHERE a.score = 40 AND b.score = 50 INSERT (a)-[:R]->(b)
+
+statement ok
+MATCH (a:A), (b:B) WHERE a.score = 10 AND b.score = 50 INSERT (b)-[:R]->(a)
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+query I
+MATCH (a:A)-[:R]->(b:B) WHERE a.score = 40 RETURN b.score
+----
+50
+
+# Variable-length expansion crosses base and delta in both directions, and the
+# trail through the new cycle 1 -> 2 -> 4 -> 5 -> 1 stops at the repeated edge.
+query I rowsort
+MATCH (a:A)-[:R]->{1,3}(b) WHERE a.score = 10 RETURN b.score
+----
+20
+30
+40
+50
+
+query I rowsort
+MATCH (a)<-[:R]-{1,2}(b) WHERE a.score = 50 RETURN b.score
+----
+20
+40
+
+query I
+MATCH (a:A)-[:R]->{4,4}(b) WHERE a.score = 10 RETURN b.score
+----
+10
+
+# The only way out of 1 is used by then, so nothing is five edges long.
+query I
+MATCH (a:A)-[:R]->{5,8}(b) WHERE a.score = 10 RETURN count(*)
+----
+0
+
+# Path searches follow new edges, new vertices, and their properties.
+query I
+MATCH (a:A) WHERE a.score = 10
+MATCH p = ANY SHORTEST (a)-[:R]->{1,5}(b) WHERE b.score = 50
+RETURN PATH_LENGTH(p)
+----
+3
+
+query I
+MATCH (s:A) WHERE s.score = 10
+MATCH (t:B) WHERE t.score = 50
+MATCH p = ALL SHORTEST (s)-[:R]->{1,6}(t)
+RETURN [n IN NODES(p) | n.score]
+----
+[10, 20, 40, 50]
+
+endloop
+
+statement ok
+RESET gql_optimizer
+
+query I
+SELECT build_count = getvariable('builds') FROM gql_csr_stats('delta')
+----
+true
+
+# A later delta extends an earlier one rather than replacing it.
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 10 AND b.score = 40 INSERT (a)-[:R]->(b)
+
+query I rowsort
+SELECT neighbor_id FROM gql_neighbors('delta', 1, 'out')
+----
+2
+4
+
+query IIII
+SELECT vertex_count, edge_count, delta_vertex_count, delta_edge_count FROM gql_csr_stats('delta')
+----
+5	6	2	4
+
+# A rolled-back write adds nothing, and rows of an open transaction stay private.
+statement ok
+BEGIN
+
+statement ok
+INSERT (:A {score: 60})
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (a:A) WHERE a.score = 60 RETURN count(*)
+----
+0
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A')
+----
+3
+
+statement ok con2
+SESSION SET GRAPH delta
+
+statement ok con2
+BEGIN
+
+statement ok con2
+INSERT (:A {score: 70})
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A')
+----
+3
+
+# The open transaction reads its own row, which no CSR holds.
+query I con2
+MATCH (a:A) WHERE a.score = 70 RETURN count(*)
+----
+1
+
+statement ok con2
+COMMIT
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A')
+----
+4
+
+query I
+MATCH (a:A) WHERE a.score = 70 RETURN a.score
+----
+70
+
+# Another connection's committed edge is visible at this connection's next statement.
+statement ok con2
+MATCH (a:A), (b:A) WHERE a.score = 70 AND b.score = 10 INSERT (a)-[:R]->(b)
+
+query I
+MATCH (a:A)-[:R]->(b) WHERE a.score = 70 RETURN b.score
+----
+10
+
+query I con2
+MATCH (a:A)-[:R]->(b) WHERE a.score = 70 RETURN b.score
+----
+10
+
+# A prepared plan sees rows inserted after it was prepared. Prepared MATCH statements
+# need the client API, so test_prepared_reuse.py covers those.
+statement ok
+PREPARE delta_neighbors AS SELECT count(*) FROM gql_neighbors('delta', 1, 'in')
+
+query I
+EXECUTE delta_neighbors
+----
+2
+
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 70 AND b.score = 10 INSERT (a)-[:R]->(b)
+
+query I
+EXECUTE delta_neighbors
+----
+3
+
+# Writing through SQL is observed as well.
+statement ok
+INSERT INTO gql_data.graph_1_vertices (__gql_id, __gql_label, score)
+SELECT max(__gql_id) + 1000, ['a'], 80 FROM gql_data.graph_1_vertices
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A')
+----
+5
+
+query I
+MATCH (a:A) WHERE a.score = 80 RETURN a.score
+----
+80
+
+query I
+SELECT build_count = getvariable('builds') FROM gql_csr_stats('delta')
+----
+true
+
+# Algorithms have no delta support, so they build their own current CSR.
+query I
+SELECT count(*) > 0 FROM system.algo.bfs('delta', 1)
+----
+true
+
+query I
+SELECT build_count > getvariable('builds') FROM gql_csr_stats('delta')
+----
+true
+
+# Reads go on from the full CSR and its delta.
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A')
+----
+5
+
+# A label the CSR's dictionary lacks forces a rebuild, with the correct answer.
+statement ok
+INSERT (:Brand {score: 90})
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'Brand')
+----
+1
+
+query I
+MATCH (a:Brand) RETURN a.score
+----
+90
+
+query II
+SELECT delta_vertex_count, delta_edge_count FROM gql_csr_stats('delta')
+----
+0	0
+
+# So does an edge type that has no edges in the CSR yet.
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 10 AND b.score = 20 INSERT (a)-[:NEWTYPE]->(b)
+
+query I
+MATCH (a:A)-[:NEWTYPE]->(b) WHERE a.score = 10 RETURN b.score
+----
+20
+
+# Deleting from a table cannot be expressed in a delta, so the CSR is no longer available.
+statement ok
+CALL gql_build_csr('delta')
+
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_type = 'newtype'
+
+statement error
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out')
+----
+has not been built
+
+# The relational plan still answers, and so does a rebuilt CSR.
+query I
+MATCH (a:A)-[:NEWTYPE]->(b) WHERE a.score = 10 RETURN count(*)
+----
+0
+
+statement ok
+CALL gql_build_csr('delta')
+
+statement ok
+UPDATE gql_data.graph_1_vertices SET __gql_label = ['b'] WHERE score = 80
+
+statement error
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out')
+----
+has not been built
+
+statement ok
+CALL gql_build_csr('delta')
+
+query I
+MATCH (a:B) WHERE a.score = 80 RETURN a.score
+----
+80
+
+# A rolled-back insert leaves a gap in the edge IDs, so they stop matching row IDs.
+# The next insert can't be fetched by ID, and the rebuild gives correct answers.
+statement ok
+BEGIN
+
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 10 AND b.score = 20 INSERT (a)-[:R]->(b)
+
+statement ok
+ROLLBACK
+
+statement ok
+SET VARIABLE builds = (SELECT build_count FROM gql_csr_stats('delta'))
+
+statement ok
+MATCH (a:A), (b:A) WHERE a.score = 10 AND b.score = 70 INSERT (a)-[:R]->(b)
+
+query I
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out') n JOIN gql_data.graph_1_vertices v ON n.neighbor_id = v.__gql_id WHERE v.score = 70
+----
+1
+
+query I
+SELECT build_count = getvariable('builds') + 1 FROM gql_csr_stats('delta')
+----
+true
+
+query I
+MATCH (a:A)-[:R]->(b) WHERE a.score = 10 AND b.score = 70 RETURN count(*)
+----
+1
+
+# A delta larger than its limit is folded into a new CSR automatically.
+statement ok
+CALL gql_build_csr('delta')
+
+statement ok
+SET VARIABLE builds = (SELECT build_count FROM gql_csr_stats('delta'))
+
+statement ok
+INSERT INTO gql_data.graph_1_edges (__gql_edge_id, __gql_source_id, __gql_target_id, __gql_type)
+SELECT (SELECT max(__gql_edge_id) FROM gql_data.graph_1_edges) + i, 1, 2, 'r' FROM range(1, 5001) t(i)
+
+query I
+MATCH (a:A)-[:R]->(b) WHERE a.score = 10 AND b.score = 20 RETURN count(*)
+----
+5001
+
+query I
+SELECT build_count = getvariable('builds') + 1 FROM gql_csr_stats('delta')
+----
+true
+
+query II
+SELECT delta_vertex_count, delta_edge_count FROM gql_csr_stats('delta')
+----
+0	0
+
+# A checkpoint does not disturb the watermark.
+statement ok
+SET VARIABLE builds = (SELECT build_count FROM gql_csr_stats('delta'))
+
+statement ok
+INSERT (:A {score: 100})
+
+statement ok
+CHECKPOINT
+
+statement ok
+INSERT (:A {score: 110})
+
+query I
+SELECT count(*) FROM gql_csr_vertices('delta', 'A') v WHERE v.__gql_id IN (SELECT __gql_id FROM gql_data.graph_1_vertices WHERE score IN (100, 110))
+----
+2
+
+# Dropping and replacing the graph does not reuse the old CSR or its delta.
+statement ok
+DROP GRAPH delta
+
+statement ok
+CREATE GRAPH delta ANY
+
+statement ok
+COPY GRAPH delta FROM (VERTICES '{TEST_DIR}/delta_nodes.csv', EDGES '{TEST_DIR}/delta_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH delta
+
+statement error
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out')
+----
+has not been built
+
+query I
+MATCH (a:A)-[:R]->(b) WHERE a.score = 10 RETURN b.score
+----
+20
+
+statement ok
+DROP GRAPH delta

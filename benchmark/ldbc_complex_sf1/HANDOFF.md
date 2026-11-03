@@ -2,7 +2,41 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
-## All 14 queries, and what a mixed workload shows (newest)
+## Incremental CSR (newest; supersedes the stale-read figures in the next section)
+
+Inserts reach reads through an immutable `GqlCsrDelta` over the immutable snapshot. Mixed workload on
+the cost planner, right after writes, before -> after (ms): IC8 86.5 -> 4.9, IC10 919 -> 19.3,
+IC11 97.8 -> 5.0, IC1 ~700 -> 16.8, IC12 errored -> 24.5; no CSR builds in 400 writes (351 vertices,
+2,351 edges in the delta). Answers on the delta match Ladybug 56/56 on both planners. Reads with no
+writes are unchanged. Results in `OUT/after-csr-delta/`.
+
+How it holds together, all in `gql_csr.cpp`:
+
+- The first acquisition in a statement catches up (`ResolveFullLease`) and the lease keeps that
+  version for the statement. Algorithms still require an exact CSR and build their own.
+- A scan is only needed when `GqlDatabaseWriteGeneration` moved. It is read before the scan, so a write
+  committing during it causes one more scan rather than a miss.
+- `ScanCsrDelta` reads rows from the row ID watermarks on, then compares table row counts. That check is
+  what makes watermarks safe against out-of-order commits, moved row IDs and appenders; any failure rebuilds.
+- These rebuild automatically: a label or edge type with no rows in the CSR, more than
+  max(4096, edges/1024) delta rows, a schema version change, and an edge ID that doesn't match its row ID.
+- Writes are classified in `gql_extension.cpp`. Delete, update, upsert and any prepared write still
+  remove the CSR, and reads fall back to relational plans. Generations also advance at commit now, which
+  closes a hole where a build between a write's plan and its commit recorded old rows as current.
+
+Known limits: the optimizer plans from the snapshot's statistics, which lag by at most the delta limit. A
+statement can see a commit made just after its transaction began. A rolled-back edge insert leaves a gap in
+edge IDs, which turns off edge fetch for that graph until IDs match row IDs again, which they won't. Delta
+memory is not in `memory_bytes`. Property updates remove the CSR even though they don't change topology.
+Two concurrent GQL writers conflict on the `graph_version` row (found by the stress test, not new): one
+gets `Conflict on update` and must retry.
+
+Tests: `test/sql/gql_csr_delta.test`, `test_csr_delta.py` (prepared MATCH, appenders, 3 readers, 2 writers
+and a rebuild loop). Two older tests asserted that any write removes the CSR: `gql_cost_join_domains.test`
+now checks that with a delete, and `gql_cost_fanout.test` checks the delta count. `gql_csr_stats` gained
+`delta_vertex_count` and `delta_edge_count`, and its totals include the delta.
+
+## All 14 queries, and what a mixed workload shows
 
 All 14 pass goldens natively under both planners, in fresh, prepared and parameterized modes.
 Differential against Ladybug: 140/140 per mode across 10 people. Results in `OUT/after-ic1-ic14/`.
@@ -10,16 +44,16 @@ Added: `ANY SHORTEST` + `PATH_LENGTH`, `ALL SHORTEST`, `FOR step IN steps` over 
 searched `CASE`, list values, and `[n IN NODES(p) | n.prop]` (a text rewrite; the vendored grammar is
 unchanged). See `test/sql/gql_any_shortest_case_list.test` and `gql_all_shortest.test` for the limits.
 
-`mixed_workload.py` replays LDBC's update stream. Reads degrade badly on a stale CSR, and path searches
-rebuild it at bind, so they cost a full rebuild after any write. Keep IC1 last in `READS`: running it
-first hides the slowdown from every later read.
+`mixed_workload.py` replays LDBC's update stream. It records answers on the delta (`delta`), after a
+rebuild (`fast`), and after a write that removes the CSR (`stale`, forced by an UPDATE matching no rows).
 
 Open, in priority order:
 
-1. **Internal error:** IC12, cost planner, stale CSR, any real write: `dict-surviving join ... build
-   pipeline is not single-source`. It can invalidate the database. Not caused by fence removal or the
-   delim setting; the plan has 477 scans and estimates near 5.9e18 rows. Not yet proven a DuckDB bug.
-2. Incremental CSR, as planned with the user; removes the stale path.
+1. **Internal error:** IC12, cost planner, with no CSR, which now takes a delete, update or prepared write:
+   `dict-surviving join ... build pipeline is not single-source`. It can invalidate the database. Not
+   caused by fence removal or the delim setting; the plan has 477 scans and estimates near 5.9e18 rows.
+   Not yet proven a DuckDB bug. `--skip-stale 12` keeps the harness running.
+2. Incremental CSR: done, see above.
 3. SF10: legacy beats cost (IC11, IC5, IC4), and IC2 regressed since August on both planners.
 4. Renaming a database file breaks its graph: metadata stores the catalog name.
 

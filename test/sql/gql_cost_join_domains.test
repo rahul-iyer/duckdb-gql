@@ -123,7 +123,7 @@ MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C), (c)-[:T]->(a) RETURN count(*)
 statement ok
 SET gql_optimizer='cost'
 
-# A write removes the complete snapshot; query semantics must not depend on it.
+# An insert leaves the complete snapshot under a delta, with the statistics it was built with.
 statement ok
 INSERT (:A {score: 100})
 
@@ -135,12 +135,21 @@ MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN count(*)
 query I
 SELECT count(*) FROM gql_optimizer_plan() WHERE endpoint_edges IS NOT NULL
 ----
-0
+2
 
 # Deleted rowids create gaps: a native rowid is not a CSR ordinal. The index
 # probe must translate through the snapshot's vertex identity map.
 statement ok
 MATCH (a:A) WHERE a.score=9 DETACH DELETE a
+
+# A delete removes the complete snapshot; query semantics must not depend on it.
+statement ok
+MATCH (a:A)-[:R]->(b:B), (b)-[:S]->(c:C) RETURN count(*)
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE endpoint_edges IS NOT NULL
+----
+0
 
 statement ok
 CALL gql_build_csr('join_domains', endpoint_statistics := true)

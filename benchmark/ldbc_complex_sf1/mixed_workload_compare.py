@@ -44,7 +44,7 @@ print('Batch of writes, median ms: D, L:', round(duck['mixed_no_maintenance']['b
 duck_answers = json.loads((OUT / f'mixed-duckgql-{planner}-answers.json').read_text())
 lady_answers = json.loads((OUT / 'mixed-ladybug-answers.json').read_text())
 failures = 0
-for label in ('fast', 'stale'):
+for label in ('delta', 'fast', 'stale'):
     matched = compared = skipped = 0
     for key, expected in lady_answers.items():
         actual = duck_answers[key.replace('fast/', label + '/', 1)]

@@ -20,7 +20,6 @@ ROOT = HERE.parents[1]
 OUT = ROOT / 'build/benchmarks/ldbc-complex-sf1'
 UPSTREAM = Path('/Users/rahuliyer/graph-benchmark-ldbc-complex')
 STREAMS = UPSTREAM / 'social_network-sf1-CsvBasic-StringDateFormatter'
-# IC1 is last: a path search rebuilds a stale CSR, which would hide the state later reads see.
 READS = [2, 8, 10, 11, 12, 1]
 ANSWER_QUERIES = list(range(1, 15))
 ANSWER_PEOPLE = [1131, 2199023262543, 13194139538102, 19791209305691]
@@ -144,6 +143,10 @@ class DuckGQL:
         started = time.perf_counter()
         self.db.query("CALL gql_build_csr('snb_interactive')")
         return (time.perf_counter() - started) * 1000
+
+    def delta_state(self):
+        row = self.db.query("SELECT delta_vertex_count, delta_edge_count, build_count FROM gql_csr_stats('snb_interactive')")[0]
+        return dict(zip(('delta_vertices', 'delta_edges', 'build_count'), row.values()))
 
     def literal(self, value):
         return str(value) if isinstance(value, int) else "'" + str(value).replace("'", "''") + "'"
@@ -302,7 +305,7 @@ def main():
     parser.add_argument('--rounds', type=int, default=20)
     parser.add_argument('--optimizer', choices=['cost', 'legacy'], default='cost', help='DuckGQL planner')
     parser.add_argument('--skip-stale', type=int, nargs='*', default=[],
-                        help='queries not to run while the CSR is stale, recorded as skipped: an internal '
+                        help='queries not to run without a CSR, recorded as skipped: an internal '
                              'error invalidates the database instance and would end the run')
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
@@ -311,7 +314,7 @@ def main():
               'threads': 4, 'phases': {}}
     report['config']['work'] = str(args.work)
     phases = report['phases']
-    total = args.write_ops + 2 * args.batch * args.rounds
+    total = args.write_ops + (2 * args.rounds + 1) * args.batch
     operations = stream_operations(total)
 
     started = time.perf_counter()
@@ -350,7 +353,7 @@ def main():
             batch_ms.append((time.perf_counter() - started_batch) * 1000)
             if after_batch:
                 extra.append(timed(after_batch))
-            read_round(engine, reads, () if after_batch or args.engine == 'ladybug' else args.skip_stale)
+            read_round(engine, reads)
         phases[phase] = {'batch_writes': summary(batch_ms), 'reads': {name: summary(samples) for name, samples in reads.items()}}
         if extra:
             phases[phase]['after_batch'] = summary(extra)
@@ -358,7 +361,12 @@ def main():
               'after batch', round(statistics.median(extra), 1) if extra else None, flush=True)
 
     # With no maintenance, then with what DuckGQL needs to recover its fast path.
+    builds_before = engine.delta_state()['build_count'] if args.engine == 'duckgql' else None
     mixed('mixed_no_maintenance')
+    if args.engine == 'duckgql':
+        phases['mixed_no_maintenance']['delta'] = engine.delta_state()
+        phases['mixed_no_maintenance']['csr_builds'] = phases['mixed_no_maintenance']['delta']['build_count'] - builds_before
+        print('after no maintenance', phases['mixed_no_maintenance']['delta'], 'builds', phases['mixed_no_maintenance']['csr_builds'], flush=True)
     mixed('mixed_with_maintenance', engine.prepare_for_reads if args.engine == 'duckgql' else None)
 
     answers = {}
@@ -375,6 +383,15 @@ def main():
                     answers[key] = engine.answer(number, person)
                 except Exception as error:
                     answers[key] = 'ERR ' + str(error)[:200]
+    for _ in range(args.batch):
+        _, kind, fields = next(operations)
+        engine.apply(kind, fields)
+    if args.engine == 'duckgql':
+        # The inserts above are in a delta over the CSR, until the rebuild.
+        phases['delta_before_answers'] = engine.delta_state()
+        print('delta', phases['delta_before_answers'], flush=True)
+        collect('delta')
+        engine.prepare_for_reads()
     collect('fast')
     if args.engine == 'duckgql':
         # A write that changes no rows still leaves the CSR stale, so these answers

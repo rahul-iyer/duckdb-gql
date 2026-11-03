@@ -2394,7 +2394,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 	for (const auto &stage : match.match_stages) {
 		for (const auto &pattern : stage.patterns) {
 			for (const auto &element : pattern.elements) {
-				if (element.shortest) {
+				if (element.shortest && !GqlTryGetCsrSnapshot(context, graph_name)) {
 					GqlGetOrBuildCsrSnapshot(context, graph_name, GQL_CSR_FULL, nullptr, string());
 				}
 			}

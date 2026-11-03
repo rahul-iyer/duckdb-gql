@@ -233,6 +233,28 @@ inline uint64_t GqlEndpointGroupKey(uint32_t edge_label, uint8_t source, uint8_t
 	return (static_cast<uint64_t>(edge_label) << 16) | (static_cast<uint64_t>(source) << 8) | target;
 }
 
+struct GqlCsrDeltaEdge {
+	idx_t neighbor;
+	uint64_t edge_id;
+	uint32_t label_id;
+};
+
+//! Rows inserted since a full snapshot was built, which stays immutable underneath. New
+//! vertices take ordinals past the snapshot's own. A catch-up publishes a new delta, so a
+//! statement keeps the one it leased. Labels are the snapshot's, or the rows force a rebuild.
+struct GqlCsrDelta {
+	vector<uint64_t> vertex_ids;
+	vector<uint64_t> vertex_row_ids;
+	vector<vector<uint32_t>> vertex_labels;
+	unordered_map<uint64_t, idx_t> ordinal_by_id;
+	unordered_map<uint32_t, vector<uint64_t>> vertex_ids_by_label;
+	unordered_map<idx_t, vector<GqlCsrDeltaEdge>> outgoing;
+	unordered_map<idx_t, vector<GqlCsrDeltaEdge>> incoming;
+	idx_t edge_count = 0;
+	uint64_t vertex_row_watermark = 0;
+	uint64_t edge_row_watermark = 0;
+};
+
 struct GqlCsrSnapshot {
 	GqlCsrCapabilities capabilities = 0;
 	//! Optional numeric property projected as DOUBLE, aligned with adjacency.
@@ -245,6 +267,18 @@ struct GqlCsrSnapshot {
 	uint64_t write_generation;
 	uint64_t vertex_write_generation;
 	uint64_t edge_write_generation;
+	//! Writes that inserts alone cannot explain, which a delta can't follow.
+	uint64_t vertex_destructive_generation = 0;
+	uint64_t edge_destructive_generation = 0;
+	uint64_t schema_version = 0;
+	//! Rows from these physical row IDs on were not in the build.
+	uint64_t vertex_row_watermark = 0;
+	uint64_t edge_row_watermark = 0;
+	//! Whether inserts can be followed, decided at build. The next two change after
+	//! publication and are only accessed under the storage lock.
+	bool supports_delta = false;
+	uint64_t synced_generation = 0;
+	shared_ptr<const GqlCsrDelta> delta;
 	bool has_source_snapshot = false;
 	uint64_t source_snapshot_id = 0;
 	string source_catalog;
@@ -322,6 +356,9 @@ bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx
 
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name);
 
+//! A snapshot no write has followed, for consumers of what a delta doesn't extend.
+shared_ptr<const GqlCsrSnapshot> GqlGetUnchangedCsrSnapshot(ClientContext &context, const string &graph_name);
+
 //! Return a current capability-compatible snapshot, building it automatically
 //! when the database instance has not prepared one yet. Weight properties have
 //! separate cache entries; an empty property requests topology without weights.
@@ -329,17 +366,18 @@ shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context
                                                           GqlCsrCapabilities capabilities, bool *built = nullptr,
                                                           const string &weight_property = string());
 
-//! Returns a current database-scoped snapshot when one is available and valid.
-//! Unlike GqlGetCsrSnapshot, this is a non-throwing optimizer probe.
+//! Returns a current database-scoped snapshot when one is available and valid, whose
+//! statistics may precede a delta. Unlike GqlGetCsrSnapshot, this is a non-throwing
+//! optimizer probe.
 shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, const string &graph_name);
 
 //! Register a lightweight observer that invalidates snapshots when a prepared
 //! write executes.
 void GqlRegisterCsrWriteObserver(ClientContext &context);
 
-//! Advance the generation for a table when a write is planned.
+//! Advance the generation for a table when a write is planned and again at its commit.
 void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog_name, const string &schema_name,
-                                   const string &table_name);
+                                   const string &table_name, bool inserts_only);
 
 //! Conservatively invalidate snapshots when a prepared write executes.
 void GqlNotifyCsrPreparedWriteExecution(ClientContext &context);

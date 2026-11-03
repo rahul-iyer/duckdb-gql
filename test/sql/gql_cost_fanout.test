@@ -132,14 +132,14 @@ MATCH (s:SparseGroup)-[:R]->(t) RETURN count(*)
 statement ok
 SET gql_optimizer='cost'
 
-# Direct writes invalidate both topology and its label-conditioned statistics.
+# An insert goes to a delta, and a rebuild refreshes the label-conditioned statistics.
 statement ok
 INSERT (:SparseGroup {score:50001})
 
-statement error
-SELECT * FROM gql_csr_stats('fanout')
+query I
+SELECT delta_vertex_count FROM gql_csr_stats('fanout')
 ----
-has not been built
+1
 
 statement ok
 CALL gql_build_csr('fanout')

@@ -34,25 +34,43 @@
 
 namespace duckdb {
 
-static void ObserveTableWrite(ClientContext &context, TableCatalogEntry &table) {
+static void ObserveTableWrite(ClientContext &context, TableCatalogEntry &table, bool inserts_only) {
 	GqlNotifyCsrTableWritePlanned(context, table.catalog.GetName().GetIdentifierName(),
-	                              table.schema.name.GetIdentifierName(), table.name.GetIdentifierName());
+	                              table.schema.name.GetIdentifierName(), table.name.GetIdentifierName(), inserts_only);
+}
+
+static bool MergeOnlyInserts(const LogicalMergeInto &merge) {
+	for (const auto &condition : merge.actions) {
+		for (const auto &action : condition.second) {
+			if (action->action_type == MergeActionType::MERGE_UPDATE ||
+			    action->action_type == MergeActionType::MERGE_DELETE) {
+				return false;
+			}
+		}
+	}
+	return true;
 }
 
 static void ObserveWrites(ClientContext &context, const LogicalOperator &operation) {
 	switch (operation.type) {
-	case LogicalOperatorType::LOGICAL_INSERT:
-		ObserveTableWrite(context, operation.Cast<LogicalInsert>().table);
+	case LogicalOperatorType::LOGICAL_INSERT: {
+		const auto &insert = operation.Cast<LogicalInsert>();
+		const auto conflict = insert.on_conflict_info.action_type;
+		ObserveTableWrite(context, insert.table,
+		                  conflict == OnConflictAction::THROW || conflict == OnConflictAction::NOTHING);
 		break;
+	}
 	case LogicalOperatorType::LOGICAL_DELETE:
-		ObserveTableWrite(context, operation.Cast<LogicalDelete>().table);
+		ObserveTableWrite(context, operation.Cast<LogicalDelete>().table, false);
 		break;
 	case LogicalOperatorType::LOGICAL_UPDATE:
-		ObserveTableWrite(context, operation.Cast<LogicalUpdate>().table);
+		ObserveTableWrite(context, operation.Cast<LogicalUpdate>().table, false);
 		break;
-	case LogicalOperatorType::LOGICAL_MERGE_INTO:
-		ObserveTableWrite(context, operation.Cast<LogicalMergeInto>().table);
+	case LogicalOperatorType::LOGICAL_MERGE_INTO: {
+		const auto &merge = operation.Cast<LogicalMergeInto>();
+		ObserveTableWrite(context, merge.table, MergeOnlyInserts(merge));
 		break;
+	}
 	case LogicalOperatorType::LOGICAL_EXECUTE:
 		if (!operation.Cast<LogicalExecute>().prepared->properties.IsReadOnly()) {
 			GqlNotifyCsrPreparedWriteExecution(context);
