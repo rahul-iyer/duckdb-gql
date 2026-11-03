@@ -2211,6 +2211,53 @@ static unique_ptr<LocalTableFunctionState> CsrShortestLocalInit(ExecutionContext
 	return make_uniq<CsrShortestLocalState>();
 }
 
+// A set of ordinals that moves to a bitmap once it is large. Most searches are short, and
+// shouldn't pay for a bitmap of the whole graph, but hashing a graph-wide search is far slower.
+class CsrVisitedSet {
+public:
+	explicit CsrVisitedSet(idx_t vertex_count_p) : vertex_count(vertex_count_p) {
+	}
+
+	bool Contains(idx_t ordinal) const {
+		return dense.empty() ? sparse.count(ordinal) != 0 : bool(dense[ordinal]);
+	}
+
+	//! Whether the ordinal was absent.
+	bool Insert(idx_t ordinal) {
+		if (!dense.empty()) {
+			if (dense[ordinal]) {
+				return false;
+			}
+			dense[ordinal] = true;
+			return true;
+		}
+		if (!sparse.insert(ordinal).second) {
+			return false;
+		}
+		if (sparse.size() > MAX_SPARSE) {
+			dense.assign(vertex_count, false);
+			for (const auto entry : sparse) {
+				dense[entry] = true;
+			}
+			sparse.clear();
+		}
+		return true;
+	}
+
+	void Clear() {
+		sparse.clear();
+		if (!dense.empty()) {
+			std::fill(dense.begin(), dense.end(), false);
+		}
+	}
+
+private:
+	static constexpr idx_t MAX_SPARSE = 16384;
+	idx_t vertex_count;
+	unordered_set<idx_t> sparse;
+	vector<bool> dense;
+};
+
 static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrExpandGlobalState &global,
                               CsrShortestLocalState &state) {
 	state.reached.clear();
@@ -2250,15 +2297,17 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 	const auto minimum = fields[4].GetValue<uint64_t>();
 	const auto maximum = fields[5].GetValue<uint64_t>();
 	const auto unbounded = fields[6].GetValue<bool>();
-	unordered_set<idx_t> settled;
+	const auto vertex_count = snapshot.vertex_ids.size() + (delta ? delta->vertex_ids.size() : 0);
+	CsrVisitedSet settled(vertex_count);
+	CsrVisitedSet level(vertex_count);
 	vector<idx_t> frontier {start};
 	for (uint64_t depth = 1; !frontier.empty() && (unbounded || depth <= maximum); depth++) {
 		context.client.InterruptCheck();
 		vector<idx_t> next;
-		unordered_set<idx_t> level;
+		level.Clear();
 		for (const auto vertex : frontier) {
 			CsrForEachEdge(snapshot, delta, vertex, state.outgoing, label->second, [&](idx_t neighbor, uint64_t) {
-				if (settled.count(neighbor) != 0 || !level.insert(neighbor).second) {
+				if (settled.Contains(neighbor) || !level.Insert(neighbor)) {
 					return;
 				}
 				next.push_back(neighbor);
@@ -2268,7 +2317,9 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 			});
 		}
 		if (depth >= minimum) {
-			settled.insert(next.begin(), next.end());
+			for (const auto vertex : next) {
+				settled.Insert(vertex);
+			}
 		}
 		frontier = std::move(next);
 	}
