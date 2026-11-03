@@ -1,0 +1,83 @@
+# name: test/sql/gql_seed_fanout.test
+# description: An indexed seed plans from its real degree when IDs don't match row IDs, and only same-type hops are degree-biased
+# group: [gql]
+
+require duckgql
+
+# Vertices in descending ID order, so no ID matches its row. Vertex 1 is a hub with 500 R edges, which
+# each lead on to one more R edge. Vertex 2 has one, and the rest have S edges of low degree.
+statement ok
+COPY (SELECT i AS ":ID", 'V' AS ":LABEL", i::INTEGER AS "key:int" FROM range(5000, 0, -1) t(i)) TO '{TEST_DIR}/seed_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (
+  SELECT 1 AS s, i + 2 AS t, 'R' AS k FROM range(1, 501) r(i)
+  UNION ALL SELECT i + 2, i + 1000, 'R' FROM range(1, 501) r(i)
+  UNION ALL SELECT 2, 3, 'R'
+  UNION ALL SELECT i, i + 1, 'S' FROM range(1, 4000) r(i)
+) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/seed_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH seeded ANY
+
+statement ok
+COPY GRAPH seeded FROM (VERTICES '{TEST_DIR}/seed_nodes.csv', EDGES '{TEST_DIR}/seed_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH seeded
+
+statement ok
+CALL gql_create_property_index('seeded', 'key')
+
+statement ok
+CALL gql_build_csr('seeded')
+
+statement ok
+SET gql_optimizer='cost'
+
+query I
+MATCH (a:V)-[:R]->(b)-[:R]->(c) WHERE a.key = 1 RETURN count(DISTINCT c.key)
+----
+500
+
+# The hub's own 500 edges, read from the CSR, rather than the average of about 2.
+query II
+SELECT fanout_source, estimated_rows FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' ORDER BY source_position LIMIT 1
+----
+indexed_seed	500
+
+query I
+MATCH (a:V)-[:R]->(b)-[:R]->(c) WHERE a.key = 2 RETURN count(DISTINCT c.key)
+----
+1
+
+query II
+SELECT fanout_source, estimated_rows FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' ORDER BY source_position LIMIT 1
+----
+indexed_seed	1
+
+# A second R hop is degree-biased, since the vertex was reached over R: squares 500^2 + 500 + 1 over 1001 edges is about 250.
+query I
+SELECT estimated_rows > 100 FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' ORDER BY source_position LIMIT 1 OFFSET 1
+----
+true
+
+# Reaching a vertex over R says nothing about S, whose mean degree is about 1.
+query I
+MATCH (a:V)-[:R]->(b)-[:S]->(c) WHERE a.key = 2 RETURN count(DISTINCT c.key)
+----
+1
+
+query I
+SELECT estimated_rows < 5 FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' ORDER BY source_position LIMIT 1 OFFSET 1
+----
+true
+
+# New vertices since the build have no row in the lookup, and still read correctly.
+statement ok
+INSERT (:V {key: 9001})
+
+query I
+MATCH (a:V)-[:R]->(b) WHERE a.key = 9001 RETURN count(*)
+----
+0

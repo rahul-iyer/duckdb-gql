@@ -1220,7 +1220,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			idx_t population = 0, edges = 0, matching = 0;
 		};
 		vector<SeedFanout> seed_fanouts(edges.size() * 2);
-		if (joint_region && can_fetch_vertices && snapshot->vertex_ids_match_rowids) {
+		if (edges.size() > 1 && can_fetch_vertices) {
 			vector<vector<idx_t>> seeds(input.binding_types.size());
 			vector<bool> probed(input.binding_types.size(), false);
 			idx_t probes = 0, adjacency_budget = 1048576;
@@ -1252,7 +1252,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 					bool valid = !ids.empty();
 					for (auto rowid : ids) {
 						idx_t ordinal;
-						if (!GqlTryGetCsrOrdinal(*snapshot, static_cast<uint64_t>(rowid) + 1, ordinal)) {
+						if (!GqlTryGetCsrOrdinalByRowId(*snapshot, static_cast<uint64_t>(rowid), ordinal)) {
 							valid = false;
 							break;
 						}
@@ -1265,7 +1265,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			}
 			for (idx_t index = 0; index < edges.size(); index++) {
 				const auto &entry = edges[index];
-				if (!endpoint_available[index])
+				if (!entry.expand_allowed || entry.edge.quantified)
 					continue;
 				auto label = snapshot->label_ids.find(StringUtil::Lower(entry.edge.label));
 				if (label == snapshot->label_ids.end())
@@ -1508,6 +1508,18 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							                     squares / path.fanout_edges);
 							path.fanout_source = "endpoint_degree_biased";
 							return ClampCardinality(static_cast<long double>(rows) * mean);
+						}
+						// The same size bias without endpoint analysis, from the cheap per-label sums. Reaching
+						// a vertex over an edge says nothing of its degree in other edge types.
+						bool reached_over_label = false;
+						for (idx_t other = 0; other < edges.size(); other++) {
+							reached_over_label |= state.completed[other] && StringUtil::CIEquals(edges[other].edge.label, label) &&
+							                      (edges[other].left.binding_index == binding ||
+							                       edges[other].right.binding_index == binding);
+						}
+						const auto squares = direction == "out" ? stats->outgoing_degree_squares : stats->incoming_degree_squares;
+						if (!has_endpoint_summary && reached_over_label && stats->edge_count > 0 && squares > 0) {
+							return ClampCardinality(static_cast<long double>(rows) * squares / stats->edge_count);
 						}
 						return ClampCardinality(static_cast<long double>(rows) * path.fanout_edges /
 						                        path.fanout_population);

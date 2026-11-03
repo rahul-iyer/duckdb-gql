@@ -4,7 +4,7 @@
 Uses the local DuckDB C API with DuckGQL loaded. No SQL query substitute is
 included in DuckGQL timings. Native query adaptations are versioned in queries/.
 """
-import argparse, ast, ctypes as C, gc, hashlib, importlib.util, json, platform, re
+import argparse, ast, ctypes as C, gc, hashlib, importlib.util, json, os, platform, re
 import statistics, subprocess, sys, threading, time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -47,9 +47,12 @@ class Timestamp(C.Structure):
 class Result(C.Structure):
     _fields_=[('column_count',C.c_uint64),('row_count',C.c_uint64),('rows_changed',C.c_uint64),('columns',C.c_void_p),('error',C.c_void_p),('internal',C.c_void_p)]
 
+# DUCKGQL_BUILD selects another build, to compare it on the same queries.
+BUILD = Path(os.environ.get('DUCKGQL_BUILD', ROOT/'build/release'))
+
 class DB:
     def __init__(self, path, threads=4, memory='8GB'):
-        self.lib = l = C.CDLL(str(ROOT/'build/release/src/libduckdb.dylib'))
+        self.lib = l = C.CDLL(str(BUILD/'src/libduckdb.dylib'))
         def fn(name, args, ret):
             f=getattr(l,name); f.argtypes=args; f.restype=ret; return f
         p=C.c_void_p; pp=C.POINTER(p); u=C.c_uint64
@@ -80,7 +83,7 @@ class DB:
             raise RuntimeError(C.string_at(err).decode())
         l.duckdb_destroy_config(C.byref(config)); self.conn=p()
         assert l.duckdb_connect(self.db,C.byref(self.conn))==0
-        self.query(f"LOAD {lit(ROOT/'build/release/extension/duckgql/duckgql.duckdb_extension')}")
+        self.query(f"LOAD {lit(BUILD/'extension/duckgql/duckgql.duckdb_extension')}")
         self.query(f"SET threads={threads}; SET memory_limit={lit(memory)}; SET preserve_insertion_order=false")
     def prepare(self, sql):
         statement=C.c_void_p()

@@ -2,7 +2,25 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
-## IC14 under 100 ms (newest)
+## Graphs unlike LDBC (newest)
+
+`benchmark/generalization/run.py` asks DuckGQL and Ladybug the same 8 questions from 6 seeds across the degree
+range on Air Routes, RoadNet-CA and LiveJournal; `compare.py` prints times and checks answers (131/131 match).
+`DUCKGQL_BUILD` points it, and `run.py`, at another build. Results are in `build/benchmarks/generalization/`.
+COPY GRAPH stores an untyped `:ID` as VARCHAR, so keys must be quoted: an integer literal casts the column and
+skips the index, which first looked like a per-query cost that grew with the graph.
+
+Found and fixed: fetch was chosen from average degree, so a LiveJournal hub took 739 ms fetching 41K VARCHAR rows at
+about 17 us each (0.3 us for typed LDBC columns). Now 7.1 ms. Seeds read their real degree through the property
+index without endpoint statistics, using a new row ID lookup when IDs don't match row IDs, and a hop of the same
+type as the edge that reached a vertex uses E[d^2]/E[d]. Applying that bias to every hop slowed IC10-12 by up to 25%.
+
+Open, from those tables: any-shortest on LiveJournal 4.1 s (Ladybug median 103 ms) takes the same time from every
+seed; optional chain on LiveJournal 25.6 vs 0.8 ms; `{1,8}` DISTINCT times out on dense graphs on both engines,
+where a breadth-first search would do; one hop 1 ms vs 0.2 ms. The `before` LiveJournal results predate the key
+quoting. LSQB SF1 is not run yet. Delta size limit not tested at scale.
+
+## IC14 under 100 ms
 
 IC14 went from 318.8 to 65.5 ms (median, cost planner, parameterized; Ladybug 80.5). The four OPTIONAL branches
 were joining about 1M rows each over the whole graph, because `a` and `b` had no cardinality estimate. Two changes

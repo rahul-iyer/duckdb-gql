@@ -293,6 +293,18 @@ bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx
 	return true;
 }
 
+bool GqlTryGetCsrOrdinalByRowId(const GqlCsrSnapshot &snapshot, uint64_t row_id, idx_t &ordinal) {
+	if (snapshot.vertex_ids_match_rowids) {
+		return GqlTryGetCsrOrdinal(snapshot, row_id + 1, ordinal);
+	}
+	auto entry = snapshot.vertex_ordinal_by_row_id.find(row_id);
+	if (entry == snapshot.vertex_ordinal_by_row_id.end()) {
+		return false;
+	}
+	ordinal = entry->second;
+	return true;
+}
+
 static bool CsrTryGetOrdinal(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, uint64_t vertex_id,
                              idx_t &ordinal) {
 	if (GqlTryGetCsrOrdinal(snapshot, vertex_id, ordinal)) {
@@ -634,6 +646,12 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		// Preserve the zero-allocation shortcut for ordered managed tables.
 		snapshot->vertex_row_ids = GqlCsrOrdinals();
 	}
+	if (build_vertex_row_ids && !snapshot->vertex_ids_match_rowids) {
+		snapshot->vertex_ordinal_by_row_id.reserve(snapshot->vertex_ids.size());
+		for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
+			snapshot->vertex_ordinal_by_row_id.emplace(snapshot->vertex_row_ids[ordinal], ordinal);
+		}
+	}
 	snapshot->dense_vertex_ids = true;
 	for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
 		if (snapshot->vertex_ids[ordinal] != ordinal + 1) {
@@ -954,9 +972,11 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				if (outgoing) {
 					stats.outgoing_vertex_count++;
 					stats.max_outgoing_degree = MaxValue<uint64_t>(stats.max_outgoing_degree, degree);
+					stats.outgoing_degree_squares += static_cast<double>(degree) * static_cast<double>(degree);
 				} else {
 					stats.incoming_vertex_count++;
 					stats.max_incoming_degree = MaxValue<uint64_t>(stats.max_incoming_degree, degree);
+					stats.incoming_degree_squares += static_cast<double>(degree) * static_cast<double>(degree);
 				}
 				if (snapshot->has_label_fanout_stats) {
 					auto start = snapshot->vertex_label_offsets[vertex];
@@ -1015,6 +1035,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    snapshot->weight_property.capacity() +
 	    (snapshot->outgoing_weights.capacity() + snapshot->incoming_weights.capacity()) * sizeof(double) +
 	    sizeof(GqlCsrSnapshot) + HashContainerStorageBytes(snapshot->ordinal_by_id) +
+	    HashContainerStorageBytes(snapshot->vertex_ordinal_by_row_id) +
 	    snapshot->source_catalog.capacity() + snapshot->vertex_table_key.capacity() +
 	    snapshot->edge_table_key.capacity() + snapshot->edge_label_stats.capacity() * sizeof(GqlCsrEdgeLabelStats);
 	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->source_write_generations);

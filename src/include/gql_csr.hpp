@@ -182,6 +182,9 @@ struct GqlCsrEdgeLabelStats {
 	uint64_t incoming_vertex_count = 0;
 	uint64_t max_outgoing_degree = 0;
 	uint64_t max_incoming_degree = 0;
+	//! Sums of squared degree. A vertex reached over an edge is degree-biased, with mean degree squares/edges.
+	double outgoing_degree_squares = 0;
+	double incoming_degree_squares = 0;
 };
 
 // Population totals include vertices with zero matching degree. Sparse pairs
@@ -293,6 +296,8 @@ struct GqlCsrSnapshot {
 	//! Physical row IDs by CSR ordinal, independent of parallel import order.
 	//! Empty when canonical IDs already encode physical row IDs.
 	GqlCsrOrdinals vertex_row_ids;
+	//! The reverse, for the same snapshots. A row outside the build has no entry.
+	unordered_map<uint64_t, idx_t> vertex_ordinal_by_row_id;
 	bool edge_ids_match_rowids = false;
 	idx_t edge_count = 0;
 	GqlCsrVertexIds vertex_ids;
@@ -353,6 +358,8 @@ struct GqlBatchedInOutBindData : TableFunctionData {
 };
 
 bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx_t &ordinal);
+//! The ordinal of a physical row, which is how property indexes name vertices.
+bool GqlTryGetCsrOrdinalByRowId(const GqlCsrSnapshot &snapshot, uint64_t row_id, idx_t &ordinal);
 
 shared_ptr<const GqlCsrSnapshot> GqlGetCsrSnapshot(ClientContext &context, const string &graph_name);
 
