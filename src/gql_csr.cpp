@@ -13,7 +13,10 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/function/function_set.hpp"
+#include "duckdb/main/appender.hpp"
+#include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -23,6 +26,7 @@
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
@@ -35,6 +39,60 @@
 #include <unordered_set>
 
 namespace duckdb {
+
+GqlCsrPages::GqlCsrPages(BufferManager &manager_p, idx_t byte_count) : manager(manager_p) {
+	const auto page_count = (byte_count + PAGE_BYTES - 1) >> PAGE_SHIFT;
+	blocks.reserve(page_count);
+	pins.resize(page_count);
+	pointers = make_uniq_array<atomic<data_ptr_t>>(page_count);
+	for (idx_t page = 0; page < page_count; page++) {
+		pins[page] = manager.Allocate(MemoryTag::EXTENSION, PAGE_BYTES, false);
+		auto data = pins[page].GetDataMutable();
+		memset(data, 0, PAGE_BYTES);
+		blocks.push_back(pins[page].GetBlockHandle());
+		pointers[page].store(data, std::memory_order_release);
+	}
+}
+
+GqlCsrPages::GqlCsrPages(BufferManager &manager_p, idx_t byte_count, shared_ptr<GqlCsrPageSource> source_p,
+                         idx_t array_id_p)
+    : manager(manager_p), source(std::move(source_p)), array_id(array_id_p) {
+	const auto page_count = (byte_count + PAGE_BYTES - 1) >> PAGE_SHIFT;
+	blocks.resize(page_count);
+	pins.resize(page_count);
+	pointers = make_uniq_array<atomic<data_ptr_t>>(page_count);
+	for (idx_t page = 0; page < page_count; page++) {
+		pointers[page].store(nullptr, std::memory_order_relaxed);
+	}
+}
+
+data_ptr_t GqlCsrPages::Pin(idx_t page) const {
+	lock_guard<mutex> guard(lock);
+	auto data = pointers[page].load(std::memory_order_acquire);
+	if (data) {
+		return data;
+	}
+	if (blocks[page]) {
+		pins[page] = manager.Pin(blocks[page]);
+	}
+	// Never loaded, or dropped under memory pressure.
+	if (!pins[page].IsValid()) {
+		pins[page] = manager.Allocate(MemoryTag::EXTENSION, PAGE_BYTES, true);
+		blocks[page] = pins[page].GetBlockHandle();
+		source->Read(array_id, page, pins[page].GetDataMutable(), PAGE_BYTES);
+	}
+	data = pins[page].GetDataMutable();
+	pointers[page].store(data, std::memory_order_release);
+	return data;
+}
+
+void GqlCsrPages::ReleasePages() const {
+	lock_guard<mutex> guard(lock);
+	for (idx_t page = 0; page < pins.size(); page++) {
+		pointers[page].store(nullptr, std::memory_order_release);
+		pins[page].Destroy();
+	}
+}
 
 static unique_ptr<DataChunk> FetchCsrRows(QueryResultStream<> &stream) {
 	auto chunk = stream.Fetch();
@@ -66,6 +124,9 @@ struct GqlCsrGenerationState : ObjectCacheEntry {
 	unordered_map<string, uint64_t> table_write_generations;
 	//! The subset of those writes that may do more than insert rows.
 	unordered_map<string, uint64_t> table_destructive_generations;
+	//! Whether a saved CSR may exist, once known, so most writes skip looking.
+	bool saved_csr_known = false;
+	bool saved_csr_exists = false;
 };
 
 static string CsrTableKey(const string &catalog_name, const string &schema_name, const string &table_name) {
@@ -109,6 +170,42 @@ static void AdvanceCsrTableWriteGeneration(ClientContext &context, const string 
 	}
 }
 
+// Deletes saved CSRs, in its own transaction. A write that needs this calls it before it can commit, so
+// a crash at any point can't leave a saved CSR describing rows that are gone. Empty: every graph's.
+static void DropSavedCsrs(ClientContext &context, const string &table_key = string()) {
+	auto state = GetCsrGenerationState(context);
+	{
+		lock_guard<mutex> guard(state->lock);
+		if (state->saved_csr_known && !state->saved_csr_exists) {
+			return;
+		}
+	}
+	Connection connection(*context.db);
+	try {
+		if (GqlQuery(connection, "SELECT 1 FROM gql_internal.csr_snapshots LIMIT 1")->RowCount() == 0) {
+			lock_guard<mutex> guard(state->lock);
+			state->saved_csr_known = true;
+			state->saved_csr_exists = false;
+			return;
+		}
+	} catch (const std::exception &) {
+		// A database from before saved CSRs has no such table, and so nothing to drop.
+		return;
+	}
+	string graphs;
+	if (!table_key.empty()) {
+		graphs = " WHERE graph_id IN (SELECT graph_id FROM gql_internal.graph_element_tables WHERE lower(catalog_name || '.' "
+		         "|| schema_name || '.' || table_name) = " +
+		         GqlQuoteLiteral(table_key) + ")";
+	}
+	connection.BeginTransaction();
+	GqlQuery(connection, "DELETE FROM gql_internal.csr_pages WHERE snapshot_id IN (SELECT snapshot_id FROM "
+	                     "gql_internal.csr_snapshots" +
+	                         graphs + ")");
+	GqlQuery(connection, "DELETE FROM gql_internal.csr_snapshots" + graphs);
+	connection.Commit();
+}
+
 // Generations also advance after the commit. Otherwise a snapshot built between the plan
 // and the commit would record the new generation and read the old rows.
 struct GqlCsrWriteObserverState : ClientContextState {
@@ -135,6 +232,7 @@ struct GqlCsrWriteObserverState : ClientContextState {
 			AdvanceCsrWriteGeneration(context);
 			planned_prepared_write = true;
 			GqlInvalidateTableGraphCache(context);
+			DropSavedCsrs(context);
 		}
 		return current_rebind;
 	}
@@ -158,6 +256,9 @@ void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog
 	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
 	auto key = CsrTableKey(catalog_name, schema_name, table_name);
 	AdvanceCsrTableWriteGeneration(context, key, inserts_only);
+	if (!inserts_only && StringUtil::CIEquals(schema_name, "gql_data")) {
+		DropSavedCsrs(context, key);
+	}
 	auto planned = observer->planned_table_writes.emplace(key, inserts_only);
 	planned.first->second = planned.first->second && inserts_only;
 }
@@ -166,6 +267,7 @@ void GqlNotifyCsrPreparedWriteExecution(ClientContext &context) {
 	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
 	AdvanceCsrWriteGeneration(context);
 	observer->planned_prepared_write = true;
+	DropSavedCsrs(context);
 }
 
 static string QualifiedTable(const GqlElementTableBinding &table) {
@@ -201,6 +303,8 @@ struct GqlDerivedGraphStorageState : ObjectCacheEntry {
 	std::condition_variable build_finished;
 	unordered_map<uint64_t, vector<shared_ptr<GqlCsrSnapshot>>> snapshots;
 	unordered_set<uint64_t> builds_in_progress;
+	//! The database write generation at which a graph was found to have no saved CSR.
+	unordered_map<uint64_t, uint64_t> no_saved_csr_at;
 	uint64_t build_count = 0;
 	atomic<uint64_t> acquisition_count {0};
 };
@@ -271,7 +375,8 @@ static bool SameGraphVersion(const GraphVersion &left, const GraphVersion &right
 	                                      StringUtil::CIEquals(left.source_catalog, right.source_catalog)));
 }
 
-static void FinalizeOffsets(vector<uint64_t> &offsets) {
+template <class OFFSETS>
+static void FinalizeOffsets(OFFSETS &offsets) {
 	for (idx_t index = 1; index < offsets.size(); index++) {
 		offsets[index] += offsets[index - 1];
 	}
@@ -285,11 +390,45 @@ bool GqlTryGetCsrOrdinal(const GqlCsrSnapshot &snapshot, uint64_t vertex_id, idx
 		ordinal = NumericCast<idx_t>(vertex_id - 1);
 		return true;
 	}
-	auto entry = snapshot.ordinal_by_id.find(vertex_id);
-	if (entry == snapshot.ordinal_by_id.end()) {
+	// The build hashes IDs, which it looks up for every edge. Afterwards IDs are in order on pages.
+	if (!snapshot.ordinal_by_id.empty()) {
+		auto entry = snapshot.ordinal_by_id.find(vertex_id);
+		if (entry == snapshot.ordinal_by_id.end()) {
+			return false;
+		}
+		ordinal = entry->second;
+		return true;
+	}
+	// IDs tend to be nearly sequential, where interpolating finds one in a few reads. Every other
+	// step halves the range, so an unusual distribution still takes logarithmic time.
+	idx_t low = 0;
+	idx_t high = snapshot.vertex_ids.size();
+	bool interpolate = true;
+	while (low < high) {
+		auto middle = low + (high - low) / 2;
+		if (interpolate && high - low > 2) {
+			const auto first = snapshot.vertex_ids[low];
+			const auto last = snapshot.vertex_ids[high - 1];
+			if (vertex_id <= first) {
+				middle = low;
+			} else if (vertex_id >= last) {
+				middle = high - 1;
+			} else {
+				middle = low + static_cast<idx_t>(static_cast<double>(vertex_id - first) / static_cast<double>(last - first) *
+				                                  static_cast<double>(high - low - 1));
+			}
+		}
+		interpolate = !interpolate;
+		if (snapshot.vertex_ids[middle] < vertex_id) {
+			low = middle + 1;
+		} else {
+			high = middle;
+		}
+	}
+	if (low == snapshot.vertex_ids.size() || snapshot.vertex_ids[low] != vertex_id) {
 		return false;
 	}
-	ordinal = entry->second;
+	ordinal = low;
 	return true;
 }
 
@@ -348,18 +487,23 @@ static const vector<GqlCsrDeltaEdge> *CsrDeltaEdges(const GqlCsrDelta *delta, id
 static bool CsrVertexHasLabels(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t ordinal,
                                const vector<uint32_t> &required) {
 	const auto base_vertices = snapshot.vertex_ids.size();
-	const uint32_t *begin;
-	const uint32_t *end;
-	if (ordinal < base_vertices) {
-		begin = snapshot.vertex_label_ids.data() + snapshot.vertex_label_offsets[ordinal];
-		end = snapshot.vertex_label_ids.data() + snapshot.vertex_label_offsets[ordinal + 1];
-	} else {
+	if (ordinal >= base_vertices) {
 		const auto &labels = delta->vertex_labels[ordinal - base_vertices];
-		begin = labels.data();
-		end = labels.data() + labels.size();
+		for (const auto label : required) {
+			if (std::find(labels.begin(), labels.end(), label) == labels.end()) {
+				return false;
+			}
+		}
+		return true;
 	}
+	const auto begin = snapshot.vertex_label_offsets[ordinal];
+	const auto end = snapshot.vertex_label_offsets[ordinal + 1];
 	for (const auto label : required) {
-		if (std::find(begin, end, label) == end) {
+		bool found = false;
+		for (auto offset = begin; offset < end && !found; offset++) {
+			found = snapshot.vertex_label_ids[offset] == label;
+		}
+		if (!found) {
 			return false;
 		}
 	}
@@ -385,6 +529,29 @@ static void CsrForEachEdge(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *de
 		for (const auto &edge : *edges) {
 			if (edge.label_id == label_id) {
 				function(edge.neighbor, edge.edge_id);
+			}
+		}
+	}
+}
+
+// The same without reading edge IDs, for searches that only ask where edges lead.
+template <class FUNCTION>
+static void CsrForEachNeighbor(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, idx_t vertex, bool outgoing,
+                               uint32_t label_id, FUNCTION &&function) {
+	if (vertex < snapshot.vertex_ids.size()) {
+		const auto &offsets = outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
+		const auto &neighbors = outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
+		const auto &labels = outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
+		neighbors.ForEach(offsets[vertex], offsets[vertex + 1], [&](idx_t index, idx_t neighbor) {
+			if (labels[index] == label_id) {
+				function(neighbor);
+			}
+		});
+	}
+	if (const auto *edges = CsrDeltaEdges(delta, vertex, outgoing)) {
+		for (const auto &edge : *edges) {
+			if (edge.label_id == label_id) {
+				function(edge.neighbor);
 			}
 		}
 	}
@@ -490,6 +657,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
                                                      GqlCsrCapabilities requested_capabilities,
                                                      const string &weight_property = string()) {
 	auto capabilities = NormalizeCsrCapabilities(requested_capabilities);
+	auto &buffers = BufferManager::GetBufferManager(context);
 	const bool build_outgoing = capabilities & GQL_CSR_OUTGOING;
 	const bool build_incoming = capabilities & GQL_CSR_INCOMING;
 	const bool build_edge_ids = capabilities & GQL_CSR_EDGE_IDS;
@@ -571,7 +739,8 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->has_vertex_row_ids = true;
 		snapshot->vertex_row_ids.Resize(NumericCast<idx_t>(vertex_count->GetValue(0, 0).GetValue<uint64_t>()),
 		                                vertex_count->GetValue(1, 0).GetValue<uint64_t>() <=
-		                                    std::numeric_limits<uint32_t>::max());
+		                                    std::numeric_limits<uint32_t>::max(),
+		                                &buffers);
 	}
 	auto vertex_label_projection =
 	    build_vertex_labels ? CsrVertexLabelProjection(binding.vertex) : string("CAST(NULL AS VARCHAR[])");
@@ -651,7 +820,8 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			row_count = MaxValue<uint64_t>(row_count, snapshot->vertex_row_ids[ordinal] + 1);
 		}
 		snapshot->vertex_ordinal_by_row_id.Resize(NumericCast<idx_t>(row_count),
-		                                          snapshot->vertex_ids.size() <= std::numeric_limits<uint32_t>::max());
+		                                          snapshot->vertex_ids.size() <= std::numeric_limits<uint32_t>::max(),
+		                                          &buffers);
 		for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
 			snapshot->vertex_ordinal_by_row_id.Set(snapshot->vertex_row_ids[ordinal], ordinal);
 		}
@@ -685,7 +855,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			snapshot->vertex_label_posting_offsets[label_id + 1]++;
 		}
 		FinalizeOffsets(snapshot->vertex_label_posting_offsets);
-		snapshot->vertex_label_postings.Resize(snapshot->vertex_label_ids.size(), compact_vertex_ordinals);
+		snapshot->vertex_label_postings.Resize(snapshot->vertex_label_ids.size(), compact_vertex_ordinals, &buffers);
 		auto vertex_label_cursor = snapshot->vertex_label_posting_offsets;
 		for (idx_t vertex = 0; vertex < snapshot->vertex_ids.size(); vertex++) {
 			for (idx_t offset = snapshot->vertex_label_offsets[vertex];
@@ -742,7 +912,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	}
 	if (build_out_degrees) {
 		snapshot->outgoing_degrees.Resize(snapshot->vertex_ids.size(),
-		                                  expected_edges <= std::numeric_limits<uint32_t>::max());
+		                                  expected_edges <= std::numeric_limits<uint32_t>::max(), &buffers);
 	}
 	auto degree_rows = make_uniq<QueryResultStream<>>(connection.Submit(endpoint_projection));
 
@@ -813,31 +983,31 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	const bool compact_neighbors =
 	    snapshot->vertex_ids.empty() || snapshot->vertex_ids.size() - 1 <= std::numeric_limits<uint32_t>::max();
 	if (build_outgoing) {
-		snapshot->outgoing_neighbors.Resize(expected_edges, compact_neighbors);
+		snapshot->outgoing_neighbors.Resize(expected_edges, compact_neighbors, &buffers);
 		if (!weight_property.empty()) {
 			snapshot->outgoing_weights.resize(expected_edges);
 		}
 		if (build_edge_ids) {
-			snapshot->outgoing_edge_ids.Resize(expected_edges, compact_edge_ids);
+			snapshot->outgoing_edge_ids.Resize(expected_edges, compact_edge_ids, &buffers);
 		}
 		if (build_edge_labels) {
 			snapshot->outgoing_label_ids.Reset(expected_edges, true, 0);
 		}
 	}
 	if (build_incoming) {
-		snapshot->incoming_neighbors.Resize(expected_edges, compact_neighbors);
+		snapshot->incoming_neighbors.Resize(expected_edges, compact_neighbors, &buffers);
 		if (!weight_property.empty()) {
 			snapshot->incoming_weights.resize(expected_edges);
 		}
 		if (build_edge_ids) {
-			snapshot->incoming_edge_ids.Resize(expected_edges, compact_edge_ids);
+			snapshot->incoming_edge_ids.Resize(expected_edges, compact_edge_ids, &buffers);
 		}
 		if (build_edge_labels) {
 			snapshot->incoming_label_ids.Reset(expected_edges, true, 0);
 		}
 	}
-	auto outgoing_cursor = snapshot->outgoing_offsets;
-	auto incoming_cursor = snapshot->incoming_offsets;
+	auto outgoing_cursor = snapshot->outgoing_offsets.Values();
+	auto incoming_cursor = snapshot->incoming_offsets.Values();
 	auto edge_rows = make_uniq<QueryResultStream<>>(connection.Submit(edge_projection));
 
 	idx_t scattered_edges = 0;
@@ -964,7 +1134,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->has_label_fanout_stats = false;
 		decltype(snapshot->label_fanout_stats)().swap(snapshot->label_fanout_stats);
 	};
-	auto collect_degree_stats = [&](const vector<uint64_t> &offsets, const GqlCsrEdgeLabels &labels, bool outgoing) {
+	auto collect_degree_stats = [&](const GqlCsrArray<uint64_t> &offsets, const GqlCsrEdgeLabels &labels, bool outgoing) {
 		for (idx_t vertex = 0; vertex + 1 < offsets.size(); vertex++) {
 			touched_labels.clear();
 			for (idx_t edge = offsets[vertex]; edge < offsets[vertex + 1]; edge++) {
@@ -1024,17 +1194,22 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		}
 	}
 
+	// Pages hold a second copy until each array is freed, so nothing else should be live by then.
+	const auto cursor_bytes = (outgoing_cursor.capacity() + incoming_cursor.capacity()) * sizeof(uint64_t);
+	vector<uint64_t>().swap(outgoing_cursor);
+	vector<uint64_t>().swap(incoming_cursor);
+	unordered_map<uint64_t, idx_t>().swap(snapshot->ordinal_by_id);
+	snapshot->Freeze(buffers);
 	snapshot->topology_bytes =
-	    snapshot->outgoing_offsets.capacity() * sizeof(uint64_t) + snapshot->outgoing_neighbors.AllocatedBytes() +
-	    snapshot->incoming_offsets.capacity() * sizeof(uint64_t) + snapshot->incoming_neighbors.AllocatedBytes() +
+	    snapshot->outgoing_offsets.AllocatedBytes() + snapshot->outgoing_neighbors.AllocatedBytes() +
+	    snapshot->incoming_offsets.AllocatedBytes() + snapshot->incoming_neighbors.AllocatedBytes() +
 	    snapshot->outgoing_degrees.AllocatedBytes();
 	snapshot->identity_bytes = snapshot->vertex_ids.AllocatedBytes() +
 	                           snapshot->vertex_row_ids.AllocatedBytes() +
 	                           snapshot->outgoing_edge_ids.AllocatedBytes() +
 	                           snapshot->incoming_edge_ids.AllocatedBytes();
 	snapshot->label_bytes =
-	    snapshot->vertex_label_offsets.capacity() * sizeof(idx_t) +
-	    snapshot->vertex_label_ids.capacity() * sizeof(uint32_t) +
+	    snapshot->vertex_label_offsets.AllocatedBytes() + snapshot->vertex_label_ids.AllocatedBytes() +
 	    snapshot->vertex_label_posting_offsets.capacity() * sizeof(uint64_t) +
 	    snapshot->vertex_label_postings.AllocatedBytes() + snapshot->outgoing_label_ids.AllocatedBytes() +
 	    snapshot->incoming_label_ids.AllocatedBytes() + LabelDictionaryStorageBytes(snapshot->label_ids);
@@ -1057,12 +1232,12 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->auxiliary_bytes += source.first.capacity();
 	}
 	snapshot->build_auxiliary_bytes =
-	    endpoint_workspace_bytes + transient_vertex_id_bytes + outgoing_cursor.capacity() * sizeof(uint64_t) +
-	    incoming_cursor.capacity() * sizeof(uint64_t) + HashContainerStorageBytes(edge_ids) +
+	    endpoint_workspace_bytes + transient_vertex_id_bytes + cursor_bytes + HashContainerStorageBytes(edge_ids) +
 	    label_degrees.capacity() * sizeof(uint64_t) + touched_labels.capacity() * sizeof(uint32_t);
 	snapshot->memory_bytes =
 	    snapshot->topology_bytes + snapshot->identity_bytes + snapshot->label_bytes + snapshot->auxiliary_bytes;
 	connection.Commit();
+	snapshot->ReleasePages();
 	Connection validation_connection(*context.db);
 	auto current_graph = ReadGraphVersion(validation_connection, graph_name);
 	// Inserts that raced construction are the delta's to follow, and generations catch the rest.
@@ -1204,6 +1379,268 @@ uint64_t GqlCsrBuildCount(ClientContext &context) {
 	return ReadCsrBuildCount(*GetDerivedGraphStorageState(context));
 }
 
+static constexpr uint32_t GQL_CSR_FORMAT_VERSION = 1;
+
+class TableCsrPageSource : public GqlCsrPageSource {
+public:
+	TableCsrPageSource(DatabaseInstance &database_p, uint64_t snapshot_id_p)
+	    : database(database_p), snapshot_id(snapshot_id_p) {
+	}
+
+	// SQL would decode a vector of up to 2048 pages to read one, so this fetches the row itself.
+	void Read(idx_t array_id, idx_t page, data_ptr_t target, idx_t bytes) override {
+		Connection connection(database);
+		connection.BeginTransaction();
+		auto &context = *connection.context;
+		auto row_id = FindRow(connection, array_id, page);
+		auto &manager = DatabaseManager::Get(context);
+		auto &catalog = Catalog::GetCatalog(context, manager.GetDefaultDatabase());
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier("gql_internal"),
+		                              Identifier("csr_pages"), OnEntryNotFound::THROW_EXCEPTION);
+		auto &table = entry->Cast<DuckTableEntry>();
+		DataChunk chunk;
+		chunk.Initialize(Allocator::Get(context), {LogicalType::UBIGINT, LogicalType::BLOB});
+		vector<StorageIndex> columns {table.GetStorageIndex(ColumnIndex(0)), table.GetStorageIndex(ColumnIndex(3))};
+		ColumnFetchState fetch_state;
+		Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(&row_id), 1);
+		table.GetStorage().Fetch(DuckTransaction::Get(context, table.catalog), chunk, columns, row_ids, 1, fetch_state);
+		if (chunk.size() != 1 || chunk.GetValue(0, 0).GetValue<uint64_t>() != snapshot_id) {
+			throw InvalidInputException("The saved GQL CSR was replaced while being read; retry the operation");
+		}
+		const auto data = chunk.GetValue(1, 0);
+		const auto &value = StringValue::Get(data);
+		if (value.size() != bytes) {
+			throw InvalidInputException("A saved GQL CSR page has the wrong size");
+		}
+		memcpy(target, value.data(), bytes);
+		connection.Commit();
+	}
+
+private:
+	row_t FindRow(Connection &connection, idx_t array_id, idx_t page) {
+		lock_guard<mutex> guard(lock);
+		if (rows.empty()) {
+			auto result = GqlQuery(connection, "SELECT array_id, page, rowid FROM gql_internal.csr_pages WHERE snapshot_id = " +
+			                                       to_string(snapshot_id));
+			for (idx_t row = 0; row < result->RowCount(); row++) {
+				const auto array = result->GetValue(0, row).GetValue<uint32_t>();
+				const auto number = result->GetValue(1, row).GetValue<uint32_t>();
+				if (rows.size() <= array) {
+					rows.resize(array + 1);
+				}
+				if (rows[array].size() <= number) {
+					rows[array].resize(number + 1);
+				}
+				rows[array][number] = result->GetValue(2, row).GetValue<int64_t>();
+			}
+		}
+		if (array_id >= rows.size() || page >= rows[array_id].size()) {
+			throw InvalidInputException("The saved GQL CSR was replaced while being read; retry the operation");
+		}
+		return rows[array_id][page];
+	}
+
+	DatabaseInstance &database;
+	uint64_t snapshot_id;
+	mutex lock;
+	vector<vector<row_t>> rows;
+};
+
+// Everything but generations, which belong to this process, and endpoint statistics.
+static void WriteCsrMetadata(GqlCsrWriter &writer, const GqlCsrSnapshot &snapshot) {
+	writer.Write<uint32_t>(GQL_CSR_FORMAT_VERSION);
+	writer.Write<uint32_t>(GQL_CSR_FULL);
+	for (const auto value : {snapshot.graph_id, snapshot.graph_version, snapshot.schema_version,
+	                         snapshot.vertex_row_watermark, snapshot.edge_row_watermark, uint64_t(snapshot.edge_count)}) {
+		writer.Write<uint64_t>(value);
+	}
+	for (const auto flag : {snapshot.dense_vertex_ids, snapshot.vertex_ids_match_rowids, snapshot.has_vertex_row_ids,
+	                        snapshot.edge_ids_match_rowids, snapshot.edge_labels_single, snapshot.has_label_fanout_stats}) {
+		writer.Write<bool>(flag);
+	}
+	for (const auto *text :
+	     {&snapshot.vertex_table_key, &snapshot.edge_table_key, &snapshot.vertex_catalog_name, &snapshot.vertex_schema_name,
+	      &snapshot.vertex_table_name, &snapshot.edge_catalog_name, &snapshot.edge_schema_name, &snapshot.edge_table_name}) {
+		writer.WriteString(*text);
+	}
+	writer.Write<idx_t>(snapshot.label_ids.size());
+	for (const auto &label : snapshot.label_ids) {
+		writer.WriteString(label.first);
+		writer.Write<uint32_t>(label.second);
+	}
+	writer.WriteBytes(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
+	writer.Write<idx_t>(snapshot.label_fanout_stats.size());
+	for (const auto &entry : snapshot.label_fanout_stats) {
+		writer.Write<uint64_t>(entry.first);
+		writer.Write<GqlCsrLabelFanoutStats>(entry.second);
+	}
+	writer.WriteBytes(snapshot.vertex_label_posting_offsets.data(),
+	                  snapshot.vertex_label_posting_offsets.size() * sizeof(uint64_t));
+	for (const auto bytes : {snapshot.topology_bytes, snapshot.identity_bytes, snapshot.label_bytes,
+	                         snapshot.auxiliary_bytes, snapshot.memory_bytes}) {
+		writer.Write<idx_t>(bytes);
+	}
+}
+
+static bool ReadCsrMetadata(GqlCsrReader &reader, GqlCsrSnapshot &snapshot) {
+	if (reader.Read<uint32_t>() != GQL_CSR_FORMAT_VERSION) {
+		return false;
+	}
+	snapshot.capabilities = reader.Read<uint32_t>();
+	for (auto *value : {&snapshot.graph_id, &snapshot.graph_version, &snapshot.schema_version,
+	                    &snapshot.vertex_row_watermark, &snapshot.edge_row_watermark}) {
+		*value = reader.Read<uint64_t>();
+	}
+	snapshot.edge_count = NumericCast<idx_t>(reader.Read<uint64_t>());
+	for (auto *flag : {&snapshot.dense_vertex_ids, &snapshot.vertex_ids_match_rowids, &snapshot.has_vertex_row_ids,
+	                   &snapshot.edge_ids_match_rowids, &snapshot.edge_labels_single, &snapshot.has_label_fanout_stats}) {
+		*flag = reader.Read<bool>();
+	}
+	for (auto *text : {&snapshot.vertex_table_key, &snapshot.edge_table_key, &snapshot.vertex_catalog_name,
+	                   &snapshot.vertex_schema_name, &snapshot.vertex_table_name, &snapshot.edge_catalog_name,
+	                   &snapshot.edge_schema_name, &snapshot.edge_table_name}) {
+		*text = reader.ReadString();
+	}
+	const auto label_count = reader.Read<idx_t>();
+	for (idx_t index = 0; index < label_count; index++) {
+		auto name = reader.ReadString();
+		snapshot.label_ids.emplace(std::move(name), reader.Read<uint32_t>());
+	}
+	snapshot.edge_label_stats.resize(reader.ReadSize() / sizeof(GqlCsrEdgeLabelStats));
+	reader.ReadInto(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
+	const auto fanout_count = reader.Read<idx_t>();
+	for (idx_t index = 0; index < fanout_count; index++) {
+		const auto key = reader.Read<uint64_t>();
+		snapshot.label_fanout_stats.emplace(key, reader.Read<GqlCsrLabelFanoutStats>());
+	}
+	snapshot.vertex_label_posting_offsets.resize(reader.ReadSize() / sizeof(uint64_t));
+	reader.ReadInto(snapshot.vertex_label_posting_offsets.data(), snapshot.vertex_label_posting_offsets.size() * sizeof(uint64_t));
+	for (auto *bytes : {&snapshot.topology_bytes, &snapshot.identity_bytes, &snapshot.label_bytes,
+	                    &snapshot.auxiliary_bytes, &snapshot.memory_bytes}) {
+		*bytes = reader.Read<idx_t>();
+	}
+	return true;
+}
+
+static bool CsrHasDestructiveWritesSinceBuild(ClientContext &context, const GqlCsrSnapshot &snapshot) {
+	return snapshot.write_generation != ReadCsrWriteGeneration(context) ||
+	       snapshot.vertex_destructive_generation !=
+	           ReadCsrTableDestructiveGeneration(context, snapshot.vertex_table_key) ||
+	       snapshot.edge_destructive_generation != ReadCsrTableDestructiveGeneration(context, snapshot.edge_table_key);
+}
+
+// Appenders, since prepared writes count as writes to every graph.
+static void SaveCsrSnapshot(ClientContext &context, const GqlCsrSnapshot &snapshot) {
+	Connection connection(*context.db);
+	const auto snapshot_id =
+	    GqlQuery(connection, "SELECT coalesce(max(snapshot_id), 0)::UBIGINT + 1 FROM gql_internal.csr_snapshots")
+	        ->GetValue(0, 0)
+	        .GetValue<uint64_t>();
+	const auto graph = to_string(snapshot.graph_id);
+	{
+		auto state = GetCsrGenerationState(context);
+		lock_guard<mutex> guard(state->lock);
+		state->saved_csr_known = true;
+		state->saved_csr_exists = true;
+	}
+	connection.BeginTransaction();
+	GqlQuery(connection, "DELETE FROM gql_internal.csr_pages WHERE snapshot_id IN (SELECT snapshot_id FROM "
+	                     "gql_internal.csr_snapshots WHERE graph_id = " + graph + ")");
+	GqlQuery(connection, "DELETE FROM gql_internal.csr_snapshots WHERE graph_id = " + graph);
+	{
+		Appender pages(connection, "gql_internal", "csr_pages");
+		GqlCsrWriter writer;
+		writer.write_page = [&](idx_t array_id, idx_t page, const_data_ptr_t bytes) {
+			pages.BeginRow();
+			pages.Append<uint64_t>(snapshot_id);
+			pages.Append<uint32_t>(NumericCast<uint32_t>(array_id));
+			pages.Append<uint32_t>(NumericCast<uint32_t>(page));
+			pages.Append<Value>(Value::BLOB(bytes, GqlCsrPages::PAGE_BYTES));
+			pages.EndRow();
+		};
+		WriteCsrMetadata(writer, snapshot);
+		snapshot.SaveArrays(writer);
+		pages.Close();
+		Appender snapshots(connection, "gql_internal", "csr_snapshots");
+		snapshots.BeginRow();
+		snapshots.Append<uint64_t>(snapshot_id);
+		snapshots.Append<uint64_t>(snapshot.graph_id);
+		snapshots.Append<Value>(Value::BLOB(const_data_ptr_cast(writer.data.data()), writer.data.size()));
+		snapshots.EndRow();
+		snapshots.Close();
+	}
+	connection.Commit();
+	// A delete planned during the save found nothing to drop yet.
+	if (CsrHasDestructiveWritesSinceBuild(context, snapshot)) {
+		DropSavedCsrs(context);
+	}
+}
+
+static shared_ptr<GqlCsrSnapshot> TryLoadSavedSnapshot(ClientContext &context, uint64_t graph_id,
+                                                       GqlDerivedGraphStorageState &storage) {
+	const auto generation = GqlDatabaseWriteGeneration(context);
+	{
+		lock_guard<mutex> guard(storage.lock);
+		auto entry = storage.no_saved_csr_at.find(graph_id);
+		if (entry != storage.no_saved_csr_at.end() && entry->second == generation) {
+			return nullptr;
+		}
+	}
+	auto snapshot = make_shared_ptr<GqlCsrSnapshot>();
+	try {
+		Connection connection(*context.db);
+		auto saved = GqlQuery(connection, "SELECT snapshot_id, metadata FROM gql_internal.csr_snapshots WHERE graph_id = " +
+		                                      to_string(graph_id));
+		bool loaded = false;
+		if (saved->RowCount() == 1) {
+			auto metadata = saved->GetValue(1, 0);
+			const auto &data = StringValue::Get(metadata);
+			GqlCsrReader reader(data, BufferManager::GetBufferManager(context),
+			                    make_shared_ptr<TableCsrPageSource>(*context.db, saved->GetValue(0, 0).GetValue<uint64_t>()));
+			loaded = ReadCsrMetadata(reader, *snapshot) && snapshot->graph_id == graph_id &&
+			         snapshot->schema_version == ReadCsrSchemaVersion(connection, graph_id);
+			if (loaded) {
+				snapshot->LoadArrays(reader);
+			}
+		}
+		if (!loaded) {
+			lock_guard<mutex> guard(storage.lock);
+			storage.no_saved_csr_at[graph_id] = generation;
+			return nullptr;
+		}
+	} catch (const CatalogException &) {
+		// A database from before saved CSRs.
+		return nullptr;
+	} catch (const InvalidInputException &) {
+		return nullptr;
+	}
+	// The catalog is named after the file, which may have been renamed since.
+	auto &manager = DatabaseManager::Get(context);
+	const auto catalog_name = manager.GetDefaultDatabase().GetIdentifierName();
+	snapshot->vertex_catalog_name = catalog_name;
+	snapshot->edge_catalog_name = catalog_name;
+	snapshot->vertex_table_key = CsrTableKey(catalog_name, snapshot->vertex_schema_name, snapshot->vertex_table_name);
+	snapshot->edge_table_key = CsrTableKey(catalog_name, snapshot->edge_schema_name, snapshot->edge_table_name);
+	snapshot->supports_delta = true;
+	snapshot->loaded_from_disk = true;
+	snapshot->write_generation = ReadCsrWriteGeneration(context);
+	snapshot->vertex_write_generation = ReadCsrTableWriteGeneration(context, snapshot->vertex_table_key);
+	snapshot->edge_write_generation = ReadCsrTableWriteGeneration(context, snapshot->edge_table_key);
+	snapshot->vertex_destructive_generation = ReadCsrTableDestructiveGeneration(context, snapshot->vertex_table_key);
+	snapshot->edge_destructive_generation = ReadCsrTableDestructiveGeneration(context, snapshot->edge_table_key);
+	// Nothing says the tables are as they were, so the first read checks them.
+	snapshot->synced_generation = NumericLimits<uint64_t>::Maximum();
+	lock_guard<mutex> guard(storage.lock);
+	auto &snapshots = storage.snapshots[graph_id];
+	for (const auto &existing : snapshots) {
+		if (existing->supports_delta) {
+			return existing;
+		}
+	}
+	snapshots.push_back(snapshot);
+	return snapshot;
+}
+
 struct GqlCsrLease {
 	shared_ptr<const GqlCsrSnapshot> snapshot;
 	shared_ptr<const GqlCsrDelta> delta;
@@ -1213,9 +1650,21 @@ struct GqlCsrQueryLeases : ClientContextState {
 	mutex lock;
 	unordered_map<string, GqlCsrLease> leases;
 
-	void QueryEnd() override {
-		lock_guard<mutex> guard(lock);
-		leases.clear();
+	void QueryEnd(ClientContext &context) override {
+		{
+			lock_guard<mutex> guard(lock);
+			leases.clear();
+		}
+		// Readers get a snapshot under the storage lock, so one held only by storage has no readers.
+		auto storage = GetDerivedGraphStorageState(context);
+		lock_guard<mutex> guard(storage->lock);
+		for (const auto &graph : storage->snapshots) {
+			for (const auto &snapshot : graph.second) {
+				if (snapshot.use_count() == 1) {
+					snapshot->ReleasePages();
+				}
+			}
+		}
 	}
 };
 
@@ -1425,6 +1874,9 @@ static GqlCsrLease ResolveFullLease(ClientContext &context, const string &graph_
 			}
 		}
 		if (!snapshot) {
+			snapshot = TryLoadSavedSnapshot(context, graph.graph_id, storage);
+		}
+		if (!snapshot) {
 			throw InvalidInputException("CSR for table-backed graph '%s' has not been built in this database instance; "
 			                            "run CALL gql_build_csr('%s') first",
 			                            graph_name, graph_name);
@@ -1525,6 +1977,7 @@ shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context
 	auto storage = GetDerivedGraphStorageState(context);
 	storage->acquisition_count++;
 	bool performed_build = false;
+	bool tried_saved = false;
 	while (true) {
 		Connection connection(*context.db);
 		auto graph = ReadGraphVersion(connection, graph_name);
@@ -1538,6 +1991,12 @@ shared_ptr<const GqlCsrSnapshot> GqlGetOrBuildCsrSnapshot(ClientContext &context
 				}
 				return snapshot;
 			}
+		}
+		// A saved CSR is the same as a build when no write has followed it.
+		const auto usable = weight_property.empty() && (GQL_CSR_FULL & capabilities) == capabilities;
+		if (usable && !tried_saved && TryLoadSavedSnapshot(context, graph.graph_id, *storage)) {
+			tried_saved = true;
+			continue;
 		}
 		performed_build |=
 		    BuildAndPublishTableSnapshot(context, *storage, graph.graph_id, graph_name, capabilities, weight_property);
@@ -1558,6 +2017,7 @@ shared_ptr<const GqlCsrSnapshot> GqlTryGetCsrSnapshot(ClientContext &context, co
 
 struct CsrBindData : TableFunctionData {
 	bool endpoint_statistics = false;
+	bool persist = true;
 	string graph_name;
 	string weight_property;
 	uint64_t vertex_id = 0;
@@ -1929,13 +2389,7 @@ static OperatorResultType CsrExpandFunction(ExecutionContext &context, TableFunc
 			}
 			if (state.filter_neighbors) {
 				const auto neighbor = neighbors[index];
-				const auto labels_begin = snapshot.vertex_label_ids.begin() + snapshot.vertex_label_offsets[neighbor];
-				const auto labels_end = snapshot.vertex_label_ids.begin() + snapshot.vertex_label_offsets[neighbor + 1];
-				bool matches = true;
-				for (const auto required : state.neighbor_label_ids) {
-					matches = matches && std::find(labels_begin, labels_end, required) != labels_end;
-				}
-				if (!matches) {
+				if (!CsrVertexHasLabels(snapshot, nullptr, neighbor, state.neighbor_label_ids)) {
 					continue;
 				}
 			}
@@ -2337,7 +2791,7 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 		level.Clear();
 		bool found = false;
 		for (const auto vertex : frontier) {
-			CsrForEachEdge(snapshot, delta, vertex, state.outgoing, label->second, [&](idx_t neighbor, uint64_t) {
+			CsrForEachNeighbor(snapshot, delta, vertex, state.outgoing, label->second, [&](idx_t neighbor) {
 				if (found || settled.Contains(neighbor) || !level.Insert(neighbor)) {
 					return;
 				}
@@ -3069,7 +3523,8 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
 	         "endpoint_combinations",
 	         "endpoint_statistics_bytes",
 	         "delta_vertex_count",
-	         "delta_edge_count"};
+	         "delta_edge_count",
+	         "loaded_from_disk"};
 	return_types = {
 	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
 	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
@@ -3077,7 +3532,8 @@ static unique_ptr<FunctionData> CsrStatsBind(ClientContext &, TableFunctionBindI
 	    LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN,
 	    LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::UBIGINT,
 	    LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::UBIGINT, LogicalType::VARCHAR,
-	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
+	    LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT,
+	    LogicalType::BOOLEAN};
 	return std::move(result);
 }
 
@@ -3119,6 +3575,15 @@ static void BuildCsrFunction(ClientContext &context, TableFunctionInput &input, 
 	// raced construction, CALL must not report a stale projection as successfully
 	// prepared, unless a delta follows it.
 	auto snapshot = AcquireFullLease(context, data.graph_name, *storage).snapshot;
+	auto &database_manager = DatabaseManager::Get(context);
+	auto database = database_manager.GetDatabase(database_manager.GetDefaultDatabase());
+	if (database && !database->IsReadOnly() && !database->GetStorageManager().InMemory() && snapshot->supports_delta) {
+		if (data.persist) {
+			SaveCsrSnapshot(context, *snapshot);
+		} else {
+			DropSavedCsrs(context, snapshot->vertex_table_key);
+		}
+	}
 	auto build_count = ReadCsrBuildCount(*storage);
 
 	output.SetChildCardinality(1);
@@ -3198,6 +3663,7 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	output.SetValue(26, 0, snapshot->has_source_snapshot ? Value::UBIGINT(snapshot->source_snapshot_id) : Value());
 	output.SetValue(33, 0, Value::UBIGINT(delta_vertices));
 	output.SetValue(34, 0, Value::UBIGINT(delta_edges));
+	output.SetValue(35, 0, Value::BOOLEAN(snapshot->loaded_from_disk));
 	state.done = true;
 }
 
@@ -3399,6 +3865,12 @@ TableFunction GqlBuildCsrFunction() {
 				throw BinderException("endpoint_statistics must be a non-NULL BOOLEAN");
 			result->endpoint_statistics = endpoint->second.GetValue<bool>();
 		}
+		auto persist = input.named_parameters.find("persist");
+		if (persist != input.named_parameters.end()) {
+			if (persist->second.IsNull())
+				throw BinderException("persist must be a non-NULL BOOLEAN");
+			result->persist = persist->second.GetValue<bool>();
+		}
 		names = {"graph_name", "graph_version", "vertex_count", "edge_count", "memory_bytes", "build_count"};
 		return_types = {LogicalType::VARCHAR, LogicalType::UBIGINT, LogicalType::UBIGINT,
 		                LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT};
@@ -3406,7 +3878,10 @@ TableFunction GqlBuildCsrFunction() {
 	};
 	function.init_global = SingleRowInit;
 	function.GetSignature().WithTypedKwargs(
-	    "options", [](TypedKwargs &options) { options.Add("endpoint_statistics", LogicalType::BOOLEAN); });
+	    "options", [](TypedKwargs &options) { 
+		    options.Add("endpoint_statistics", LogicalType::BOOLEAN);
+		    options.Add("persist", LogicalType::BOOLEAN);
+	    });
 	return function;
 }
 

@@ -1,0 +1,242 @@
+# name: test/sql/gql_csr_persistence.test
+# description: A built CSR lives in the database file and reopens without a rebuild, and is dropped by anything a delta can't follow
+# group: [gql]
+
+require duckgql
+
+load __TEST_DIR__/gql_csr_persistence.db
+
+# 1 -> 2 -> ... -> 100000, so arrays are large enough for pages, and 100000 -> 1 closes a cycle.
+statement ok
+COPY (SELECT i AS ":ID", 'P' AS ":LABEL", i::INTEGER AS "id:int" FROM range(1, 100001) t(i)) TO '{TEST_DIR}/saved_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i AS ":START_ID", i % 100000 + 1 AS ":END_ID", 'R' AS ":TYPE" FROM range(1, 100001) t(i)) TO '{TEST_DIR}/saved_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH saved ANY
+
+statement ok
+COPY GRAPH saved FROM (VERTICES '{TEST_DIR}/saved_nodes.csv', EDGES '{TEST_DIR}/saved_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_create_property_index('saved', 'id')
+
+# Nothing is saved until a CSR is built.
+query I
+SELECT count(*) FROM gql_internal.csr_snapshots
+----
+0
+
+statement ok
+CALL gql_build_csr('saved')
+
+query I
+SELECT count(*) > 0 FROM gql_internal.csr_pages
+----
+true
+
+# Opening again reads it from the file, with no build.
+restart
+
+statement ok
+SESSION SET GRAPH saved
+
+query III
+SELECT build_count, loaded_from_disk, edge_count FROM gql_csr_stats('saved')
+----
+0	true	100000
+
+query I
+SELECT neighbor_id FROM gql_neighbors('saved', 500, 'out')
+----
+501
+
+query I
+SELECT count(*) FROM gql_csr_vertices('saved', 'P')
+----
+100000
+
+query I
+MATCH (a:P)-[:R]->(b) WHERE a.id = 99999 RETURN b.id
+----
+100000
+
+query I
+MATCH (a:P)-[:R]->{1,5}(b) WHERE a.id = 100000 RETURN count(DISTINCT b.id)
+----
+5
+
+query I
+MATCH (s:P) WHERE s.id = 100000 MATCH (t:P) WHERE t.id = 2 MATCH p = ANY SHORTEST (s)-[:R]->{1,5}(t) RETURN PATH_LENGTH(p)
+----
+2
+
+query I
+SELECT build_count FROM gql_csr_stats('saved')
+----
+0
+
+# Inserts go into a delta over the saved CSR, and survive reopening as rows it catches up with.
+statement ok
+MATCH (a:P), (b:P) WHERE a.id = 1 AND b.id = 3 INSERT (a)-[:R]->(b)
+
+query I rowsort
+SELECT neighbor_id FROM gql_neighbors('saved', 1, 'out')
+----
+2
+3
+
+restart
+
+statement ok
+SESSION SET GRAPH saved
+
+query I rowsort
+SELECT neighbor_id FROM gql_neighbors('saved', 1, 'out')
+----
+2
+3
+
+query III
+SELECT build_count, loaded_from_disk, delta_edge_count FROM gql_csr_stats('saved')
+----
+0	true	1
+
+# A low memory limit evicts pages, which come back from the file.
+query I
+SELECT edge_count FROM gql_csr_stats('saved')
+----
+100001
+
+statement ok
+SET memory_limit='20MB'
+
+query I
+SELECT sum(neighbor_id) FROM gql_neighbors('saved', 70000, 'out')
+----
+70001
+
+statement ok
+RESET memory_limit
+
+# An algorithm can start from it too, rather than building.
+query I
+SELECT count(*) > 0 FROM system.algo.bfs('saved', 1)
+----
+true
+
+# A delete takes the saved copy away before it commits.
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_source_id = 1 AND __gql_target_id = 3
+
+query I
+SELECT count(*) FROM gql_internal.csr_snapshots
+----
+0
+
+query I
+SELECT count(*) FROM gql_internal.csr_pages
+----
+0
+
+restart
+
+statement ok
+SESSION SET GRAPH saved
+
+statement error
+SELECT count(*) FROM gql_neighbors('saved', 1, 'out')
+----
+has not been built
+
+# So does an update, even one that rolls back, because the rebuild is the safe side of that.
+statement ok
+CALL gql_build_csr('saved')
+
+statement ok
+BEGIN
+
+statement ok
+UPDATE gql_data.graph_1_vertices SET id = id WHERE id = 1
+
+statement ok
+ROLLBACK
+
+query I
+SELECT count(*) FROM gql_internal.csr_snapshots
+----
+0
+
+# Saving can be declined, and a new build replaces an old saved copy rather than adding to it.
+statement ok
+CALL gql_build_csr('saved', persist := false)
+
+query I
+SELECT count(*) FROM gql_internal.csr_snapshots
+----
+0
+
+statement ok
+CALL gql_build_csr('saved')
+
+statement ok
+CALL gql_build_csr('saved')
+
+query II
+SELECT count(*), count(DISTINCT snapshot_id) FROM gql_internal.csr_snapshots
+----
+1	1
+
+query I
+SELECT count(DISTINCT snapshot_id) FROM gql_internal.csr_pages
+----
+1
+
+# Rows written outside this extension's sight fail the row count check, and the CSR is rebuilt.
+statement ok
+SESSION SET GRAPH saved
+
+query I
+SELECT neighbor_id FROM gql_neighbors('saved', 2, 'out')
+----
+3
+
+# Dropping the graph removes what it saved.
+statement ok
+DROP GRAPH saved
+
+query I
+SELECT count(*) FROM gql_internal.csr_snapshots
+----
+0
+
+query I
+SELECT count(*) FROM gql_internal.csr_pages
+----
+0
+
+# A read-only open uses a saved CSR too.
+statement ok
+CREATE GRAPH saved ANY
+
+statement ok
+COPY GRAPH saved FROM (VERTICES '{TEST_DIR}/saved_nodes.csv', EDGES '{TEST_DIR}/saved_edges.csv') FORMAT GRAPH
+
+statement ok
+CALL gql_build_csr('saved')
+
+load __TEST_DIR__/gql_csr_persistence.db readonly
+
+statement ok
+SESSION SET GRAPH saved
+
+query II
+SELECT build_count, loaded_from_disk FROM gql_csr_stats('saved')
+----
+0	true
+
+query I
+SELECT neighbor_id FROM gql_neighbors('saved', 1, 'out')
+----
+2

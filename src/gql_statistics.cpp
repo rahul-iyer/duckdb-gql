@@ -70,7 +70,9 @@ unique_ptr<GqlEndpointStatistics> GqlCollectEndpointStatistics(ClientContext &co
 			status = "label_limit";
 			return nullptr;
 		}
-		labels.assign(snapshot.vertex_label_ids.begin() + start, snapshot.vertex_label_ids.begin() + end);
+		labels.clear();
+		for (auto offset = start; offset < end; offset++)
+			labels.push_back(snapshot.vertex_label_ids[offset]);
 		std::sort(labels.begin(), labels.end());
 		if (vertex == 0 || labels != previous) {
 			auto found = groups.find(labels);

@@ -2,9 +2,13 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/storage/buffer/buffer_handle.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/function/table_function.hpp"
 
+#include <functional>
 #include <limits>
 
 namespace duckdb {
@@ -31,6 +35,205 @@ static constexpr GqlCsrCapabilities GQL_CSR_FULL = GQL_CSR_OUTGOING | GQL_CSR_IN
                                                    GQL_CSR_VERTEX_LABEL_POSTINGS | GQL_CSR_EDGE_STATS |
                                                    GQL_CSR_VERTEX_ROW_IDS;
 
+//! Reads a saved page back. A page with a source can be dropped under memory pressure, not spilled.
+class GqlCsrPageSource {
+public:
+	virtual ~GqlCsrPageSource() = default;
+	virtual void Read(idx_t array_id, idx_t page, data_ptr_t target, idx_t bytes) = 0;
+};
+
+//! Writes metadata in order, and gives each paged array an ID for its pages.
+class GqlCsrWriter {
+public:
+	template <class T>
+	void Write(const T &value) {
+		data.append(reinterpret_cast<const char *>(&value), sizeof(T));
+	}
+	void WriteBytes(const void *bytes, idx_t size) {
+		Write<idx_t>(size);
+		data.append(static_cast<const char *>(bytes), size);
+	}
+	void WriteString(const string &value) {
+		WriteBytes(value.data(), value.size());
+	}
+	string data;
+	idx_t next_array = 0;
+	std::function<void(idx_t array_id, idx_t page, const_data_ptr_t bytes)> write_page;
+};
+
+class GqlCsrReader {
+public:
+	GqlCsrReader(const string &data_p, BufferManager &manager_p, shared_ptr<GqlCsrPageSource> source_p)
+	    : data(data_p), manager(manager_p), source(std::move(source_p)) {
+	}
+	template <class T>
+	T Read() {
+		T value;
+		ReadInto(&value, sizeof(T));
+		return value;
+	}
+	void ReadInto(void *target, idx_t size) {
+		if (position + size > data.size()) {
+			throw InvalidInputException("Saved GQL CSR metadata is truncated");
+		}
+		memcpy(target, data.data() + position, size);
+		position += size;
+	}
+	idx_t ReadSize() {
+		return Read<idx_t>();
+	}
+	string ReadString() {
+		string value(ReadSize(), '\0');
+		ReadInto(&value[0], value.size());
+		return value;
+	}
+	const string &data;
+	idx_t position = 0;
+	BufferManager &manager;
+	shared_ptr<GqlCsrPageSource> source;
+	idx_t next_array = 0;
+};
+
+// Values on evictable pages of the buffer manager, so they count towards the memory limit. A page
+// stays pinned from its first read until ReleasePages, which callers run when no query can be reading.
+class GqlCsrPages {
+public:
+	GqlCsrPages(BufferManager &manager, idx_t byte_count);
+	//! Pages read from a source when first used.
+	GqlCsrPages(BufferManager &manager, idx_t byte_count, shared_ptr<GqlCsrPageSource> source, idx_t array_id);
+
+	//! The page's data, pinning it if needed.
+	data_ptr_t Page(idx_t page) const {
+		// Reads through the pointer depend on its value, which CPUs order without a barrier. A
+		// barrier on this path slows every read of a graph-wide search.
+		auto data = pointers[page].load(std::memory_order_relaxed);
+		return data ? data : Pin(page);
+	}
+
+	void ReleasePages() const;
+
+	idx_t AllocatedBytes() const {
+		return blocks.size() * PAGE_BYTES;
+	}
+
+	idx_t PageCount() const {
+		return blocks.size();
+	}
+
+	static constexpr idx_t PAGE_SHIFT = 18;
+	static constexpr idx_t PAGE_BYTES = idx_t(1) << PAGE_SHIFT;
+
+private:
+	data_ptr_t Pin(idx_t page) const;
+
+	BufferManager &manager;
+	shared_ptr<GqlCsrPageSource> source;
+	idx_t array_id = 0;
+	mutable mutex lock;
+	mutable vector<shared_ptr<BlockHandle>> blocks;
+	mutable vector<BufferHandle> pins;
+	mutable unique_ptr<atomic<data_ptr_t>[]> pointers;
+};
+
+// An array built in memory, then moved to buffer-managed pages. Reads look the same either way.
+template <class T>
+class GqlCsrArray {
+public:
+	void assign(idx_t count, const T &value) {
+		values.assign(count, value);
+	}
+	void resize(idx_t count) {
+		values.resize(count);
+	}
+	void reserve(idx_t count) {
+		values.reserve(count);
+	}
+	void push_back(const T &value) {
+		values.push_back(value);
+	}
+	T &back() {
+		return values.back();
+	}
+	typename vector<T>::iterator begin() {
+		return values.begin();
+	}
+	typename vector<T>::iterator end() {
+		return values.end();
+	}
+	T &operator[](idx_t index) {
+		D_ASSERT(!pages);
+		return values[index];
+	}
+	const T &operator[](idx_t index) const {
+		if (pages) {
+			return reinterpret_cast<const T *>(pages->Page(index >> PAGE_VALUE_SHIFT))[index & PAGE_VALUE_MASK];
+		}
+		return values[index];
+	}
+	idx_t size() const {
+		return pages ? logical_size : values.size();
+	}
+	bool empty() const {
+		return size() == 0;
+	}
+	idx_t AllocatedBytes() const {
+		return pages ? pages->AllocatedBytes() : values.capacity() * sizeof(T);
+	}
+	void Save(GqlCsrWriter &writer) const {
+		writer.Write<bool>(pages != nullptr);
+		writer.Write<idx_t>(size());
+		if (!pages) {
+			writer.WriteBytes(values.data(), values.size() * sizeof(T));
+			return;
+		}
+		const auto array_id = writer.next_array++;
+		for (idx_t page = 0; page < pages->PageCount(); page++) {
+			writer.write_page(array_id, page, pages->Page(page));
+		}
+	}
+	void Load(GqlCsrReader &reader) {
+		const auto paged = reader.Read<bool>();
+		logical_size = reader.Read<idx_t>();
+		if (paged) {
+			pages = make_uniq<GqlCsrPages>(reader.manager, logical_size * sizeof(T), reader.source, reader.next_array++);
+			return;
+		}
+		values.resize(reader.ReadSize() / sizeof(T));
+		reader.ReadInto(values.data(), values.size() * sizeof(T));
+	}
+	//! A copy of the values, while they are still in memory.
+	vector<T> Values() const {
+		D_ASSERT(!pages);
+		return values;
+	}
+	void ReleasePages() const {
+		if (pages) {
+			pages->ReleasePages();
+		}
+	}
+	//! Moves the values to pages, when there are enough to fill one.
+	void Freeze(BufferManager &manager) {
+		if (values.size() * sizeof(T) < GqlCsrPages::PAGE_BYTES) {
+			return;
+		}
+		logical_size = values.size();
+		pages = make_uniq<GqlCsrPages>(manager, logical_size * sizeof(T));
+		for (idx_t start = 0; start < logical_size; start += PAGE_VALUE_MASK + 1) {
+			const auto count = MinValue<idx_t>(PAGE_VALUE_MASK + 1, logical_size - start);
+			memcpy(pages->Page(start >> PAGE_VALUE_SHIFT), values.data() + start, count * sizeof(T));
+		}
+		vector<T>().swap(values);
+	}
+
+private:
+	static constexpr idx_t PAGE_VALUE_SHIFT = sizeof(T) == 4 ? GqlCsrPages::PAGE_SHIFT - 2 : GqlCsrPages::PAGE_SHIFT - 3;
+	static constexpr idx_t PAGE_VALUE_MASK = (idx_t(1) << PAGE_VALUE_SHIFT) - 1;
+
+	vector<T> values;
+	idx_t logical_size = 0;
+	unique_ptr<GqlCsrPages> pages;
+};
+
 class GqlCsrVertexIds {
 public:
 	void reserve(idx_t count) {
@@ -47,7 +250,7 @@ public:
 	}
 
 	uint64_t back() const {
-		return explicit_ids.back();
+		return explicit_ids[count - 1];
 	}
 
 	idx_t size() const {
@@ -61,7 +264,7 @@ public:
 
 	void MakeImplicitDense() {
 		count = explicit_ids.size();
-		vector<uint64_t>().swap(explicit_ids);
+		explicit_ids = GqlCsrArray<uint64_t>();
 		implicit_dense = true;
 	}
 
@@ -70,25 +273,50 @@ public:
 	}
 
 	idx_t AllocatedBytes() const {
-		return explicit_ids.capacity() * sizeof(uint64_t);
+		return explicit_ids.AllocatedBytes();
+	}
+
+	void Freeze(BufferManager &manager) {
+		explicit_ids.Freeze(manager);
+	}
+
+	void Save(GqlCsrWriter &writer) const {
+		writer.Write<bool>(implicit_dense);
+		writer.Write<idx_t>(count);
+		explicit_ids.Save(writer);
+	}
+
+	void Load(GqlCsrReader &reader) {
+		implicit_dense = reader.Read<bool>();
+		count = reader.Read<idx_t>();
+		explicit_ids.Load(reader);
+	}
+
+	void ReleasePages() const {
+		explicit_ids.ReleasePages();
 	}
 
 private:
 	bool implicit_dense = false;
 	idx_t count = 0;
-	vector<uint64_t> explicit_ids;
+	GqlCsrArray<uint64_t> explicit_ids;
 };
 
 class GqlCsrOrdinals {
 public:
-	void Resize(idx_t count, bool use_compact) {
+	//! With a manager, values large enough for a page live in buffer-managed pages.
+	void Resize(idx_t count, bool use_compact, BufferManager *manager = nullptr) {
 		compact = use_compact;
-		if (compact) {
+		logical_size = count;
+		vector<uint32_t>().swap(compact_values);
+		vector<idx_t>().swap(wide_values);
+		pages.reset();
+		if (manager && count * WidthBytes() >= GqlCsrPages::PAGE_BYTES) {
+			pages = make_uniq<GqlCsrPages>(*manager, count * WidthBytes());
+		} else if (compact) {
 			compact_values.resize(count);
-			vector<idx_t>().swap(wide_values);
 		} else {
 			wide_values.resize(count);
-			vector<uint32_t>().swap(compact_values);
 		}
 	}
 
@@ -99,18 +327,45 @@ public:
 				throw InternalException("GQL CSR value %llu does not fit the width chosen for it",
 				                        static_cast<unsigned long long>(ordinal));
 			}
-			compact_values[index] = static_cast<uint32_t>(ordinal);
+			if (pages) {
+				reinterpret_cast<uint32_t *>(pages->Page(index >> (GqlCsrPages::PAGE_SHIFT - 2)))[index & COMPACT_MASK] =
+				    static_cast<uint32_t>(ordinal);
+			} else {
+				compact_values[index] = static_cast<uint32_t>(ordinal);
+			}
+		} else if (pages) {
+			reinterpret_cast<idx_t *>(pages->Page(index >> (GqlCsrPages::PAGE_SHIFT - 3)))[index & WIDE_MASK] = ordinal;
 		} else {
 			wide_values[index] = ordinal;
 		}
 	}
 
 	idx_t operator[](idx_t index) const {
+		if (pages) {
+			if (compact) {
+				return reinterpret_cast<const uint32_t *>(pages->Page(index >> (GqlCsrPages::PAGE_SHIFT - 2)))[index & COMPACT_MASK];
+			}
+			return reinterpret_cast<const idx_t *>(pages->Page(index >> (GqlCsrPages::PAGE_SHIFT - 3)))[index & WIDE_MASK];
+		}
 		return compact ? static_cast<idx_t>(compact_values[index]) : wide_values[index];
 	}
 
+	//! Calls function(index, value) over a range, looking up each page once.
+	template <class FUNCTION>
+	void ForEach(idx_t start, idx_t end, FUNCTION &&function) const {
+		if (!pages) {
+			for (auto index = start; index < end; index++) {
+				function(index, (*this)[index]);
+			}
+		} else if (compact) {
+			ForEachOnPages<uint32_t>(start, end, function);
+		} else {
+			ForEachOnPages<idx_t>(start, end, function);
+		}
+	}
+
 	idx_t size() const {
-		return compact ? compact_values.size() : wide_values.size();
+		return logical_size;
 	}
 
 	bool empty() const {
@@ -122,13 +377,71 @@ public:
 	}
 
 	idx_t AllocatedBytes() const {
+		if (pages) {
+			return pages->AllocatedBytes();
+		}
 		return compact ? compact_values.capacity() * sizeof(uint32_t) : wide_values.capacity() * sizeof(idx_t);
 	}
 
+	void ReleasePages() const {
+		if (pages) {
+			pages->ReleasePages();
+		}
+	}
+
+	void Save(GqlCsrWriter &writer) const {
+		writer.Write<bool>(compact);
+		writer.Write<idx_t>(logical_size);
+		writer.Write<bool>(pages != nullptr);
+		if (pages) {
+			const auto array_id = writer.next_array++;
+			for (idx_t page = 0; page < pages->PageCount(); page++) {
+				writer.write_page(array_id, page, pages->Page(page));
+			}
+		} else if (compact) {
+			writer.WriteBytes(compact_values.data(), compact_values.size() * sizeof(uint32_t));
+		} else {
+			writer.WriteBytes(wide_values.data(), wide_values.size() * sizeof(idx_t));
+		}
+	}
+
+	void Load(GqlCsrReader &reader) {
+		compact = reader.Read<bool>();
+		logical_size = reader.Read<idx_t>();
+		if (reader.Read<bool>()) {
+			pages = make_uniq<GqlCsrPages>(reader.manager, logical_size * WidthBytes(), reader.source, reader.next_array++);
+		} else if (compact) {
+			compact_values.resize(reader.ReadSize() / sizeof(uint32_t));
+			reader.ReadInto(compact_values.data(), compact_values.size() * sizeof(uint32_t));
+		} else {
+			wide_values.resize(reader.ReadSize() / sizeof(idx_t));
+			reader.ReadInto(wide_values.data(), wide_values.size() * sizeof(idx_t));
+		}
+	}
+
 private:
+	template <class VALUE, class FUNCTION>
+	void ForEachOnPages(idx_t start, idx_t end, FUNCTION &function) const {
+		const idx_t per_page = GqlCsrPages::PAGE_BYTES / sizeof(VALUE);
+		while (start < end) {
+			const auto page = start / per_page;
+			const auto stop = MinValue<idx_t>(end, (page + 1) * per_page);
+			const auto *data = reinterpret_cast<const VALUE *>(pages->Page(page));
+			for (auto index = start; index < stop; index++) {
+				function(index, static_cast<idx_t>(data[index % per_page]));
+			}
+			start = stop;
+		}
+	}
+
+	static constexpr idx_t COMPACT_MASK = (GqlCsrPages::PAGE_BYTES >> 2) - 1;
+	static constexpr idx_t WIDE_MASK = (GqlCsrPages::PAGE_BYTES >> 3) - 1;
+
 	bool compact = false;
+	idx_t logical_size = 0;
 	vector<uint32_t> compact_values;
 	vector<idx_t> wide_values;
+	unique_ptr<GqlCsrPages> pages;
 };
 
 class GqlCsrEdgeLabels {
@@ -138,7 +451,7 @@ public:
 		uniform = use_uniform;
 		uniform_label_id = uniform_label;
 		if (uniform) {
-			vector<uint32_t>().swap(explicit_values);
+			explicit_values = GqlCsrArray<uint32_t>();
 		} else {
 			explicit_values.resize(count);
 		}
@@ -175,14 +488,36 @@ public:
 	}
 
 	idx_t AllocatedBytes() const {
-		return explicit_values.capacity() * sizeof(uint32_t);
+		return explicit_values.AllocatedBytes();
+	}
+
+	void Freeze(BufferManager &manager) {
+		explicit_values.Freeze(manager);
+	}
+
+	void Save(GqlCsrWriter &writer) const {
+		writer.Write<idx_t>(logical_size);
+		writer.Write<bool>(uniform);
+		writer.Write<uint32_t>(uniform_label_id);
+		explicit_values.Save(writer);
+	}
+
+	void Load(GqlCsrReader &reader) {
+		logical_size = reader.Read<idx_t>();
+		uniform = reader.Read<bool>();
+		uniform_label_id = reader.Read<uint32_t>();
+		explicit_values.Load(reader);
+	}
+
+	void ReleasePages() const {
+		explicit_values.ReleasePages();
 	}
 
 private:
 	idx_t logical_size = 0;
 	bool uniform = true;
 	uint32_t uniform_label_id = 0;
-	vector<uint32_t> explicit_values;
+	GqlCsrArray<uint32_t> explicit_values;
 };
 
 struct GqlCsrEdgeLabelStats {
@@ -291,6 +626,8 @@ struct GqlCsrSnapshot {
 	bool supports_delta = false;
 	uint64_t synced_generation = 0;
 	shared_ptr<const GqlCsrDelta> delta;
+	//! Read from the database file rather than built in this process.
+	bool loaded_from_disk = false;
 	bool has_source_snapshot = false;
 	uint64_t source_snapshot_id = 0;
 	string source_catalog;
@@ -312,16 +649,16 @@ struct GqlCsrSnapshot {
 	idx_t edge_count = 0;
 	GqlCsrVertexIds vertex_ids;
 	unordered_map<uint64_t, idx_t> ordinal_by_id;
-	vector<idx_t> vertex_label_offsets;
-	vector<uint32_t> vertex_label_ids;
+	GqlCsrArray<idx_t> vertex_label_offsets;
+	GqlCsrArray<uint32_t> vertex_label_ids;
 	vector<uint64_t> vertex_label_posting_offsets;
 	GqlCsrOrdinals vertex_label_postings;
-	vector<uint64_t> outgoing_offsets;
+	GqlCsrArray<uint64_t> outgoing_offsets;
 	GqlCsrOrdinals outgoing_degrees;
 	GqlCsrOrdinals outgoing_neighbors;
 	GqlCsrOrdinals outgoing_edge_ids;
 	GqlCsrEdgeLabels outgoing_label_ids;
-	vector<uint64_t> incoming_offsets;
+	GqlCsrArray<uint64_t> incoming_offsets;
 	GqlCsrOrdinals incoming_neighbors;
 	GqlCsrOrdinals incoming_edge_ids;
 	GqlCsrEdgeLabels incoming_label_ids;
@@ -341,6 +678,66 @@ struct GqlCsrSnapshot {
 
 	bool HasVertexRowIds() const {
 		return vertex_ids_match_rowids || has_vertex_row_ids;
+	}
+
+	//! Unpins what no query is reading, so the buffer manager can evict it.
+	void ReleasePages() const {
+		for (const auto *values : {&vertex_row_ids, &vertex_ordinal_by_row_id, &vertex_label_postings, &outgoing_degrees,
+		                           &outgoing_neighbors, &outgoing_edge_ids, &incoming_neighbors, &incoming_edge_ids}) {
+			values->ReleasePages();
+		}
+		vertex_ids.ReleasePages();
+		vertex_label_offsets.ReleasePages();
+		vertex_label_ids.ReleasePages();
+		outgoing_offsets.ReleasePages();
+		incoming_offsets.ReleasePages();
+		outgoing_label_ids.ReleasePages();
+		incoming_label_ids.ReleasePages();
+	}
+
+	void SaveArrays(GqlCsrWriter &writer) const {
+		vertex_ids.Save(writer);
+		vertex_row_ids.Save(writer);
+		vertex_ordinal_by_row_id.Save(writer);
+		vertex_label_offsets.Save(writer);
+		vertex_label_ids.Save(writer);
+		vertex_label_postings.Save(writer);
+		outgoing_offsets.Save(writer);
+		outgoing_neighbors.Save(writer);
+		outgoing_edge_ids.Save(writer);
+		outgoing_label_ids.Save(writer);
+		incoming_offsets.Save(writer);
+		incoming_neighbors.Save(writer);
+		incoming_edge_ids.Save(writer);
+		incoming_label_ids.Save(writer);
+	}
+
+	void LoadArrays(GqlCsrReader &reader) {
+		vertex_ids.Load(reader);
+		vertex_row_ids.Load(reader);
+		vertex_ordinal_by_row_id.Load(reader);
+		vertex_label_offsets.Load(reader);
+		vertex_label_ids.Load(reader);
+		vertex_label_postings.Load(reader);
+		outgoing_offsets.Load(reader);
+		outgoing_neighbors.Load(reader);
+		outgoing_edge_ids.Load(reader);
+		outgoing_label_ids.Load(reader);
+		incoming_offsets.Load(reader);
+		incoming_neighbors.Load(reader);
+		incoming_edge_ids.Load(reader);
+		incoming_label_ids.Load(reader);
+	}
+
+	//! Moves what was built in memory to pages. Later reads go through the const accessors.
+	void Freeze(BufferManager &manager) {
+		vertex_ids.Freeze(manager);
+		vertex_label_offsets.Freeze(manager);
+		vertex_label_ids.Freeze(manager);
+		outgoing_offsets.Freeze(manager);
+		incoming_offsets.Freeze(manager);
+		outgoing_label_ids.Freeze(manager);
+		incoming_label_ids.Freeze(manager);
 	}
 };
 

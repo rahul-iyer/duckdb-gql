@@ -2,7 +2,31 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
-## Graphs unlike LDBC (newest)
+## CSR in DuckDB storage (newest)
+
+CSR arrays live on buffer manager pages (`GqlCsrPages`, 256 KB), so they count towards `memory_limit` and can be
+evicted. A read checks a page pointer. A page is pinned on first read and released at `QueryEnd` once only storage
+holds the snapshot, so one query can't release pages while it runs, and a graph-wide search needs them all at once.
+
+`CALL gql_build_csr` also saves them to `gql_internal.csr_snapshots` and `csr_pages` (`persist := false` skips it).
+On open nothing is built: `TryLoadSavedSnapshot` reads metadata and pages load on first read, through `DataTable::Fetch`
+by row ID, as SQL would decode a vector of up to 2048 pages to read one. `data` is declared UNCOMPRESSED, as ZSTD
+compresses many rows together and made page reads hundreds of ms. Deletes, updates and prepared writes drop the saved
+copy from their own transaction while being planned, so no crash can leave it stale. Row counts catch other changes.
+
+SF1, open to first answer: about 830 ms to 39 ms, process 1 GB to 75 MB. Save adds 0.3 s to a build. File 278 to
+851 MB; old copies are reclaimed at CHECKPOINT. Exact goldens pass reading a reopened file (`run.py --saved-csr`).
+
+Sweep on SF1, totals in ms: DuckGQL 742, 492, 317, 295, 286, 288, 282 and Ladybug 2625, 1636, 1089, 923, 859, 816, 809
+at 1, 2, 4, 6, 8, 10, 12 threads. At 4 threads: no prepared statements 358, preserve_insertion_order on 360 (the
+slowest query almost entirely), legacy 350, memory_limit 1 GB 344. Results in `build/benchmarks/generalization/sweep`.
+
+Open: automatic rebuilds don't save; endpoint statistics and weighted CSRs aren't saved; writes without this extension
+are only caught by row counts; a reader on a copy being replaced gets a retry error; no test kills a process mid-save;
+nothing has run at SF10. Straight after a build one query sits at about 17 ms against 12 ms from a saved CSR, and the
+cause isn't known.
+
+## Graphs unlike LDBC
 
 `benchmark/generalization/run.py` asks DuckGQL and Ladybug the same 8 questions from 6 seeds across the degree
 range on Air Routes, RoadNet-CA and LiveJournal; `compare.py` prints times and checks answers (131/131 match).

@@ -1,0 +1,119 @@
+# name: test/sql/gql_csr_eviction.test
+# description: CSR pages count towards the memory limit and are evicted, with the same answers as when they fit
+# group: [gql]
+
+require duckgql
+
+load __TEST_DIR__/gql_csr_eviction.db
+
+statement ok
+SET threads=2
+
+# Each vertex links to the next and to one further on, with two edge types so that labels take space too.
+statement ok
+COPY (SELECT i AS ":ID", CASE WHEN i % 2 = 0 THEN 'E' ELSE 'O' END AS ":LABEL", i::INTEGER AS "id:int" FROM range(1, 1000001) t(i)) TO '{TEST_DIR}/evict_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT i AS ":START_ID", i % 1000000 + 1 AS ":END_ID", 'R' AS ":TYPE" FROM range(1, 1000001) t(i)
+      UNION ALL SELECT i, (i + 2) % 1000000 + 1, 'S' FROM range(1, 1000001) t(i)) TO '{TEST_DIR}/evict_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH evict ANY
+
+statement ok
+COPY GRAPH evict FROM (VERTICES '{TEST_DIR}/evict_nodes.csv', EDGES '{TEST_DIR}/evict_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH evict
+
+statement ok
+CALL gql_create_property_index('evict', 'id')
+
+statement ok
+CALL gql_build_csr('evict')
+
+# The pages are counted as buffer manager memory.
+query I
+SELECT memory_bytes > 50000000 FROM gql_csr_stats('evict')
+----
+true
+
+query I
+SELECT sum(memory_usage_bytes) > 30000000 FROM duckdb_memory() WHERE tag = 'EXTENSION'
+----
+true
+
+# The same questions before and after the limit falls far below the CSR.
+foreach phase before after
+
+query I
+SELECT sum(neighbor_id) FROM gql_neighbors('evict', 500, 'out')
+----
+1004
+
+query I
+SELECT count(*) FROM gql_csr_vertices('evict', 'E')
+----
+500000
+
+query I
+MATCH (a:O)-[:R]->(b:E) WHERE a.id = 999999 RETURN b.id
+----
+1000000
+
+query I
+MATCH (a)-[:R]->{1,10}(b) WHERE a.id = 1 RETURN count(DISTINCT b.id)
+----
+10
+
+query I
+MATCH (s) WHERE s.id = 1 MATCH (t) WHERE t.id = 181 MATCH p = ANY SHORTEST (s)-[:S]->{1,64}(t) RETURN PATH_LENGTH(p)
+----
+60
+
+# Many seeds across pages.
+query I
+MATCH (a)-[:S]->(b) WHERE a.id < 1000 RETURN count(*)
+----
+999
+
+statement ok
+SET memory_limit='40MB'
+
+endloop
+
+# Pages left memory for the temp folder.
+query I
+SELECT sum(temporary_storage_bytes) > 0 FROM duckdb_memory() WHERE tag = 'EXTENSION'
+----
+true
+
+query I
+SELECT sum(memory_usage_bytes) < 40000000 FROM duckdb_memory() WHERE tag = 'EXTENSION'
+----
+true
+
+# Inserts reach evicted pages' data through the delta, and a rebuild works under the limit's return.
+statement ok
+INSERT (:E {id: 2000000})
+
+query I
+MATCH (a:E) WHERE a.id = 2000000 RETURN a.id
+----
+2000000
+
+statement ok
+RESET memory_limit
+
+statement ok
+CALL gql_build_csr('evict')
+
+query I
+SELECT delta_vertex_count FROM gql_csr_stats('evict')
+----
+0
+
+query I
+SELECT count(*) FROM gql_csr_vertices('evict', 'E')
+----
+500001

@@ -250,6 +250,8 @@ def main():
     parser.add_argument('--runs',type=int,default=5); parser.add_argument('--timeout',type=float,default=10)
     parser.add_argument('--optimizer',choices=['cost','legacy'],default='cost')
     parser.add_argument('--prepared',action='store_true',help='compile each query once and reuse it, as Ladybug\'s client does; the first timed run includes the prepare')
+    parser.add_argument('--setting',action='append',default=[],help='a SET statement to run before the queries')
+    parser.add_argument('--saved-csr',action='store_true',help='read the CSR saved in the file instead of building it')
     parser.add_argument('--parameterized',action='store_true',help='like --prepared, binding upstream parameters instead of writing them as literals')
     args=parser.parse_args(); args.prepared=args.prepared or args.parameterized; out=args.output; out.mkdir(parents=True,exist_ok=True)
     report={'date':datetime.now(timezone.utc).isoformat(),'duckgql_commit':git(ROOT,'rev-parse','HEAD'),'duckgql_status':git(ROOT,'status','--short'),'upstream_commit':git(args.upstream,'rev-parse','HEAD'),'platform':platform.platform(),'config':{'optimizer':args.optimizer,'prepared':args.prepared,'parameterized':args.parameterized,'threads':args.threads,'memory_limit':'8GB','runs':args.runs,'warmups':0,'timeout_seconds':args.timeout,'timer':'perf_counter; C API execution and Python result conversion; no CLI overhead','csr':'one full snapshot before all queries; load/index/CSR excluded from query timings'},'queries':{}}
@@ -266,7 +268,8 @@ def main():
     report['dataset_sha256']=hashlib.file_digest(archive.open('rb'),'sha256').hexdigest() if archive.exists() else None
     report['runner_sha256']=hashlib.file_digest(Path(__file__).open('rb'),'sha256').hexdigest()
     report['load']=json.loads((out/'loaded.json').read_text()); print(report['load'],flush=True)
-    db.query('SESSION SET GRAPH snb_interactive'); t=time.perf_counter(); db.query("CALL gql_build_csr('snb_interactive')")
+    for setting in args.setting: db.query(setting)
+    db.query('SESSION SET GRAPH snb_interactive'); t=time.perf_counter(); db.query("SELECT build_count FROM gql_csr_stats('snb_interactive')") if args.saved_csr else db.query("CALL gql_build_csr('snb_interactive')")
     report['csr_seconds']=time.perf_counter()-t; print('CSR',report['csr_seconds'],flush=True)
     db.query(f"SET gql_optimizer={lit(args.optimizer)}")
     queries,unsupported=cases(args.upstream,out)

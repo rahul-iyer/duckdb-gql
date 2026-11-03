@@ -59,6 +59,12 @@ void GqlEnsureStorage(Connection &connection) {
 	                     "graph_name VARCHAR NOT NULL UNIQUE, "
 	                     "graph_version UBIGINT NOT NULL DEFAULT 0, "
 	                     "created_at TIMESTAMP NOT NULL DEFAULT current_timestamp)");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.csr_snapshots ("
+	                     "snapshot_id UBIGINT NOT NULL, graph_id UBIGINT NOT NULL, metadata BLOB NOT NULL)");
+	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.csr_pages ("
+	                     "snapshot_id UBIGINT NOT NULL, array_id UINTEGER NOT NULL, page UINTEGER NOT NULL, "
+	                     // Compression covers many rows at once, and each read wants one page.
+	                     "data BLOB USING COMPRESSION UNCOMPRESSED NOT NULL)");
 	GqlQuery(connection, "CREATE TABLE IF NOT EXISTS gql_internal.graph_fanout_statistics ("
 	                     "graph_id UBIGINT NOT NULL, graph_version UBIGINT NOT NULL, edge_label VARCHAR NOT NULL, "
 	                     "edge_count UBIGINT NOT NULL, source_count UBIGINT NOT NULL, target_count UBIGINT NOT NULL, "
@@ -1016,6 +1022,9 @@ static void DropGraph(ClientContext &context, TableFunctionInput &input, DataChu
 		                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_vertex_id_seq"));
 		GqlQuery(connection, "DROP SEQUENCE IF EXISTS gql_internal." +
 		                         GqlQuoteIdentifier("graph_" + to_string(graph_id) + "_edge_id_seq"));
+		GqlQuery(connection, "DELETE FROM gql_internal.csr_pages WHERE snapshot_id IN (SELECT snapshot_id FROM "
+		                     "gql_internal.csr_snapshots WHERE graph_id = " + to_string(graph_id) + ")");
+		GqlQuery(connection, "DELETE FROM gql_internal.csr_snapshots WHERE graph_id = " + to_string(graph_id));
 		auto managed =
 		    GqlQuery(connection, "SELECT catalog_name, schema_name, table_name FROM "
 		                         "gql_internal.graph_element_tables WHERE ownership = 'MANAGED' AND graph_id = " +

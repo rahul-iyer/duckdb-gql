@@ -3,7 +3,7 @@
 
 Peak memory is the process's peak resident set from the OS, which is comparable across
 engines but includes the Python interpreter, the engine's buffer pool and any CSR. "Ready"
-is that peak after opening the database and preparing to read, before the query runs.
+is that peak after opening the database, before the query runs. DuckGQL reads its saved CSR.
 
     python3 benchmark/generalization/memory.py --ladybug-python VENV/bin/python
 """
@@ -53,7 +53,6 @@ def duckgql_child(dataset, query, runs, timeout):
         db = DB(SF1 / 'sf1.duckdb', THREADS, '8GB')
         db.query('SESSION SET GRAPH snb_interactive')
         db.query("SET gql_optimizer='cost'")
-        db.query("CALL gql_build_csr('snb_interactive')")
         ready = peak_bytes()
         number = int(query[2:])
         text = (ROOT / f'benchmark/ldbc_complex_sf1/queries/ic{number}.gql').read_text()
@@ -68,7 +67,6 @@ def duckgql_child(dataset, query, runs, timeout):
     db = DB(OUT / f'{dataset}-duckgql/graph.duckdb', THREADS, '16GB')
     db.query('SESSION SET GRAPH g')
     db.query("SET gql_optimizer='cost'")
-    db.query("CALL gql_build_csr('g')")
     ready = peak_bytes()
     template = gen.gql_queries(d)[query]
     medians, status = [], 'ok'
@@ -130,6 +128,7 @@ def main():
     parser.add_argument('--runs', type=int, default=5)
     parser.add_argument('--timeout', type=float, default=15)
     parser.add_argument('--child', action='store_true')
+    parser.add_argument('--engines', nargs='+', default=['duckgql', 'ladybug'])
     parser.add_argument('--engine')
     parser.add_argument('--dataset')
     parser.add_argument('--query')
@@ -139,9 +138,20 @@ def main():
     gen = load_module('generalization_run', HERE / 'run.py')
     names = list(gen.gql_queries(gen.DATASETS['air']))
     cases = [('sf1', f'ic{number}') for number in range(1, 15)] + [(graph, name) for graph in GRAPHS for name in names]
-    report = {}
+    # Saved once here, so each query's process opens the CSR from the file as an application would.
+    subprocess.run([sys.executable, '-c', f'''
+import sys
+sys.path.insert(0, {str(ROOT / 'benchmark/ldbc_complex_sf1')!r})
+from run import DB
+for path, graph in [({str(SF1 / 'sf1.duckdb')!r}, 'snb_interactive')] + [({str(OUT)!r} + '/' + name + '-duckgql/graph.duckdb', 'g') for name in {GRAPHS!r}]:
+    db = DB(path, {THREADS}, '16GB')
+    db.query("CALL gql_build_csr('" + graph + "')")
+    db.query('CHECKPOINT')
+    db.close()
+'''], check=True)
+    report = json.loads((OUT / 'memory.json').read_text()) if (OUT / 'memory.json').exists() else {}
     for dataset, query in cases:
-        for engine in ('duckgql', 'ladybug'):
+        for engine in args.engines:
             python = [sys.executable] if engine == 'duckgql' else [args.ladybug_python, '-I']
             command = python + [__file__, '--child', '--engine', engine, '--dataset', dataset, '--query', query,
                                 '--runs', str(args.runs), '--timeout', str(args.timeout)]
