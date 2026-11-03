@@ -28,6 +28,8 @@ struct GqlAccessPatternElement {
 	bool unbounded = false;
 	idx_t minimum_repetitions = 1;
 	idx_t maximum_repetitions = 1;
+	//! ALL SHORTEST between two given vertices.
+	bool all_shortest = false;
 };
 
 struct GqlAccessPattern {

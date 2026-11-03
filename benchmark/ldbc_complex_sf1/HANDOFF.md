@@ -2,7 +2,23 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
-## Long paths, composed paths, read-only files (newest)
+## IC14 under 100 ms (newest)
+
+IC14 went from 318.8 to 65.5 ms (median, cost planner, parameterized; Ladybug 80.5). The four OPTIONAL branches
+were joining about 1M rows each over the whole graph, because `a` and `b` had no cardinality estimate. Two changes
+in `gql_optimizer_legacy.cpp`, which plans correlated stages for both planners:
+
+- ALL SHORTEST between two bound vertices estimates `GQL_SHORTEST_PATH_STEPS_ESTIMATE` (64) rows, and a bound edge
+  gives its endpoints its estimate. 64 is a constant, not a measurement: IC14's path search returns 232 step rows.
+  At 256 the first expansion exceeds `CsrFrontierBeatsBulkScan`'s limit and the old plan returns.
+- A correlated chain walks from one end. Expanding from both multiplied the two frontiers per outer row: 190M rows, 19 s.
+
+Validation: 14/14 goldens on both planners, differential 140/140 per mode, mixed 56/56 in all three states on both
+planners, SF10 16/16 with no time change beyond noise. Results in `OUT/after-ic14-under-100/`. Not tested: pairs with
+a very large number of shortest paths, where the fixed estimate and plan could be worse than the old scan.
+Next IC14 lead: `gql_csr_all_shortest` runs once per OPTIONAL branch, 4 times at about 10 ms each of CPU.
+
+## Long paths, composed paths, read-only files
 
 - Quantified edges over 4 hops or unbounded build a CSR before planning on managed graphs outside explicit
   transactions, as path searches do. A {1,30} path over 71 vertices took 1.25 s relationally.

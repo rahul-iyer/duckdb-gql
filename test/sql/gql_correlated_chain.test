@@ -1,0 +1,82 @@
+# name: test/sql/gql_correlated_chain.test
+# description: An OPTIONAL chain bound at both ends walks from one of them, with answers worked out by hand
+# group: [gql]
+
+require duckgql
+
+# 1 knows 2 knows 3. Comment 10 by 1 replies to post 20 by 2, comment 11 by 2 replies to post 21 by 1,
+# and comment 12 by 1 replies to post 22 by 3, which is not a step of the path.
+statement ok
+COPY (SELECT * FROM (VALUES (1,'P',1),(2,'P',2),(3,'P',3),(10,'C',10),(11,'C',11),(12,'C',12),(20,'Q',20),(21,'Q',21),(22,'Q',22)) v(":ID",":LABEL","id:int")) TO '{TEST_DIR}/chain_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'K'),(2,3,'K'),(10,1,'H'),(11,2,'H'),(12,1,'H'),(20,2,'H'),(21,1,'H'),(22,3,'H'),(10,20,'R'),(11,21,'R'),(12,22,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/chain_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH chain ANY
+
+statement ok
+COPY GRAPH chain FROM (VERTICES '{TEST_DIR}/chain_nodes.csv', EDGES '{TEST_DIR}/chain_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH chain
+
+statement ok
+CALL gql_build_csr('chain')
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+query II
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 3
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,4}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+OPTIONAL MATCH (a)<-[:H]-(c:C)-[:R]->(:Q)-[:H]->(b)
+RETURN [n IN NODES(p) | n.id], COUNT(DISTINCT c.id)
+GROUP BY p
+----
+[1, 2, 3]	1
+
+# One end only: a walk from both would expand each end's has_creator edge inward.
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' AND edge_label = 'h' AND direction = 'in'
+----
+1
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path = 'CSR_EXPANSION' AND edge_label = 'r'
+----
+1
+
+# The other direction of the same pair, per step.
+query III rowsort
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 3
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,4}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+OPTIONAL MATCH (b)<-[:H]-(c:C)-[:R]->(:Q)-[:H]->(a)
+RETURN a.id, b.id, COUNT(DISTINCT c.id)
+GROUP BY a, b
+----
+1	2	1
+2	3	0
+
+# A path of one vertex that matches nothing still keeps its row.
+query II
+MATCH (s:P) WHERE s.id = 2
+MATCH (t:P) WHERE t.id = 3
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,4}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+OPTIONAL MATCH (a)<-[:H]-(c:C)-[:R]->(:Q)-[:H]->(b)
+RETURN a.id, COUNT(c.id)
+GROUP BY a
+----
+2	0
+
+endloop

@@ -216,6 +216,7 @@ static idx_t EstimateBoundedPathRows(const GqlFanoutStatistics &statistics, cons
 }
 
 static constexpr idx_t GQL_BATCHED_ELEMENT_FETCH_THRESHOLD = 4096;
+static constexpr idx_t GQL_SHORTEST_PATH_STEPS_ESTIMATE = 64;
 
 static bool BatchedElementFetchBeatsScan(idx_t frontier_rows) {
 	return frontier_rows != DConstants::INVALID_INDEX && frontier_rows <= GQL_BATCHED_ELEMENT_FETCH_THRESHOLD;
@@ -330,11 +331,14 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 		// original pattern for TRAIL checks and optional-stage semantics.
 		vector<GqlAccessPattern> expansion_patterns;
 		vector<bool> correlated_chain_expansion;
+		vector<idx_t> expansion_chain;
 		const bool correlated_stage = std::any_of(available.begin(), available.end(), [](bool value) { return value; });
-		for (const auto &pattern : stage.patterns) {
+		for (idx_t chain = 0; chain < stage.patterns.size(); chain++) {
+			const auto &pattern = stage.patterns[chain];
 			if (pattern.elements.size() == 3) {
 				expansion_patterns.push_back(pattern);
 				correlated_chain_expansion.push_back(false);
+				expansion_chain.push_back(chain);
 			} else if (std::none_of(pattern.elements.begin(), pattern.elements.end(),
 			                        [](const GqlAccessPatternElement &element) { return element.quantified; })) {
 				for (idx_t part = 1; part + 1 < pattern.elements.size(); part += 2) {
@@ -342,6 +346,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 					edge.elements = {pattern.elements[part - 1], pattern.elements[part], pattern.elements[part + 1]};
 					expansion_patterns.push_back(std::move(edge));
 					correlated_chain_expansion.push_back(correlated_stage);
+					expansion_chain.push_back(chain);
 				}
 			}
 		}
@@ -472,6 +477,21 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 			reachable[binding_index] = true;
 			schedule_source(binding_index);
 		}
+		// A bound edge names its endpoints, so they have at most as many rows as it does.
+		for (const auto &pattern : stage.patterns) {
+			for (idx_t part = 1; part + 1 < pattern.elements.size(); part += 2) {
+				const auto edge_rows = propagated_estimated_rows[pattern.elements[part].binding_index];
+				if (!available[pattern.elements[part].binding_index] || edge_rows == DConstants::INVALID_INDEX) {
+					continue;
+				}
+				for (const auto *vertex : {&pattern.elements[part - 1], &pattern.elements[part + 1]}) {
+					auto &rows = stage_plan.bindings[vertex->binding_index].cardinality.rows;
+					if (stage_plan.introduced[vertex->binding_index] && rows == DConstants::INVALID_INDEX) {
+						rows = edge_rows;
+					}
+				}
+			}
+		}
 		for (const auto &pattern : stage.patterns) {
 			if (pattern.elements.size() != 3 || !pattern.elements[1].quantified) {
 				continue;
@@ -486,6 +506,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				schedule_source(left.binding_index);
 			}
 		}
+		vector<bool> chain_has_frontier(stage.patterns.size(), false);
 		bool expanded = true;
 		while (expanded) {
 			expanded = false;
@@ -534,6 +555,12 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				const auto expansion_direction =
 				    expand_from_left ? (edge.reverse ? "in" : "out") : (edge.reverse ? "out" : "in");
 				const auto seed_rows = stage_plan.bindings[expansion_vertex_binding].cardinality.rows;
+				// Rows of a correlated source multiply per outer row, so a chain bound at both ends
+				// walks from one of them. A second frontier would be a cross product until they meet.
+				if (correlated_chain_expansion[pattern_index] && chain_has_frontier[expansion_chain[pattern_index]] &&
+				    !reached_by_expansion[expansion_vertex_binding]) {
+					continue;
+				}
 				if (!edge.quantified && reached_by_expansion[expansion_vertex_binding] &&
 				    !available[expansion_vertex_binding] &&
 				    (stage_plan.bindings[expansion_vertex_binding].type ==
@@ -565,6 +592,10 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 						estimate_path.maximum_repetitions = edge.maximum_repetitions;
 						estimate_path.unbounded = edge.unbounded;
 						estimated_rows = EstimateBoundedPathRows(statistics, estimate_path, seed_rows);
+						// Only shortest paths between two given vertices remain, not all paths from one.
+						if (edge.all_shortest && available[left.binding_index] && available[right.binding_index]) {
+							estimated_rows = GQL_SHORTEST_PATH_STEPS_ESTIMATE;
+						}
 					} else {
 						estimated_rows =
 						    EstimateFixedExpansionRows(statistics, edge.label, expansion_direction, seed_rows);
@@ -598,6 +629,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				const auto &left = pattern.elements[0];
 				const auto &edge = pattern.elements[1];
 				const auto &right = pattern.elements[2];
+				chain_has_frontier[expansion_chain[selected_pattern]] = true;
 				auto &edge_path = stage_plan.bindings[edge.binding_index];
 				edge_path.type = edge.quantified
 				                     ? (can_use_edge_expansion ? GqlBindingAccessPathType::CSR_PATH_EXPANSION
@@ -609,6 +641,9 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 				    selected_expand_from_left ? left.binding_index : right.binding_index;
 				edge_path.expansion_direction =
 				    selected_expand_from_left ? (edge.reverse ? "in" : "out") : (edge.reverse ? "out" : "in");
+				if (edge.all_shortest) {
+					edge_path.cardinality.rows = selected_estimated_rows;
+				}
 				edge_path.edge_label = edge.label;
 				edge_path.minimum_repetitions = edge.minimum_repetitions;
 				edge_path.maximum_repetitions = edge.maximum_repetitions;

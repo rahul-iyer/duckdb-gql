@@ -2357,7 +2357,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			for (const auto &element : pattern.elements) {
 				access_pattern.elements.push_back({element.type, element.binding_index, element.label, element.reverse,
 				                                   element.quantified, element.unbounded, element.minimum_repetitions,
-				                                   element.maximum_repetitions});
+				                                   element.maximum_repetitions, element.shortest >= GQL_PATH_SEARCH_ALL});
 			}
 			access_stage.patterns.push_back(std::move(access_pattern));
 		}
