@@ -1328,7 +1328,7 @@ static unique_ptr<TableRef> CsrPathExpansionTable(const string &graph_name, cons
 
 static unique_ptr<TableRef> CsrShortestExpansionTable(const string &graph_name, const string &vertex_alias,
                                                       const string &vertex_key, const GqlBindingAccessPath &path,
-                                                      const string &edge_alias) {
+                                                      unique_ptr<ParsedExpression> target, const string &edge_alias) {
 	vector<unique_ptr<ParsedExpression>> fields;
 	AppendStructField(fields, Constant(Value(graph_name)), "graph_name");
 	AppendStructField(fields, Column(vertex_alias, vertex_key), "vertex_id");
@@ -1337,6 +1337,7 @@ static unique_ptr<TableRef> CsrShortestExpansionTable(const string &graph_name, 
 	AppendStructField(fields, Constant(Value::UBIGINT(path.minimum_repetitions)), "minimum_repetitions");
 	AppendStructField(fields, Constant(Value::UBIGINT(path.maximum_repetitions)), "maximum_repetitions");
 	AppendStructField(fields, Constant(Value(path.unbounded)), "unbounded");
+	AppendStructField(fields, std::move(target), "target_id");
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(Function("struct_pack", std::move(fields)));
 	auto result = make_uniq<TableFunctionRef>();
@@ -2942,9 +2943,25 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			} else if ((path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION ||
 			            path.type == GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION) &&
 			           path_search(binding_index) == GQL_PATH_SEARCH_ANY) {
+				// A far endpoint already bound names the only row that can survive the join with it.
+				unique_ptr<ParsedExpression> target = Constant(Value(LogicalType::UBIGINT));
+				for (const auto &pattern : stage.patterns) {
+					for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+						if (pattern.elements[index].binding_index != binding_index) {
+							continue;
+						}
+						const auto left = pattern.elements[index - 1].binding_index;
+						const auto right = pattern.elements[index + 1].binding_index;
+						const auto far = left == path.expansion_vertex_binding ? right : left;
+						if (far != path.expansion_vertex_binding && (available[far] || joined[far])) {
+							target = make_uniq<CastExpression>(LogicalType::UBIGINT,
+							                                   Column(identities[far].table_alias, identities[far].column_name));
+						}
+					}
+				}
 				source = CsrShortestExpansionTable(graph_name, identities[path.expansion_vertex_binding].table_alias,
 				                                   identities[path.expansion_vertex_binding].column_name, path,
-				                                   identities[binding_index].table_alias);
+				                                   std::move(target), identities[binding_index].table_alias);
 				identities[binding_index].length_column = "__gql_length";
 			} else if (path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION) {
 				source = CsrPathExpansionTable(graph_name, identities[path.expansion_vertex_binding].table_alias,

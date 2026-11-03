@@ -1,0 +1,111 @@
+# name: test/sql/gql_shortest_target.test
+# description: ANY SHORTEST to a bound endpoint stops at it, with answers worked out by hand
+# group: [gql]
+
+require duckgql
+
+# 1 -> 2 -> 3 -> 4, a shortcut 1 -> 3, and 4 -> 1 closes a cycle. 5 has no edges and 6 -> 5 is one way.
+statement ok
+COPY (SELECT i AS ":ID", 'P' AS ":LABEL", i::INTEGER AS "id:int" FROM range(1, 7) t(i)) TO '{TEST_DIR}/target_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'K'),(2,3,'K'),(3,4,'K'),(1,3,'K'),(4,1,'K'),(6,5,'K')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/target_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH targets ANY
+
+statement ok
+COPY GRAPH targets FROM (VERTICES '{TEST_DIR}/target_nodes.csv', EDGES '{TEST_DIR}/target_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH targets
+
+statement ok
+CALL gql_create_property_index('targets', 'id')
+
+statement ok
+CALL gql_build_csr('targets')
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Bound by an earlier MATCH, and through the shortcut rather than the long way.
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH (b:P) WHERE b.id = 4
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b)
+RETURN PATH_LENGTH(p)
+----
+2
+
+# Filtered in the same MATCH, which the planner seeds from either end.
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b) WHERE b.id = 4
+RETURN PATH_LENGTH(p)
+----
+2
+
+# Against the direction.
+query I
+MATCH (a:P) WHERE a.id = 4
+MATCH p = ANY SHORTEST (a)<-[:K]-{1,6}(b) WHERE b.id = 1
+RETURN PATH_LENGTH(p)
+----
+2
+
+# A target out of reach, past the upper bound, or below a minimum length.
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b) WHERE b.id = 5
+RETURN PATH_LENGTH(p)
+----
+
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH p = ANY SHORTEST (a)-[:K]->{1,1}(b) WHERE b.id = 4
+RETURN PATH_LENGTH(p)
+----
+
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH p = ANY SHORTEST (a)-[:K]->{3,6}(b) WHERE b.id = 4
+RETURN PATH_LENGTH(p)
+----
+3
+
+# Its own target, through the cycle.
+query I
+MATCH (a:P) WHERE a.id = 1
+MATCH (b:P) WHERE b.id = 1
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b)
+RETURN PATH_LENGTH(p)
+----
+3
+
+# Each pair of many gets its own search.
+query III rowsort
+MATCH (a:P) WHERE a.id <= 2
+MATCH (b:P) WHERE b.id >= 3 AND b.id <= 4
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b)
+RETURN a.id, b.id, PATH_LENGTH(p)
+----
+1	3	1
+1	4	2
+2	3	1
+2	4	2
+
+# No bound target still reports every vertex reached.
+query II rowsort
+MATCH (a:P) WHERE a.id = 2
+MATCH p = ANY SHORTEST (a)-[:K]->{1,6}(b)
+RETURN b.id, PATH_LENGTH(p)
+----
+1	3
+2	4
+3	1
+4	2
+
+endloop

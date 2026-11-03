@@ -2196,6 +2196,10 @@ struct CsrShortestLocalState : LocalTableFunctionState {
 	bool searched = false;
 	vector<pair<idx_t, uint32_t>> reached;
 	idx_t cursor = 0;
+	//! The last start searched for one target, and the distances of a later full search from it.
+	optional_idx targeted_start;
+	optional_idx distances_start;
+	unordered_map<idx_t, uint32_t> distances;
 };
 
 static unique_ptr<FunctionData> CsrShortestBind(ClientContext &, TableFunctionBindInput &,
@@ -2270,7 +2274,7 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 		return;
 	}
 	auto &fields = StructValue::GetChildren(packed);
-	if (fields.size() != 7 || fields[0].IsNull() || fields[2].IsNull() || fields[3].IsNull() || fields[4].IsNull() ||
+	if (fields.size() != 8 || fields[0].IsNull() || fields[2].IsNull() || fields[3].IsNull() || fields[4].IsNull() ||
 	    fields[5].IsNull() || fields[6].IsNull()) {
 		throw InvalidInputException("GQL shortest expansion requires a graph, direction, label, and bounds");
 	}
@@ -2297,6 +2301,25 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 	const auto minimum = fields[4].GetValue<uint64_t>();
 	const auto maximum = fields[5].GetValue<uint64_t>();
 	const auto unbounded = fields[6].GetValue<bool>();
+	// With a target, nothing else is reported, so the search ends on reaching it. A second
+	// target from one start is many to come, which one full search answers more cheaply.
+	bool has_target = !fields[7].IsNull();
+	idx_t target = 0;
+	if (has_target && !CsrTryGetOrdinal(snapshot, delta, fields[7].GetValue<uint64_t>(), target)) {
+		return;
+	}
+	const bool wanted_target = has_target;
+	if (has_target && state.distances_start.IsValid() && state.distances_start.GetIndex() == start) {
+		auto entry = state.distances.find(target);
+		if (entry != state.distances.end()) {
+			state.reached.emplace_back(target, entry->second);
+		}
+		return;
+	}
+	if (has_target && state.targeted_start.IsValid() && state.targeted_start.GetIndex() == start) {
+		has_target = false;
+	}
+	state.targeted_start = start;
 	const auto vertex_count = snapshot.vertex_ids.size() + (delta ? delta->vertex_ids.size() : 0);
 	CsrVisitedSet settled(vertex_count);
 	CsrVisitedSet level(vertex_count);
@@ -2305,16 +2328,21 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 		context.client.InterruptCheck();
 		vector<idx_t> next;
 		level.Clear();
+		bool found = false;
 		for (const auto vertex : frontier) {
 			CsrForEachEdge(snapshot, delta, vertex, state.outgoing, label->second, [&](idx_t neighbor, uint64_t) {
-				if (settled.Contains(neighbor) || !level.Insert(neighbor)) {
+				if (found || settled.Contains(neighbor) || !level.Insert(neighbor)) {
 					return;
 				}
 				next.push_back(neighbor);
-				if (depth >= minimum) {
+				if (depth >= minimum && (!has_target || neighbor == target)) {
 					state.reached.emplace_back(neighbor, NumericCast<uint32_t>(depth));
+					found = has_target;
 				}
 			});
+			if (found) {
+				return;
+			}
 		}
 		if (depth >= minimum) {
 			for (const auto vertex : next) {
@@ -2322,6 +2350,16 @@ static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrEx
 			}
 		}
 		frontier = std::move(next);
+	}
+	if (wanted_target && !has_target) {
+		state.distances.clear();
+		state.distances.insert(state.reached.begin(), state.reached.end());
+		state.distances_start = start;
+		state.reached.clear();
+		auto entry = state.distances.find(target);
+		if (entry != state.distances.end()) {
+			state.reached.emplace_back(target, entry->second);
+		}
 	}
 }
 
@@ -3326,7 +3364,8 @@ TableFunction GqlCsrShortestExpandFunction() {
 	                                       {"edge_label", LogicalType::VARCHAR},
 	                                       {"minimum_repetitions", LogicalType::UBIGINT},
 	                                       {"maximum_repetitions", LogicalType::UBIGINT},
-	                                       {"unbounded", LogicalType::BOOLEAN}});
+	                                       {"unbounded", LogicalType::BOOLEAN},
+	                                       {"target_id", LogicalType::UBIGINT}});
 	TableFunction function("gql_csr_shortest_expand", {input_type}, nullptr, CsrShortestBind, CsrExpandGlobalInit,
 	                       CsrShortestLocalInit);
 	function.in_out_function = CsrShortestFunction;
