@@ -49,6 +49,7 @@ def run_cli(
             str(cli),
             "-unsigned",
             "-no-init",
+            "-no-agent",
             "-storage-version",
             "v1.5.0",
             str(database),
@@ -231,7 +232,7 @@ LEFT JOIN (
         [person, message, forum, place, organisation, tag, tagclass]
     )
     return f"""
-PRAGMA threads={threads};
+SET threads={threads};
 SET memory_limit={sql_literal(memory_limit)};
 SET preserve_insertion_order=false;
 COPY (
@@ -384,7 +385,7 @@ FROM {relation}{suffix}"""
     ]
     union = "\nUNION ALL\n".join(relations)
     return f"""
-PRAGMA threads={threads};
+SET threads={threads};
 SET memory_limit={sql_literal(memory_limit)};
 SET preserve_insertion_order=false;
 COPY (
@@ -490,7 +491,7 @@ def ensure_graph(
     expected = (EXPECTED_VERTICES, EXPECTED_EDGES)
     if existing == expected:
         statement = f"""
-PRAGMA threads={threads};
+SET threads={threads};
 SET memory_limit={sql_literal(memory_limit)};
 SET preserve_insertion_order=false;
 .once /dev/null
@@ -518,7 +519,7 @@ CHECKPOINT;
         )
     database.parent.mkdir(parents=True, exist_ok=True)
     statement = f"""
-PRAGMA threads={threads};
+SET threads={threads};
 SET memory_limit={sql_literal(memory_limit)};
 SET preserve_insertion_order=false;
 CREATE GRAPH snb_interactive ANY;
@@ -589,7 +590,7 @@ def query_rows(
     memory_limit: str,
 ) -> tuple[list[list[str]], dict[str, Any] | None]:
     prefix = (
-        f"PRAGMA threads={threads};\n"
+        f"SET threads={threads};\n"
         f"SET memory_limit={sql_literal(memory_limit)};\n"
         "SET preserve_insertion_order=false;\n"
     )
@@ -600,7 +601,7 @@ def query_rows(
             ".once /dev/null\n"
             "SESSION SET GRAPH snb_interactive;\n"
             f"SET gql_optimizer={sql_literal(OPTIMIZER)};\n"
-            "PRAGMA enable_profiling='json';\n"
+            "SET enable_profiling='json';\n"
         )
     completed = run_cli(
         cli,
@@ -627,7 +628,7 @@ def benchmark_repeated(
 ) -> dict[str, Any]:
     statements = "\n".join(query.strip() for _ in range(warmups + runs))
     sql = f"""
-PRAGMA threads={threads};
+SET threads={threads};
 SET memory_limit={sql_literal(memory_limit)};
 SET preserve_insertion_order=false;
 .once /dev/null
@@ -636,7 +637,7 @@ CALL gql_build_csr('snb_interactive');
 SESSION SET GRAPH snb_interactive;
 SET gql_optimizer={sql_literal(OPTIMIZER)};
 .output /dev/null
-PRAGMA enable_profiling='json';
+SET enable_profiling='json';
 {statements}
 """
     completed = run_cli(cli, database, sql, timeout=timeout)

@@ -112,6 +112,10 @@ static shared_ptr<GqlPlanReuseState> GetPlanReuseState(ClientContext &context) {
 	return context.registered_state->GetOrCreate<GqlPlanReuseState>("gql_plan_reuse_state");
 }
 
+bool GqlPlanReuseStatementBindsMatch(ClientContext &context) {
+	return GetPlanReuseState(context)->match_bound;
+}
+
 void GqlPlanReuseNoteMatch(ClientContext &context) {
 	GetPlanReuseState(context)->match_bound = true;
 }

@@ -6,6 +6,7 @@
 #include "antlr4-runtime.h"
 
 #include <algorithm>
+#include <regex>
 
 #ifdef INVALID_INDEX
 #undef INVALID_INDEX
@@ -688,6 +689,39 @@ static string RewritePropertyMapExpressionSyntax(const string &query) {
 // and later suffixes before parsing. The transformer reads those suffixes from
 // the untouched original query and emits one typed mutation per label. Keeping
 // the rewritten string byte-for-byte the same size preserves source ranges.
+// Rewrites [n IN NODES(p) | n.property] to (ELEMENTS(p)).property, which the grammar
+// parses. Only this form is understood; other list comprehensions stay syntax errors.
+static string RewritePathNodeListSyntax(const string &query) {
+	static const std::regex comprehension(
+	    R"(\[\s*([A-Za-z_][A-Za-z0-9_]*)\s+[iI][nN]\s+[nN][oO][dD][eE][sS]\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)\s*\|\s*\1\s*\.\s*([A-Za-z_][A-Za-z0-9_]*)\s*\])");
+	string result;
+	idx_t start = 0;
+	// Text between single quotes is a string literal, and stays as written.
+	while (start < query.size()) {
+		auto quote = query.find('\'', start);
+		auto code = query.substr(start, quote == string::npos ? string::npos : quote - start);
+		result += std::regex_replace(code, comprehension, "(ELEMENTS($2)).$3");
+		if (quote == string::npos) {
+			break;
+		}
+		auto end = quote + 1;
+		while (end < query.size()) {
+			if (query[end] == '\'') {
+				if (end + 1 < query.size() && query[end + 1] == '\'') {
+					end += 2;
+					continue;
+				}
+				break;
+			}
+			end++;
+		}
+		end = MinValue<idx_t>(end, query.size() - 1);
+		result += query.substr(quote, end - quote + 1);
+		start = end + 1;
+	}
+	return result;
+}
+
 static string RewriteChainedLabelSyntax(const string &query) {
 	auto result = query;
 	auto skip_trivia = [&](idx_t offset) -> idx_t {
@@ -1801,8 +1835,8 @@ ParserExtensionParseResult GqlParse(ParserExtensionInfo *, const string &query) 
 		parse_data->statement = MergeParser(gql_query).Parse();
 		return ParserExtensionParseResult(std::move(parse_data));
 	}
-	auto parser_query = RewriteCallNamedArgumentSyntax(
-	    RewriteChainedLabelSyntax(RewritePropertyMapExpressionSyntax(RewritePropertyMapMergeSyntax(gql_query))));
+	auto parser_query = RewritePathNodeListSyntax(RewriteCallNamedArgumentSyntax(
+	    RewriteChainedLabelSyntax(RewritePropertyMapExpressionSyntax(RewritePropertyMapMergeSyntax(gql_query)))));
 	antlr4::ANTLRInputStream input(parser_query);
 	GQLLexer lexer(&input);
 	antlr4::CommonTokenStream tokens(&lexer);

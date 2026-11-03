@@ -17,7 +17,7 @@ res={}
 for mode in ['cost','legacy']:
     db.query(f"SET gql_optimizer='{mode}'")
     for r in roots:
-        for n in range(2,14):
+        for n in range(1,15):
             q=(ROOT/f'benchmark/ldbc_complex_sf1/queries/ic{n}.gql').read_text().replace('1131',str(r))
             k=f'{mode}/{r}/ic{n}'
             try: res[k]=[list(x.values()) for x in db.query(q,20)]
@@ -26,7 +26,7 @@ for mode in ['cost','legacy']:
 # One generic plan per query, rebound to each person, must match every literal answer.
 for mode in ['cost','legacy']:
     db.query(f"SET gql_optimizer='{mode}'")
-    for n in range(2,14):
+    for n in range(1,15):
         statement=db.prepare(parameterized(n,(ROOT/f'benchmark/ldbc_complex_sf1/queries/ic{n}.gql').read_text()))
         for _,name,value in PARAMETERS[n]: db.bind(statement,name,value)
         person=PARAMETERS[n][0][1]

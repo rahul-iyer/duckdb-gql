@@ -753,6 +753,8 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 	CollectContexts(&root, modifying_statements);
 	CollectContexts(&root, return_statements);
 	CollectContexts(&root, procedure_calls);
+	vector<GQLParser::ForStatementContext *> for_statements;
+	CollectContexts(&root, for_statements);
 	auto has_mutation = !modifying_statements.empty();
 	if (match_statements.empty() && return_statements.empty() && !has_mutation) {
 		return false;
@@ -763,7 +765,7 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		}
 		return false;
 	};
-	auto base_primitives = match_statements.size() + let_statements.size() + filter_statements.size();
+	auto base_primitives = match_statements.size() + let_statements.size() + filter_statements.size() + for_statements.size();
 	auto expected_primitives = base_primitives + procedure_calls.size();
 	if (modifying_statements.size() > 1 || procedure_calls.size() > 1 || (has_mutation && !procedure_calls.empty()) ||
 	    (has_mutation ? !return_statements.empty() || !order_statements.empty() : return_statements.size() != 1) ||
@@ -792,8 +794,20 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 		clause.optional = optional;
 		clause.optional_stage = optional_stage;
 		for (auto path : paths) {
-			if (path->pathPatternPrefix()) {
-				return false;
+			uint8_t path_search = 0;
+			if (auto prefix = path->pathPatternPrefix()) {
+				auto search = prefix->pathSearchPrefix();
+				auto shortest = search ? search->shortestPathSearch() : nullptr;
+				auto any = shortest ? shortest->anyShortestPathSearch() : nullptr;
+				auto all = shortest ? shortest->allShortestPathSearch() : nullptr;
+				if (!any && !all) {
+					return false;
+				}
+				auto mode = any ? any->pathMode() : all->pathMode();
+				if (mode && !mode->WALK()) {
+					return false;
+				}
+				path_search = any ? GQL_PATH_SEARCH_ANY : GQL_PATH_SEARCH_ALL;
 			}
 			auto path_expression = dynamic_cast<GQLParser::PpePathTermContext *>(path->pathPatternExpression());
 			if (!path_expression) {
@@ -810,6 +824,9 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 			ast_pattern.source = SourceRange(*path);
 			if (auto declaration = path->pathVariableDeclaration()) {
 				ast_pattern.variable = TransformIdentifier(*declaration->pathVariable());
+			}
+			if (path_search && (factors.size() != 3 || !dynamic_cast<GQLParser::PfQuantifiedPathPrimaryContext *>(factors[1]))) {
+				return false;
 			}
 			for (idx_t index = 0; index < factors.size(); index++) {
 				GQLParser::PathPrimaryContext *path_primary = nullptr;
@@ -876,7 +893,7 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 						Unsupported(*quantifier, "non-fixed or non-edge path quantifiers");
 						return false;
 					}
-					if (!ast_element.variable.IsEmpty()) {
+					if (!ast_element.variable.IsEmpty() && path_search != GQL_PATH_SEARCH_ALL) {
 						Unsupported(*quantifier, "group variables in quantified paths");
 						return false;
 					}
@@ -918,6 +935,7 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 						return false;
 					}
 					ast_element.quantified = true;
+					ast_element.shortest = path_search;
 					ast_element.unbounded = unbounded;
 					ast_element.minimum_repetitions = minimum_repetitions;
 					ast_element.maximum_repetitions = maximum_repetitions;
@@ -1230,6 +1248,38 @@ bool GqlTransformer::TransformMatch(GQLParser::GqlProgramContext &root) {
 	return_clause.type = GqlQueryClauseType::RETURN;
 	return_clause.source = SourceRange(*return_statements[0]);
 	match->clauses.push_back(std::move(return_clause));
+	// FOR over an ALL SHORTEST group variable is the only form: the search itself then
+	// emits one row per edge, and the group variable names that edge instead of a list.
+	for (auto for_statement : for_statements) {
+		auto item = for_statement->forItem();
+		if (for_statement->forOrdinalityOrOffset() || has_mutation) {
+			return fail();
+		}
+		const auto alias = TransformIdentifier(*item->forItemAlias()->bindingVariable());
+		const auto source = item->forItemSource()->getText();
+		const auto for_start = for_statement->getStart()->getStartIndex();
+		bool found = false;
+		for (auto &pattern : match->patterns) {
+			for (auto &element : pattern.elements) {
+				if (element.shortest == GQL_PATH_SEARCH_ALL && element.variable.value == source &&
+				    pattern.source.start_offset < for_start) {
+					element.variable = alias;
+					element.shortest = GQL_PATH_SEARCH_ALL_STEPS;
+					found = true;
+				}
+			}
+		}
+		if (!found) {
+			return fail();
+		}
+	}
+	for (const auto &pattern : match->patterns) {
+		for (const auto &element : pattern.elements) {
+			if (element.shortest == GQL_PATH_SEARCH_ALL && !element.variable.IsEmpty()) {
+				return fail();
+			}
+		}
+	}
 	statement = std::move(match);
 	return true;
 }
@@ -1678,6 +1728,42 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 		return TransformAggregate(*aggregate, result);
 	}
 	if (auto case_expression = context.caseExpression()) {
+		auto specification = case_expression->caseSpecification();
+		if (specification && specification->searchedCase()) {
+			auto searched = specification->searchedCase();
+			auto append_result = [&](GQLParser::ResultContext &result_context) {
+				shared_ptr<GqlExpression> child;
+				if (result_context.resultExpression()) {
+					if (!TransformExpression(*result_context.resultExpression()->valueExpression(), child)) {
+						return false;
+					}
+				} else {
+					child = make_shared_ptr<GqlExpression>();
+					child->type = GqlExpressionType::LITERAL;
+					child->literal.type = GqlLiteralType::NULL_VALUE;
+				}
+				expression->arguments.push_back(std::move(child));
+				return true;
+			};
+			expression->type = GqlExpressionType::FUNCTION;
+			// Arguments are WHEN and THEN pairs, then ELSE when present.
+			expression->function_name = "__gql_case";
+			for (auto clause : searched->searchedWhenClause()) {
+				shared_ptr<GqlExpression> condition;
+				if (!TransformSearchCondition(*clause->searchCondition(), condition)) {
+					return false;
+				}
+				expression->arguments.push_back(std::move(condition));
+				if (!append_result(*clause->result())) {
+					return false;
+				}
+			}
+			if (searched->elseClause() && !append_result(*searched->elseClause()->result())) {
+				return false;
+			}
+			result = std::move(expression);
+			return true;
+		}
 		auto abbreviation = case_expression->caseAbbreviation();
 		if (!abbreviation || !abbreviation->COALESCE()) {
 			return false;
@@ -1744,6 +1830,20 @@ bool GqlTransformer::TransformExpressionPrimary(GQLParser::ValueExpressionPrimar
 	if (context.propertyName() && context.valueExpressionPrimary()) {
 		if (!TransformExpressionPrimary(*context.valueExpressionPrimary(), expression->left)) {
 			return false;
+		}
+		// The rewritten form of [n IN NODES(p) | n.property].
+		if (expression->left->type == GqlExpressionType::FUNCTION && expression->left->function_name == "__gql_elements") {
+			auto name = make_shared_ptr<GqlExpression>();
+			name->type = GqlExpressionType::LITERAL;
+			name->literal.type = GqlLiteralType::STRING;
+			name->literal.value = TransformIdentifier(*context.propertyName()).value;
+			expression->type = GqlExpressionType::FUNCTION;
+			expression->function_name = "__gql_path_values";
+			expression->arguments = std::move(expression->left->arguments);
+			expression->left = nullptr;
+			expression->arguments.push_back(std::move(name));
+			result = std::move(expression);
+			return true;
 		}
 		expression->type = GqlExpressionType::PROPERTY_REFERENCE;
 		expression->property = TransformIdentifier(*context.propertyName());
@@ -1983,6 +2083,23 @@ bool GqlTransformer::TransformValueFunction(GQLParser::ValueFunctionContext &con
                                             shared_ptr<GqlExpression> &result) {
 	if (context.numericValueFunction()) {
 		return TransformNumericFunction(*context.numericValueFunction(), result);
+	}
+	if (auto list_function = context.listValueFunction()) {
+		auto elements = list_function->elementsFunction();
+		if (!elements) {
+			return false;
+		}
+		auto expression = make_shared_ptr<GqlExpression>();
+		expression->source = SourceRange(*elements);
+		expression->type = GqlExpressionType::FUNCTION;
+		expression->function_name = "__gql_elements";
+		shared_ptr<GqlExpression> child;
+		if (!TransformExpression(*elements->pathValueExpression()->valueExpression(), child)) {
+			return false;
+		}
+		expression->arguments.push_back(std::move(child));
+		result = std::move(expression);
+		return true;
 	}
 	auto string_function = context.characterOrByteStringFunction();
 	if (!string_function) {

@@ -1,0 +1,15 @@
+MATCH (source:Person) WHERE source.id = 1131
+MATCH p = ANY SHORTEST (source)-[:KNOWS]->{1,3}(friend:Person)
+WHERE friend.firstName = 'Jose' AND friend.id <> source.id
+MATCH (friend)-[:IS_LOCATED_IN]->(city:City)
+OPTIONAL MATCH (friend)-[study:STUDY_AT]->(university:Organisation)-[:IS_LOCATED_IN]->(university_city:City)
+OPTIONAL MATCH (friend)-[work:WORK_AT]->(company:Organisation)-[:IS_LOCATED_IN]->(company_country:Country)
+RETURN friend.id, friend.lastName, PATH_LENGTH(p) AS distance, friend.birthday, friend.creationDate,
+       friend.gender, friend.browserUsed, friend.locationIP, city.name,
+       COLLECT_LIST(DISTINCT CASE WHEN university.name IS NULL THEN NULL
+                    ELSE [university.name, CAST(study.classYear AS STRING), university_city.name] END),
+       COLLECT_LIST(DISTINCT CASE WHEN company.name IS NULL THEN NULL
+                    ELSE [company.name, CAST(work.workFrom AS STRING), company_country.name] END)
+GROUP BY friend, city, p
+ORDER BY distance ASC, friend.lastName ASC, friend.id ASC
+LIMIT 20;

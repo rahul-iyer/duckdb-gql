@@ -68,6 +68,7 @@ struct GqlBoundPatternElement {
 	GqlEdgeDirection edge_direction = GqlEdgeDirection::RIGHT;
 	bool quantified = false;
 	bool unbounded = false;
+	uint8_t shortest = 0;
 	idx_t minimum_repetitions = 1;
 	idx_t maximum_repetitions = 1;
 	idx_t binding_index = DConstants::INVALID_INDEX;

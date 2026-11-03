@@ -136,6 +136,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlCsrPathExpandFunction());
 	loader.RegisterFunction(GqlVertexFetchFunction());
 	loader.RegisterFunction(GqlVertexLookupFunction());
+	loader.RegisterFunction(GqlCsrShortestExpandFunction());
+	loader.RegisterFunction(GqlCsrAllShortestFunction());
 	loader.RegisterFunction(GqlProjectedVertexFetchFunction());
 	loader.RegisterFunction(GqlEdgeFetchFunction());
 	loader.RegisterFunction(GqlBuildCsrFunction());
@@ -183,7 +185,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	planner_extension.post_bind_function = RegisterCsrWriteObserver;
 	callbacks.Register(std::move(planner_extension));
 	OptimizerExtension batched_in_out;
-	batched_in_out.optimize_function = GqlBatchInOutFunctions;
+	batched_in_out.optimize_function = GqlOptimizeMatchPlan;
 	callbacks.Register(std::move(batched_in_out));
 	OptimizerExtension plan_reuse;
 	plan_reuse.optimize_function = GqlPlanReuseOptimize;

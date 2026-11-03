@@ -1,0 +1,237 @@
+# name: test/sql/gql_all_shortest.test
+# description: ALL SHORTEST paths, FOR over its group variable, and path node values, with answers worked out by hand
+# group: [gql]
+
+require duckgql
+
+# 1 -> 2 (twice), 1 -> 3, 2 -> 4, 3 -> 4, 4 -> 5, 1 -> 6, 6 -> 7, 7 -> 8, 8 -> 5 is longer. 5 -> 1 closes a cycle.
+statement ok
+COPY (SELECT i AS ":ID", CASE WHEN i = 4 THEN 'P;Q' ELSE 'P' END AS ":LABEL", i AS "id:int", 'n' || i AS "name:string"
+ FROM range(1, 10) t(i)) TO '{TEST_DIR}/all_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'K'),(1,2,'K'),(1,3,'K'),(2,4,'K'),(3,4,'K'),(4,5,'K'),(1,6,'K'),(6,7,'K'),(7,8,'K'),(8,5,'K'),(5,1,'K'),(2,3,'J')
+) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/all_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH allpaths ANY
+
+statement ok
+COPY GRAPH allpaths FROM (VERTICES '{TEST_DIR}/all_nodes.csv', EDGES '{TEST_DIR}/all_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH allpaths
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Each shortest path once per edge combination; the longer route through 6, 7, 8 is absent.
+query II rowsort
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN [n IN NODES(p) | n.id], PATH_LENGTH(p)
+----
+[1, 2, 4, 5]	3
+[1, 2, 4, 5]	3
+[1, 3, 4, 5]	3
+
+# Node values may be any property, in path order.
+query I rowsort
+MATCH (s:P) WHERE s.id = 3
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN [n IN NODES(p) | n.name]
+----
+[n3, n4, n5]
+
+# Pattern direction decides the order of the nodes.
+query I
+MATCH (s:P) WHERE s.id = 3
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (t)<-[:K]-{1,6}(s)
+RETURN [n IN NODES(p) | n.id]
+----
+[5, 4, 3]
+
+# The upper bound can exclude every path.
+query I
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,2}(t)
+RETURN PATH_LENGTH(p)
+----
+
+# Unbounded search ends, and a vertex reaches itself only through a cycle.
+query I rowsort
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,}(t)
+RETURN PATH_LENGTH(p)
+----
+3
+3
+3
+
+query I rowsort
+MATCH (s:P) WHERE s.id = 5
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN [n IN NODES(p) | n.id]
+----
+[5, 1, 2, 4, 5]
+[5, 1, 2, 4, 5]
+[5, 1, 3, 4, 5]
+
+# Another relationship type is not followed; no path gives no row, or NULLs if optional.
+query I
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 9
+MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN PATH_LENGTH(p)
+----
+
+query III
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 9
+OPTIONAL MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN t.id, PATH_LENGTH(p), [n IN NODES(p) | n.id]
+----
+9	NULL	NULL
+
+# FOR gives one row per edge of each path, with the real edge endpoints.
+query II rowsort
+MATCH (s:P) WHERE s.id = 3
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+RETURN a.id, b.id
+----
+3	4
+4	5
+
+query I
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+RETURN COUNT(*)
+----
+9
+
+# Parallel edges are different steps, and labels on the step's endpoints still apply.
+query I
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 2
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+RETURN COUNT(DISTINCT element_id(step))
+----
+2
+
+query II rowsort
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+MATCH (a:Q)-[step]->(b:P)
+RETURN a.id, b.id
+----
+4	5
+4	5
+4	5
+
+# A later stage and a per-path aggregate over the steps.
+query II rowsort
+MATCH (s:P) WHERE s.id = 2
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+OPTIONAL MATCH (a)-[:J]->(c:P)
+RETURN [n IN NODES(p) | n.id], COUNT(DISTINCT c.id)
+GROUP BY p
+----
+[2, 4, 5]	1
+
+# Independent OPTIONAL branches over steps keep their own counts.
+query III
+MATCH (s:P) WHERE s.id = 2
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t)
+FOR step IN steps
+MATCH (a:P)-[step]->(b:P)
+OPTIONAL MATCH (a)-[:J]->(c:P)
+OPTIONAL MATCH (b)-[:K]->(d:P)
+RETURN [n IN NODES(p) | n.id], COUNT(DISTINCT c.id), COUNT(DISTINCT d.id)
+GROUP BY p
+----
+[2, 4, 5]	1	2
+
+endloop
+
+# A write is followed at the next search.
+statement ok
+MATCH (a:P), (b:P) WHERE a.id = 1 AND b.id = 5 INSERT (a)-[:K]->(b)
+
+query I
+MATCH (s:P) WHERE s.id = 1
+MATCH (t:P) WHERE t.id = 5
+MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t)
+RETURN [n IN NODES(p) | n.id]
+----
+[1, 5]
+
+# The rewrite leaves string literals alone.
+query T
+MATCH (s:P) WHERE s.id = 1 RETURN '[n IN NODES(p) | n.id]'
+----
+[n IN NODES(p) | n.id]
+
+# Unsupported forms say so rather than returning some other answer.
+statement error
+MATCH p = ALL SHORTEST (s:P)-[:K]->{1,6}(t:P) RETURN PATH_LENGTH(p)
+----
+both endpoints
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[:K]->{2,6}(t) RETURN PATH_LENGTH(p)
+----
+minimum path length
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t) RETURN PATH_LENGTH(p)
+----
+not implemented
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t) FOR step IN others RETURN PATH_LENGTH(p)
+----
+not implemented
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[steps:K]->{1,6}(t) FOR step IN steps WITH ORDINALITY i RETURN PATH_LENGTH(p)
+----
+not implemented
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t) RETURN ELEMENTS(p)
+----
+NODES
+
+statement error
+MATCH p = (a:P)-[:K]->(b:P) RETURN [n IN NODES(p) | n.id]
+----
+ALL SHORTEST
+
+statement error
+MATCH (s:P) WHERE s.id = 1 MATCH (t:P) WHERE t.id = 5 MATCH p = ALL SHORTEST (s)-[:K]->{1,6}(t) RETURN [n IN NODES(p) | n.id], [n IN NODES(p) | n.name]
+----
+more than one property
+
+statement ok
+DROP GRAPH allpaths

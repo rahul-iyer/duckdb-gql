@@ -2,6 +2,27 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
+## All 14 queries, and what a mixed workload shows (newest)
+
+All 14 pass goldens natively under both planners, in fresh, prepared and parameterized modes.
+Differential against Ladybug: 140/140 per mode across 10 people. Results in `OUT/after-ic1-ic14/`.
+Added: `ANY SHORTEST` + `PATH_LENGTH`, `ALL SHORTEST`, `FOR step IN steps` over its group variable,
+searched `CASE`, list values, and `[n IN NODES(p) | n.prop]` (a text rewrite; the vendored grammar is
+unchanged). See `test/sql/gql_any_shortest_case_list.test` and `gql_all_shortest.test` for the limits.
+
+`mixed_workload.py` replays LDBC's update stream. Reads degrade badly on a stale CSR, and path searches
+rebuild it at bind, so they cost a full rebuild after any write. Keep IC1 last in `READS`: running it
+first hides the slowdown from every later read.
+
+Open, in priority order:
+
+1. **Internal error:** IC12, cost planner, stale CSR, any real write: `dict-surviving join ... build
+   pipeline is not single-source`. It can invalidate the database. Not caused by fence removal or the
+   delim setting; the plan has 477 scans and estimates near 5.9e18 rows. Not yet proven a DuckDB bug.
+2. Incremental CSR, as planned with the user; removes the stale path.
+3. SF10: legacy beats cost (IC11, IC5, IC4), and IC2 regressed since August on both planners.
+4. Renaming a database file breaks its graph: metadata stores the catalog name.
+
 ## GQL query parameters (newest; removes the "no parameters" limit noted below)
 
 Binary SHA256 prefix `e9a607a2891b`, cost planner, 11 runs. `run.py --parameterized` writes

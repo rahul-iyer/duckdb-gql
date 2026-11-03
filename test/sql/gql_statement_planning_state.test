@@ -129,6 +129,55 @@ MATCH (a:A) RETURN a.score
 ----
 does not exist
 
+# Lowering's OFFSET 0 fences are not user OFFSETs: they stay out of plans and warnings.
+statement ok
+CREATE GRAPH fenced ANY
+
+statement ok
+COPY GRAPH fenced FROM (VERTICES '{TEST_DIR}/cache_nodes.csv', EDGES '{TEST_DIR}/cache_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH fenced
+
+statement ok
+CALL gql_build_csr('fenced')
+
+statement ok
+SET preserve_insertion_order=false
+
+statement ok
+CALL enable_logging(level='WARNING')
+
+query I
+MATCH (a:A)-[:R]->(b:A) WHERE a.score = 10 RETURN b.score
+----
+20
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE 'OFFSET is applied%'
+----
+0
+
+statement ok
+CALL disable_logging()
+
+statement ok
+RESET preserve_insertion_order
+
+query II
+EXPLAIN MATCH (a:A)-[:R]->(b:A) WHERE a.score = 10 RETURN b.score
+----
+physical_plan	<!REGEX>:.*LIMIT.*
+
+# A user's own OFFSET is still honored.
+query I
+MATCH (a:A) RETURN a.score ORDER BY a.score OFFSET 1
+----
+20
+
+statement ok
+DROP GRAPH fenced
+
 # MATCH plans with plain delim joins without changing the session's setting.
 statement ok
 CREATE GRAPH cached ANY

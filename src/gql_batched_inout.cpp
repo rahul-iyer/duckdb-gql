@@ -1,11 +1,13 @@
 #include "gql_batched_inout.hpp"
 
 #include "gql_csr.hpp"
+#include "gql_plan_reuse.hpp"
 
 #include "duckdb/execution/operator/projection/physical_tableinout_function.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_limit.hpp"
 
 namespace duckdb {
 
@@ -91,6 +93,29 @@ static bool CanBatch(const LogicalGet &get) {
 		}
 	}
 	return true;
+}
+
+// Lowering places OFFSET 0 as a fence against predicate movement. Once optimization is
+// done it only costs a streaming operator, and DuckDB warns about the OFFSET it sees.
+static void RemoveOptimizerFences(unique_ptr<LogicalOperator> &plan) {
+	for (auto &child : plan->children) {
+		RemoveOptimizerFences(child);
+	}
+	if (plan->type != LogicalOperatorType::LOGICAL_LIMIT) {
+		return;
+	}
+	auto &limit = plan->Cast<LogicalLimit>();
+	if (limit.limit_val.Type() == LimitNodeType::UNSET && limit.offset_val.Type() == LimitNodeType::CONSTANT_VALUE &&
+	    limit.offset_val.GetConstantValue() == 0) {
+		plan = std::move(plan->children[0]);
+	}
+}
+
+void GqlOptimizeMatchPlan(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (GqlPlanReuseStatementBindsMatch(input.context)) {
+		RemoveOptimizerFences(plan);
+	}
+	GqlBatchInOutFunctions(input, plan);
 }
 
 void GqlBatchInOutFunctions(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {

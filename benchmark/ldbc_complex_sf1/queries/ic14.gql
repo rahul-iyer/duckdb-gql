@@ -1,0 +1,14 @@
+MATCH (source:Person) WHERE source.id = 1131
+MATCH (target:Person) WHERE target.id = 19791209300775
+MATCH p = ALL SHORTEST (source)-[steps:KNOWS]->{1,30}(target)
+FOR step IN steps
+MATCH (a:Person)-[step]->(b:Person)
+OPTIONAL MATCH (a)<-[:HAS_CREATOR]-(c1:Comment)-[:REPLY_OF]->(:Post)-[:HAS_CREATOR]->(b)
+OPTIONAL MATCH (b)<-[:HAS_CREATOR]-(c2:Comment)-[:REPLY_OF]->(:Post)-[:HAS_CREATOR]->(a)
+OPTIONAL MATCH (a)<-[:HAS_CREATOR]-(c3:Comment)-[:REPLY_OF]->(:Comment)-[:HAS_CREATOR]->(b)
+OPTIONAL MATCH (b)<-[:HAS_CREATOR]-(c4:Comment)-[:REPLY_OF]->(:Comment)-[:HAS_CREATOR]->(a)
+RETURN [n IN NODES(p) | n.id],
+       (COUNT(DISTINCT c1.id) + COUNT(DISTINCT c2.id)) * 1.0E0 +
+       (COUNT(DISTINCT c3.id) + COUNT(DISTINCT c4.id)) * 5.0E-1 AS weight
+GROUP BY p
+ORDER BY weight DESC;

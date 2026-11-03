@@ -24,6 +24,12 @@ struct GqlIdentifier {
 	}
 };
 
+//! ANY SHORTEST gives one path per endpoint pair. ALL SHORTEST gives each shortest path,
+//! as one row or, when FOR unwinds its group variable, as one row per edge.
+static constexpr uint8_t GQL_PATH_SEARCH_ANY = 1;
+static constexpr uint8_t GQL_PATH_SEARCH_ALL = 2;
+static constexpr uint8_t GQL_PATH_SEARCH_ALL_STEPS = 3;
+
 enum class GqlLiteralType : uint8_t { NULL_VALUE, BOOLEAN, INTEGER, DECIMAL, DOUBLE, STRING, BYTE_STRING, PARAMETER };
 
 struct GqlLiteral {
@@ -61,6 +67,8 @@ struct GqlPatternElement {
 	GqlEdgeDirection edge_direction = GqlEdgeDirection::RIGHT;
 	bool quantified = false;
 	bool unbounded = false;
+	//! Path search on a quantified edge. Zero for none, otherwise a GQL_PATH_SEARCH value.
+	uint8_t shortest = 0;
 	idx_t minimum_repetitions = 1;
 	idx_t maximum_repetitions = 1;
 	GqlIdentifier variable;

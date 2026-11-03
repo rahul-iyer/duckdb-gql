@@ -35,7 +35,7 @@ statement ok
 PRAGMA disable_profiling
 
 query I
-SELECT contains(content, 'SEMI') AND contains(content, 'Streaming Limit')
+SELECT contains(content, 'SEMI')
 FROM read_text('__TEST_DIR__/key_only_trail_plan.txt')
 ----
 true

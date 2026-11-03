@@ -221,9 +221,20 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 		result->result_type = LiteralType(expression.literal);
 		return result;
 	case GqlExpressionType::LIST_CONSTRUCTOR:
+		// DELETE targets inspect the unbound constructor, so this is a value.
+		result->expression_type = GqlExpressionType::FUNCTION;
+		result->function_name = "__gql_list";
+		for (const auto &argument : expression.arguments) {
+			auto bound = BindExpression(*argument);
+			if (!IsScalar(bound->result_type.id) && bound->result_type.id != GqlTypeId::LIST) {
+				throw BinderException("GQL list values require scalar elements");
+			}
+			result->arguments.push_back(std::move(bound));
+		}
+		result->result_type = {GqlTypeId::LIST, false};
+		return result;
 	case GqlExpressionType::RECORD_CONSTRUCTOR:
-		throw BinderException("GQL collection constructors are currently supported "
-		                      "only as DELETE targets");
+		throw BinderException("GQL record constructors are currently supported only as DELETE targets");
 	case GqlExpressionType::VARIABLE_REFERENCE: {
 		auto binding_index = ResolveIndex(expression.variable);
 		auto &binding = bindings[binding_index];
@@ -293,6 +304,42 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			                       : name == "__gql_cast_string"  ? GqlTypeId::STRING
 			                                                      : GqlTypeId::BOOLEAN,
 			                       result->arguments[0]->result_type.nullable};
+			return result;
+		}
+		if (name == "__gql_elements") {
+			throw NotImplementedException("GQL ELEMENTS as a value; use [n IN NODES(p) | n.property]");
+		}
+		if (name == "__gql_path_values") {
+			if (result->arguments.size() != 2 || result->arguments[0]->result_type.id != GqlTypeId::PATH) {
+				throw BinderException("GQL path node values require a named path");
+			}
+			result->result_type = {GqlTypeId::LIST, result->arguments[0]->result_type.nullable};
+			return result;
+		}
+		if (name == "__gql_case") {
+			GqlType type {GqlTypeId::NULL_VALUE, true};
+			for (idx_t index = 0; index < result->arguments.size(); index++) {
+				const auto &argument_type = result->arguments[index]->result_type;
+				const bool condition = index % 2 == 0 && index + 1 < result->arguments.size();
+				if (condition) {
+					if (argument_type.id != GqlTypeId::BOOLEAN && argument_type.id != GqlTypeId::PROPERTY_VALUE &&
+					    argument_type.id != GqlTypeId::NULL_VALUE) {
+						throw BinderException("GQL CASE WHEN requires a boolean condition");
+					}
+				} else if (argument_type.id == GqlTypeId::NULL_VALUE || argument_type.id == type.id) {
+					continue;
+				} else if (type.id == GqlTypeId::NULL_VALUE) {
+					type = argument_type;
+				} else if (IsNumeric(type.id) && IsNumeric(argument_type.id)) {
+					type = NumericResult(type, argument_type);
+				} else if (type.id == GqlTypeId::PROPERTY_VALUE || argument_type.id == GqlTypeId::PROPERTY_VALUE) {
+					type.id = GqlTypeId::PROPERTY_VALUE;
+				} else {
+					throw BinderException("GQL CASE results have incompatible types");
+				}
+			}
+			type.nullable = true;
+			result->result_type = type;
 			return result;
 		}
 		if (name == "collect_list") {
@@ -558,6 +605,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 			bound_element.type = element.type;
 			bound_element.edge_direction = element.edge_direction;
 			bound_element.quantified = element.quantified;
+			bound_element.shortest = element.shortest;
 			bound_element.unbounded = element.unbounded;
 			bound_element.minimum_repetitions = element.minimum_repetitions;
 			bound_element.maximum_repetitions = element.maximum_repetitions;
@@ -600,18 +648,18 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 				continue;
 			}
 			if (element.unbounded) {
-				if (element.type != GqlPatternElementType::EDGE || !element.variable.IsEmpty()) {
+				if (element.type != GqlPatternElementType::EDGE || (!element.variable.IsEmpty() && !element.shortest)) {
 					throw InternalException("Invalid unbounded quantified GQL path element");
 				}
-				bind_element(element, true);
+				bind_element(element, element.variable.IsEmpty());
 				continue;
 			}
 			if (element.type != GqlPatternElementType::EDGE || element.minimum_repetitions == 0 ||
 			    (!element.unbounded && element.minimum_repetitions > element.maximum_repetitions) ||
-			    !element.variable.IsEmpty()) {
+			    (!element.variable.IsEmpty() && !element.shortest)) {
 				throw InternalException("Invalid fixed quantified GQL path element");
 			}
-			if (element.minimum_repetitions == element.maximum_repetitions) {
+			if (element.minimum_repetitions == element.maximum_repetitions && !element.shortest) {
 				auto fixed_element = element;
 				fixed_element.quantified = false;
 				fixed_element.unbounded = false;
@@ -631,14 +679,14 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 			// Quantified edges are one logical factor. The relational access-path
 			// optimizer can lower them to a composable CSR path expansion without
 			// cloning the rest of the query once per hop count.
-			bind_element(element, true);
+			bind_element(element, element.variable.IsEmpty());
 		}
 		if (!pattern.variable.IsEmpty()) {
 			if (FindBindingIndex(pattern.variable.value) != DConstants::INVALID_INDEX) {
 				throw BinderException("GQL binding variable '%s' is already defined", pattern.variable.value);
 			}
 			for (const auto &element : bound_pattern.elements) {
-				if (element.quantified) {
+				if (element.quantified && !element.shortest) {
 					throw NotImplementedException("GQL quantified path value projection");
 				}
 			}

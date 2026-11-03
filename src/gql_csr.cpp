@@ -1682,6 +1682,398 @@ static OperatorResultType ElementFetchFunction(ExecutionContext &context, TableF
 	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 
+// ANY SHORTEST: one row per reached vertex with its distance, instead of every path.
+// A breadth-first search is exact here, because all edges cost one hop. Below the
+// minimum length a vertex may be revisited, since a longer walk can still qualify.
+struct CsrShortestLocalState : LocalTableFunctionState {
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	string edge_label;
+	bool outgoing = true;
+	uint64_t start_id = 0;
+	bool searched = false;
+	vector<pair<idx_t, uint32_t>> reached;
+	idx_t cursor = 0;
+};
+
+static unique_ptr<FunctionData> CsrShortestBind(ClientContext &, TableFunctionBindInput &,
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type", "__gql_length"};
+	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR,
+	                LogicalType::UBIGINT};
+	return make_uniq<TableFunctionData>();
+}
+
+static unique_ptr<LocalTableFunctionState> CsrShortestLocalInit(ExecutionContext &, TableFunctionInitInput &,
+                                                                GlobalTableFunctionState *) {
+	return make_uniq<CsrShortestLocalState>();
+}
+
+static void SearchCsrShortest(ExecutionContext &context, DataChunk &input, CsrExpandGlobalState &global,
+                              CsrShortestLocalState &state) {
+	state.reached.clear();
+	state.cursor = 0;
+	if (input.size() != 1 || input.ColumnCount() < 1) {
+		throw InternalException("GQL shortest expansion requires one lateral input row");
+	}
+	auto packed = input.data[0].GetValue(0);
+	if (packed.IsNull()) {
+		return;
+	}
+	auto &fields = StructValue::GetChildren(packed);
+	if (fields.size() != 7 || fields[0].IsNull() || fields[2].IsNull() || fields[3].IsNull() || fields[4].IsNull() ||
+	    fields[5].IsNull() || fields[6].IsNull()) {
+		throw InvalidInputException("GQL shortest expansion requires a graph, direction, label, and bounds");
+	}
+	if (fields[1].IsNull()) {
+		return;
+	}
+	const auto direction = StringUtil::Lower(fields[2].GetValue<string>());
+	if (direction != "out" && direction != "in") {
+		throw InvalidInputException("GQL shortest expansion direction must be 'out' or 'in'");
+	}
+	state.outgoing = direction == "out";
+	state.edge_label = StringUtil::Lower(fields[3].GetValue<string>());
+	state.snapshot = AcquireCsrOperatorSnapshot(context, global, fields[0].GetValue<string>());
+	state.start_id = fields[1].GetValue<uint64_t>();
+	const auto &snapshot = *state.snapshot;
+	const auto label = snapshot.label_ids.find(state.edge_label);
+	idx_t start;
+	if (label == snapshot.label_ids.end() || !GqlTryGetCsrOrdinal(snapshot, state.start_id, start)) {
+		return;
+	}
+	const auto minimum = fields[4].GetValue<uint64_t>();
+	const auto maximum = fields[5].GetValue<uint64_t>();
+	const auto unbounded = fields[6].GetValue<bool>();
+	const auto &offsets = state.outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
+	const auto &neighbors = state.outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
+	const auto &labels = state.outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
+	unordered_set<idx_t> settled;
+	vector<idx_t> frontier {start};
+	for (uint64_t depth = 1; !frontier.empty() && (unbounded || depth <= maximum); depth++) {
+		context.client.InterruptCheck();
+		vector<idx_t> next;
+		unordered_set<idx_t> level;
+		for (const auto vertex : frontier) {
+			for (auto index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
+				if (labels[index] != label->second) {
+					continue;
+				}
+				const idx_t neighbor = neighbors[index];
+				if (settled.count(neighbor) != 0 || !level.insert(neighbor).second) {
+					continue;
+				}
+				next.push_back(neighbor);
+				if (depth >= minimum) {
+					state.reached.emplace_back(neighbor, NumericCast<uint32_t>(depth));
+				}
+			}
+		}
+		if (depth >= minimum) {
+			settled.insert(next.begin(), next.end());
+		}
+		frontier = std::move(next);
+	}
+}
+
+static OperatorResultType CsrShortestFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                              DataChunk &output) {
+	auto &state = data_p.local_state->Cast<CsrShortestLocalState>();
+	if (!state.searched) {
+		SearchCsrShortest(context, input, data_p.global_state->Cast<CsrExpandGlobalState>(), state);
+		state.searched = true;
+	}
+	const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.reached.size() - state.cursor);
+	if (count == 0) {
+		state.searched = false;
+		output.SetChildCardinality(0);
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	auto edges = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto sources = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto targets = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto lengths = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
+	output.data[3].Reference(Value(state.edge_label), count_t(count));
+	for (idx_t index = 0; index < count; index++) {
+		const auto &entry = state.reached[state.cursor + index];
+		const auto end_id = state.snapshot->vertex_ids[entry.first];
+		edges[index] = 0;
+		sources[index] = state.outgoing ? state.start_id : end_id;
+		targets[index] = state.outgoing ? end_id : state.start_id;
+		lengths[index] = entry.second;
+	}
+	state.cursor += count;
+	output.SetChildCardinality(count);
+	return OperatorResultType::HAVE_MORE_OUTPUT;
+}
+
+// ALL SHORTEST between two given vertices. A breadth-first search records each vertex's
+// predecessors up to the target's level, and only paths back from the target are built,
+// so the cost follows the paths between the endpoints and not all paths from the source.
+struct CsrAllShortestBindData : TableFunctionData {
+	explicit CsrAllShortestBindData(TableCatalogEntry *table_p) : table(table_p) {
+	}
+
+	unique_ptr<FunctionData> Copy() const override {
+		auto result = make_uniq<CsrAllShortestBindData>(table);
+		result->value_column = value_column;
+		result->value_type = value_type;
+		return std::move(result);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<CsrAllShortestBindData>();
+		return table == other.table && value_column == other.value_column;
+	}
+
+	TableCatalogEntry *table;
+	optional_idx value_column;
+	LogicalType value_type;
+};
+
+struct CsrAllShortestStep {
+	idx_t vertex;
+	idx_t adjacency;
+};
+
+struct CsrAllShortestRow {
+	uint64_t edge_id;
+	uint64_t source_id;
+	uint64_t target_id;
+	idx_t path;
+};
+
+struct CsrAllShortestLocalState : LocalTableFunctionState {
+	shared_ptr<const GqlCsrSnapshot> snapshot;
+	string edge_label;
+	bool searched = false;
+	uint64_t length = 0;
+	vector<CsrAllShortestRow> rows;
+	vector<Value> values;
+	idx_t cursor = 0;
+	ColumnFetchState fetch_state;
+};
+
+static unique_ptr<FunctionData> CsrAllShortestBind(ClientContext &context, TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	names = {"__gql_edge_id", "__gql_source_id", "__gql_target_id", "__gql_type", "__gql_length"};
+	return_types = {LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::UBIGINT, LogicalType::VARCHAR,
+	                LogicalType::UBIGINT};
+	if (input.input_table_types.size() != 1 || input.input_table_types[0].id() != LogicalTypeId::STRUCT) {
+		throw BinderException("GQL ALL SHORTEST requires a struct argument");
+	}
+	const auto &fields = StructType::GetChildTypes(input.input_table_types[0]);
+	if (fields.size() != 9 && fields.size() != 10) {
+		throw BinderException("GQL ALL SHORTEST received an invalid argument");
+	}
+	if (fields.size() == 9) {
+		return make_uniq<CsrAllShortestBindData>(nullptr);
+	}
+	GqlTableGraphBinding binding;
+	if (!GqlTryLoadTableGraph(context, GqlGetSelectedGraph(context), binding) ||
+	    !StringUtil::CIEquals(binding.vertex.ownership, "MANAGED")) {
+		throw NotImplementedException("GQL path node values require a managed graph");
+	}
+	auto &catalog = Catalog::GetCatalog(context, Identifier(binding.vertex.catalog_name));
+	auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(binding.vertex.schema_name),
+	                              Identifier(binding.vertex.table_name), OnEntryNotFound::THROW_EXCEPTION);
+	auto &table = entry->Cast<TableCatalogEntry>();
+	auto result = make_uniq<CsrAllShortestBindData>(&table);
+	const auto column_name = StructType::GetChildTypes(fields[9].second)[0].first;
+	auto &column = table.GetColumn(column_name);
+	result->value_column = column.Logical().index;
+	result->value_type = column.Type();
+	names.emplace_back("__gql_node_values");
+	return_types.push_back(LogicalType::LIST(column.Type()));
+	return std::move(result);
+}
+
+static unique_ptr<LocalTableFunctionState> CsrAllShortestLocalInit(ExecutionContext &, TableFunctionInitInput &,
+                                                                   GlobalTableFunctionState *) {
+	return make_uniq<CsrAllShortestLocalState>();
+}
+
+static void SearchCsrAllShortest(ExecutionContext &context, DataChunk &input, const CsrAllShortestBindData &bind,
+                                 CsrExpandGlobalState &global, CsrAllShortestLocalState &state) {
+	state.rows.clear();
+	state.values.clear();
+	state.cursor = 0;
+	if (input.size() != 1 || input.ColumnCount() < 1) {
+		throw InternalException("GQL ALL SHORTEST requires one lateral input row");
+	}
+	auto packed = input.data[0].GetValue(0);
+	if (packed.IsNull()) {
+		return;
+	}
+	auto &fields = StructValue::GetChildren(packed);
+	if (fields[1].IsNull() || fields[2].IsNull()) {
+		return;
+	}
+	const auto outgoing = StringUtil::CIEquals(fields[3].GetValue<string>(), "out");
+	state.edge_label = StringUtil::Lower(fields[4].GetValue<string>());
+	const auto maximum = fields[5].GetValue<uint64_t>();
+	const auto unbounded = fields[6].GetValue<bool>();
+	const auto per_step = fields[7].GetValue<bool>();
+	const auto from_left = fields[8].GetValue<bool>();
+	state.snapshot = AcquireCsrOperatorSnapshot(context, global, fields[0].GetValue<string>());
+	const auto &snapshot = *state.snapshot;
+	const auto label = snapshot.label_ids.find(state.edge_label);
+	idx_t start, target;
+	if (label == snapshot.label_ids.end() || !GqlTryGetCsrOrdinal(snapshot, fields[1].GetValue<uint64_t>(), start) ||
+	    !GqlTryGetCsrOrdinal(snapshot, fields[2].GetValue<uint64_t>(), target)) {
+		return;
+	}
+	const auto &offsets = outgoing ? snapshot.outgoing_offsets : snapshot.incoming_offsets;
+	const auto &neighbors = outgoing ? snapshot.outgoing_neighbors : snapshot.incoming_neighbors;
+	const auto &labels = outgoing ? snapshot.outgoing_label_ids : snapshot.incoming_label_ids;
+	const auto &edge_ids = outgoing ? snapshot.outgoing_edge_ids : snapshot.incoming_edge_ids;
+	// The start is not settled, so that it can be its own target through a cycle.
+	unordered_map<idx_t, vector<CsrAllShortestStep>> predecessors;
+	vector<idx_t> frontier {start};
+	uint64_t depth = 0;
+	bool found = false;
+	while (!found && !frontier.empty() && (unbounded || depth < maximum)) {
+		context.client.InterruptCheck();
+		depth++;
+		unordered_map<idx_t, vector<CsrAllShortestStep>> level;
+		for (const auto vertex : frontier) {
+			for (auto index = offsets[vertex]; index < offsets[vertex + 1]; index++) {
+				if (labels[index] != label->second) {
+					continue;
+				}
+				const idx_t neighbor = neighbors[index];
+				if (predecessors.count(neighbor) == 0) {
+					level[neighbor].push_back({vertex, index});
+				}
+			}
+		}
+		frontier.clear();
+		for (auto &entry : level) {
+			found = found || entry.first == target;
+			frontier.push_back(entry.first);
+			predecessors.emplace(entry.first, std::move(entry.second));
+		}
+	}
+	if (!found) {
+		return;
+	}
+	state.length = depth;
+	// Walks back from the target. A start reached again above level zero has no paths
+	// through it, because anything it could reach was settled at level one.
+	vector<CsrAllShortestStep> path(depth);
+	vector<vector<idx_t>> node_paths;
+	idx_t path_index = 0;
+	std::function<void(idx_t, uint64_t)> walk = [&](idx_t vertex, uint64_t level) {
+		if ((path_index & 1023) == 0) {
+			context.client.InterruptCheck();
+		}
+		if (level == 0) {
+			if (vertex != start) {
+				return;
+			}
+			vector<idx_t> nodes {start};
+			for (const auto &step : path) {
+				nodes.push_back(neighbors[step.adjacency]);
+			}
+			if (!from_left) {
+				std::reverse(nodes.begin(), nodes.end());
+			}
+			if (bind.value_column.IsValid()) {
+				node_paths.push_back(std::move(nodes));
+			}
+			if (!per_step) {
+				state.rows.push_back({0, snapshot.vertex_ids[start], snapshot.vertex_ids[target], path_index});
+			} else {
+				for (const auto &step : path) {
+					const auto from = snapshot.vertex_ids[step.vertex];
+					const auto to = snapshot.vertex_ids[neighbors[step.adjacency]];
+					state.rows.push_back({edge_ids[step.adjacency], outgoing ? from : to, outgoing ? to : from, path_index});
+				}
+			}
+			path_index++;
+			return;
+		}
+		auto entry = predecessors.find(vertex);
+		if (entry == predecessors.end()) {
+			return;
+		}
+		for (const auto &step : entry->second) {
+			path[level - 1] = step;
+			walk(step.vertex, level - 1);
+		}
+	};
+	walk(target, depth);
+	if (!bind.value_column.IsValid()) {
+		return;
+	}
+	// Each vertex's value is fetched once, however many paths it lies on.
+	vector<pair<row_t, idx_t>> requests;
+	unordered_map<idx_t, Value> value_by_vertex;
+	for (const auto &nodes : node_paths) {
+		for (const auto node : nodes) {
+			if (value_by_vertex.emplace(node, Value(bind.value_type)).second) {
+				const auto row_id = snapshot.vertex_ids_match_rowids ? snapshot.vertex_ids[node] - 1 : snapshot.vertex_row_ids[node];
+				requests.emplace_back(NumericCast<row_t>(row_id), node);
+			}
+		}
+	}
+	std::sort(requests.begin(), requests.end());
+	auto &table = bind.table->Cast<DuckTableEntry>();
+	auto &transaction = DuckTransaction::Get(context.client, table.catalog);
+	vector<StorageIndex> column_ids {table.GetStorageIndex(ColumnIndex(bind.value_column.GetIndex()))};
+	DataChunk fetched;
+	fetched.Initialize(Allocator::Get(context.client), {bind.value_type});
+	for (idx_t index = 0; index < requests.size(); index++) {
+		fetched.Reset();
+		auto row_id = requests[index].first;
+		Vector row_ids(LogicalType::ROW_TYPE, data_ptr_cast(&row_id), 1);
+		table.GetStorage().Fetch(transaction, fetched, column_ids, row_ids, 1, state.fetch_state);
+		if (fetched.size() == 1) {
+			value_by_vertex[requests[index].second] = fetched.GetValue(0, 0);
+		}
+	}
+	for (const auto &nodes : node_paths) {
+		vector<Value> values;
+		for (const auto node : nodes) {
+			values.push_back(value_by_vertex.at(node));
+		}
+		state.values.push_back(Value::LIST(bind.value_type, std::move(values)));
+	}
+}
+
+static OperatorResultType CsrAllShortestFunction(ExecutionContext &context, TableFunctionInput &data_p, DataChunk &input,
+                                                 DataChunk &output) {
+	auto &state = data_p.local_state->Cast<CsrAllShortestLocalState>();
+	auto &bind = data_p.bind_data->Cast<CsrAllShortestBindData>();
+	if (!state.searched) {
+		SearchCsrAllShortest(context, input, bind, data_p.global_state->Cast<CsrExpandGlobalState>(), state);
+		state.searched = true;
+	}
+	const auto count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, state.rows.size() - state.cursor);
+	if (count == 0) {
+		state.searched = false;
+		output.SetChildCardinality(0);
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	auto edges = FlatVector::GetDataMutable<uint64_t>(output.data[0]);
+	auto sources = FlatVector::GetDataMutable<uint64_t>(output.data[1]);
+	auto targets = FlatVector::GetDataMutable<uint64_t>(output.data[2]);
+	auto lengths = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
+	output.data[3].Reference(Value(state.edge_label), count_t(count));
+	for (idx_t index = 0; index < count; index++) {
+		const auto &row = state.rows[state.cursor + index];
+		edges[index] = row.edge_id;
+		sources[index] = row.source_id;
+		targets[index] = row.target_id;
+		lengths[index] = state.length;
+		if (bind.value_column.IsValid()) {
+			output.data[5].SetValue(index, state.values[row.path]);
+		}
+	}
+	state.cursor += count;
+	output.SetChildCardinality(count);
+	return OperatorResultType::HAVE_MORE_OUTPUT;
+}
+
 struct VertexLookupBindData : ElementFetchBindData {
 	using ElementFetchBindData::ElementFetchBindData;
 
@@ -2332,6 +2724,27 @@ TableFunction GqlProjectedVertexFetchFunction() {
 
 TableFunction GqlEdgeFetchFunction() {
 	return GqlElementFetchFunction("gql_edge_fetch");
+}
+
+TableFunction GqlCsrAllShortestFunction() {
+	TableFunction function("gql_csr_all_shortest", {LogicalType::ANY}, nullptr, CsrAllShortestBind, CsrExpandGlobalInit,
+	                       CsrAllShortestLocalInit);
+	function.in_out_function = CsrAllShortestFunction;
+	return function;
+}
+
+TableFunction GqlCsrShortestExpandFunction() {
+	auto input_type = LogicalType::STRUCT({{"graph_name", LogicalType::VARCHAR},
+	                                       {"vertex_id", LogicalType::UBIGINT},
+	                                       {"direction", LogicalType::VARCHAR},
+	                                       {"edge_label", LogicalType::VARCHAR},
+	                                       {"minimum_repetitions", LogicalType::UBIGINT},
+	                                       {"maximum_repetitions", LogicalType::UBIGINT},
+	                                       {"unbounded", LogicalType::BOOLEAN}});
+	TableFunction function("gql_csr_shortest_expand", {input_type}, nullptr, CsrShortestBind, CsrExpandGlobalInit,
+	                       CsrShortestLocalInit);
+	function.in_out_function = CsrShortestFunction;
+	return function;
 }
 
 TableFunction GqlVertexLookupFunction() {

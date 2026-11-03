@@ -18,6 +18,7 @@ def git(path, *args): return subprocess.check_output(['git','-C',str(path),*args
 # Literal text in queries/icN.gql, its parameter name, and the upstream value bound to it.
 # IC10's birthday window has no parameter: its month is built into two literal comparisons.
 PARAMETERS={
+    1:[('1131','personId',1131),("'Jose'",'firstName','Jose')],
     2:[('1131','personId',1131),("'2010-10-16 12:00:00'",'maxDate',datetime(2010,10,16,12))],
     3:[('1131','personId',1131),("'Panama'",'countryX','Panama'),("'South_Africa'",'countryY','South_Africa'),
        ("'2010-06-01 12:00:00'",'startDate',datetime(2010,6,1,12)),("'2010-06-29 12:00:00'",'endDate',datetime(2010,6,29,12))],
@@ -31,6 +32,7 @@ PARAMETERS={
     11:[('1131','personId',1131),("'Hungary'",'countryName','Hungary'),('2011','workFromYear',2011)],
     12:[('1131','personId',1131),("'Monarch'",'tagClassName','Monarch')],
     13:[('1131','person1Id',1131),('19791209300775','person2Id',19791209300775)],
+    14:[('1131','person1Id',1131),('19791209300775','person2Id',19791209300775)],
 }
 
 def parameterized(n, text):
@@ -225,8 +227,6 @@ def cases(upstream,out):
         reference['queries'][f'interactive-complex-{n}']={'parameters':p}
     paramfile=out/'parameters.json'; paramfile.write_text(json.dumps(reference,indent=2))
     unsupported={
-        'interactive-complex-1':'No complete adapter: shortest-distance composition and nested organisation collections remain unimplemented.',
-        'interactive-complex-14':'No complete adapter: ALL SHORTEST search and quantified path-value processing remain unimplemented.',
     }
     queries={}
     for n in range(1,15):
@@ -288,7 +288,12 @@ def main():
                 assert all(len(r)==len(expected[0]) for r in rows), 'projection arity differs from golden schema'
                 actual=[dict(zip(expected[0].keys(),r.values())) for r in rows]
                 (out/f'{key}-actual.json').write_text(json.dumps(actual,indent=2)+'\n')
-                actual=[{k:sorted(v) if isinstance(v,list) else v for k,v in row.items()} for row in actual]
+                # Collected values have no order, but the IDs along a path do.
+                actual=[{k:sorted(v) if isinstance(v,list) and any(isinstance(x,(str,list)) for x in v) else v for k,v in row.items()} for row in actual]
+                if key=='ic14':
+                    # Upstream compares IC14 unordered, since equal path weights can tie.
+                    order=lambda row: json.dumps(row,sort_keys=True)
+                    actual,expected=sorted(actual,key=order),sorted(expected,key=order)
                 if actual!=expected: raise AssertionError(f'golden mismatch: {len(actual)} rows vs {len(expected)}; see {key}-actual.json')
             if statement is not None: db.lib.duckdb_destroy_prepare(C.byref(statement))
             entry.update(status='passed',rows=len(rows),samples_ms=timings,mean_ms=statistics.mean(timings),median_ms=statistics.median(timings),min_ms=min(timings),max_ms=max(timings))

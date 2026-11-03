@@ -348,6 +348,8 @@ TableFunction GqlNeighborsFunction();
 TableFunction GqlCsrVerticesFunction();
 TableFunctionSet GqlCsrExpandFunctions();
 TableFunction GqlVertexLookupFunction();
+TableFunction GqlCsrShortestExpandFunction();
+TableFunction GqlCsrAllShortestFunction();
 //! Snapshots built in this database instance so far.
 uint64_t GqlCsrBuildCount(ClientContext &context);
 //! Whether expansion can test neighbor labels, which it does for its neighbor_label argument.

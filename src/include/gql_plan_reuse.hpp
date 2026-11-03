@@ -7,6 +7,8 @@ namespace duckdb {
 
 //! Records that this statement binds a MATCH, which makes it a candidate for plan reuse.
 void GqlPlanReuseNoteMatch(ClientContext &context);
+//! Whether the statement being planned binds a MATCH.
+bool GqlPlanReuseStatementBindsMatch(ClientContext &context);
 //! Records whether binding asked for a rebind, before the optimizer sets that flag itself.
 void GqlPlanReuseObserveBind(PlannerExtensionInput &input, BoundStatement &statement);
 //! Lets an eligible prepared MATCH keep its plan until something it depends on changes.

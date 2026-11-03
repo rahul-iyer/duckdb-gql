@@ -9,7 +9,7 @@ python3 benchmark/ldbc_complex_sf1/compare.py --upstream /path/to/graph-benchmar
 
 Download and extract the upstream SF1 StringDateFormatter dataset first. The runner uses the standard library and the local DuckDB C API; no Python engine dependency is needed. It writes the database, graph Parquet files, fixed parameters, query text, actual rows, and results under `build/benchmarks/ldbc-complex-sf1/`. Subsequent runs reuse the loaded database; use a new `--output` directory to reload. The comparison script writes `comparison.md` beside `results.json`.
 
-Twelve queries have native GQL adaptations in `queries/` and ordered golden-answer checks, including sorted string collections for IC12. IC1 and IC14 remain explicitly unsupported. IC1 still needs a complete shortest-distance and nested collection composition; IC14 needs all shortest paths and path-value processing. The pinned external GQL corpus and provenance are in `references/frogql/`. Saved upstream engine results are compared with the local measurements and are not rerun. See the generated report for schema changes, timing boundaries, machine differences and the exact coverage boundary.
+All 14 queries have native GQL adaptations in `queries/` and golden-answer checks, ordered except for IC14, as upstream's are, with collected lists compared sorted. The pinned external GQL corpus and provenance are in `references/frogql/`. Saved upstream engine results are compared with the local measurements and are not rerun. See the generated report for schema changes, timing boundaries, machine differences and the exact coverage boundary.
 
 To measure Ladybug locally, install Ladybug 0.22.1, Polars, PyArrow and pytest in a virtual environment, then run:
 

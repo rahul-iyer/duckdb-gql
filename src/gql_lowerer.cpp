@@ -216,7 +216,8 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 		order_descending.emplace_back(order.descending);
 		order_nulls.emplace_back(Value::UTINYINT(order.null_order_specified ? (order.nulls_first ? 1 : 2) : 0));
 	}
-	if (recursive_edge) {
+	// The recursive form enumerates paths, which is not what ANY SHORTEST asks for.
+	if (recursive_edge && !recursive_edge->shortest) {
 		GqlCompatibilityMatch match;
 		match.binding_count = plan.binding_count;
 		FlattenMatchPipeline(project.child, match);
@@ -278,6 +279,7 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 	vector<Value> labels;
 	vector<Value> reverses;
 	vector<Value> quantified;
+	vector<Value> shortest;
 	vector<Value> unbounded;
 	vector<Value> minimum_repetitions;
 	vector<Value> maximum_repetitions;
@@ -289,6 +291,7 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 			labels.emplace_back(StringUtil::Join(element.labels, ";"));
 			reverses.emplace_back(element.edge_direction == GqlEdgeDirection::LEFT);
 			quantified.emplace_back(element.quantified);
+			shortest.emplace_back(Value::UTINYINT(element.shortest));
 			unbounded.emplace_back(element.unbounded);
 			minimum_repetitions.emplace_back(Value::UBIGINT(element.minimum_repetitions));
 			maximum_repetitions.emplace_back(Value::UBIGINT(element.maximum_repetitions));
@@ -326,6 +329,7 @@ ParserExtensionPlanResult GqlLower(const GqlLogicalPlan &plan) {
 	result.parameters.emplace_back(Value::UBIGINT(project.limit));
 	result.parameters.emplace_back(project.has_offset);
 	result.parameters.emplace_back(Value::UBIGINT(project.offset));
+	result.parameters.emplace_back(Value::LIST(LogicalType::UTINYINT, std::move(shortest)));
 	return result;
 }
 

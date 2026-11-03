@@ -138,6 +138,7 @@ struct RelationalPatternElement {
 	bool unbounded = false;
 	idx_t minimum_repetitions = 1;
 	idx_t maximum_repetitions = 1;
+	uint8_t shortest = 0;
 };
 
 struct RelationalPattern {
@@ -289,6 +290,9 @@ struct RelationalPropertyAccess {
 struct RelationalIdentityAccess {
 	string table_alias;
 	string column_name;
+	//! For a shortest-path edge: the columns holding the path's length and node values.
+	string length_column = string();
+	string values_column = string();
 };
 
 using RelationalPropertyMap = unordered_map<string, RelationalPropertyAccess>;
@@ -363,7 +367,7 @@ static void ValidateProgram(const GqlExpressionProgram &program, idx_t variable_
 }
 
 static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
-	if (input.inputs.size() != 27) {
+	if (input.inputs.size() != 28) {
 		throw BinderException("Invalid GQL relational MATCH input");
 	}
 	auto program_version = input.inputs[0].GetValue<uint8_t>();
@@ -380,6 +384,7 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
 	auto unbounded = ReadBooleanList(input.inputs[7]);
 	auto minimum_repetitions = ReadIndexList(input.inputs[8]);
 	auto maximum_repetitions = ReadIndexList(input.inputs[9]);
+	auto shortest = ReadByteList(input.inputs[input.inputs.size() - 1]);
 	auto match_pattern_counts = ReadIndexList(input.inputs[10]);
 	auto node_types = ReadByteList(input.inputs[11]);
 	auto child_indices = ReadIndexList(input.inputs[12]);
@@ -432,7 +437,8 @@ static RelationalMatchInput ReadMatchInput(TableFunctionBindInput &input) {
 				throw BinderException("Invalid GQL quantified MATCH factor");
 			}
 			pattern.elements.push_back({type, binding_index, labels[flat_index], reverses[flat_index],
-			                            quantified[flat_index], unbounded[flat_index], minimum, maximum});
+			                            quantified[flat_index], unbounded[flat_index], minimum, maximum,
+			                            shortest[flat_index]});
 		}
 		patterns.push_back(std::move(pattern));
 		offset += pattern_size;
@@ -939,6 +945,25 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		return LowerExpression(program, cursor, property_aliases, identities);
 	case GqlExpressionType::FUNCTION: {
 		auto name = program.values[node];
+		if (name == "__gql_path_values") {
+			if (program.child_counts[node] != 2 || static_cast<GqlExpressionType>(program.node_types[cursor]) != GqlExpressionType::FUNCTION ||
+			    program.values[cursor] != "__gql_path") {
+				throw InternalException("GQL path node values require a bound path");
+			}
+			auto path_cursor = cursor + 1;
+			unique_ptr<ParsedExpression> values;
+			for (idx_t child = 0; child < program.child_counts[cursor]; child++) {
+				const auto binding = NumericCast<idx_t>(program.binding_indices[path_cursor++]);
+				if (binding < identities.size() && !identities[binding].values_column.empty()) {
+					values = Column(identities[binding].table_alias, identities[binding].values_column);
+				}
+			}
+			if (!values) {
+				throw NotImplementedException("GQL node values of a path other than ALL SHORTEST");
+			}
+			cursor = ExpressionEnd(program, node);
+			return values;
+		}
 		if (name == "path_length") {
 			if (program.child_counts[node] != 1 || cursor >= program.node_types.size() ||
 			    static_cast<GqlExpressionType>(program.node_types[cursor]) != GqlExpressionType::FUNCTION ||
@@ -949,6 +974,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			auto path_cursor = path_root + 1;
 			idx_t edge_count = 0;
 			vector<unique_ptr<ParsedExpression>> missing_elements;
+			unique_ptr<ParsedExpression> searched_length;
 			for (idx_t child = 0; child < program.child_counts[path_root]; child++) {
 				if (path_cursor >= program.node_types.size() || program.child_counts[path_cursor] != 0 ||
 				    static_cast<GqlExpressionType>(program.node_types[path_cursor]) !=
@@ -960,7 +986,11 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 					throw InternalException("GQL fixed path binding is missing");
 				}
 				auto element_type = static_cast<GqlTypeId>(program.result_types[path_cursor]);
-				if (element_type == GqlTypeId::EDGE) {
+				if (element_type == GqlTypeId::EDGE && !identities[binding_index].length_column.empty()) {
+					searched_length = make_uniq<CastExpression>(
+					    LogicalType::BIGINT,
+					    Column(identities[binding_index].table_alias, identities[binding_index].length_column));
+				} else if (element_type == GqlTypeId::EDGE) {
 					edge_count++;
 				} else if (element_type != GqlTypeId::NODE) {
 					throw InternalException("GQL fixed path contains a non-element value");
@@ -985,7 +1015,8 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			missing_path.when_expr = std::move(missing);
 			missing_path.then_expr = Constant(Value());
 			result->CaseChecksMutable().push_back(std::move(missing_path));
-			result->ElseMutable() = Constant(Value::BIGINT(NumericCast<int64_t>(edge_count)));
+			result->ElseMutable() =
+			    searched_length ? std::move(searched_length) : Constant(Value::BIGINT(NumericCast<int64_t>(edge_count)));
 			return std::move(result);
 		}
 		auto lowered_name = name == "count" && program.child_counts[node] == 0 ? "count_star" : name;
@@ -1003,6 +1034,24 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 		}
 		if (name == "coalesce") {
 			return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(arguments));
+		}
+		if (name == "__gql_list") {
+			return Function("list_value", std::move(arguments));
+		}
+		if (name == "__gql_path_values") {
+			throw InternalException("GQL path node values reached generic function lowering");
+		}
+		if (name == "__gql_case") {
+			auto result = make_uniq<CaseExpression>();
+			idx_t index = 0;
+			for (; index + 1 < arguments.size(); index += 2) {
+				CaseCheck check;
+				check.when_expr = std::move(arguments[index]);
+				check.then_expr = std::move(arguments[index + 1]);
+				result->CaseChecksMutable().push_back(std::move(check));
+			}
+			result->ElseMutable() = index < arguments.size() ? std::move(arguments[index]) : Constant(Value());
+			return std::move(result);
 		}
 		if (StringUtil::StartsWith(name, "__gql_cast_")) {
 			if (name == "__gql_cast_float") {
@@ -1277,6 +1326,52 @@ static unique_ptr<TableRef> CsrPathExpansionTable(const string &graph_name, cons
 	return std::move(result);
 }
 
+static unique_ptr<TableRef> CsrShortestExpansionTable(const string &graph_name, const string &vertex_alias,
+                                                      const string &vertex_key, const GqlBindingAccessPath &path,
+                                                      const string &edge_alias) {
+	vector<unique_ptr<ParsedExpression>> fields;
+	AppendStructField(fields, Constant(Value(graph_name)), "graph_name");
+	AppendStructField(fields, Column(vertex_alias, vertex_key), "vertex_id");
+	AppendStructField(fields, Constant(Value(path.expansion_direction)), "direction");
+	AppendStructField(fields, Constant(Value(path.edge_label)), "edge_label");
+	AppendStructField(fields, Constant(Value::UBIGINT(path.minimum_repetitions)), "minimum_repetitions");
+	AppendStructField(fields, Constant(Value::UBIGINT(path.maximum_repetitions)), "maximum_repetitions");
+	AppendStructField(fields, Constant(Value(path.unbounded)), "unbounded");
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(Function("struct_pack", std::move(fields)));
+	auto result = make_uniq<TableFunctionRef>();
+	result->function = make_uniq<FunctionExpression>("gql_csr_shortest_expand", std::move(arguments));
+	result->alias = Identifier(edge_alias);
+	return std::move(result);
+}
+
+static unique_ptr<TableRef> CsrAllShortestTable(const string &graph_name, unique_ptr<ParsedExpression> start,
+                                                unique_ptr<ParsedExpression> end, bool from_left,
+                                                const GqlBindingAccessPath &path, bool per_step, const string &values_column,
+                                                const string &edge_alias) {
+	vector<unique_ptr<ParsedExpression>> fields;
+	AppendStructField(fields, Constant(Value(graph_name)), "graph_name");
+	AppendStructField(fields, std::move(start), "vertex_id");
+	AppendStructField(fields, std::move(end), "target_id");
+	AppendStructField(fields, Constant(Value(path.expansion_direction)), "direction");
+	AppendStructField(fields, Constant(Value(path.edge_label)), "edge_label");
+	AppendStructField(fields, Constant(Value::UBIGINT(path.maximum_repetitions)), "maximum_repetitions");
+	AppendStructField(fields, Constant(Value(path.unbounded)), "unbounded");
+	AppendStructField(fields, Constant(Value(per_step)), "per_step");
+	AppendStructField(fields, Constant(Value(from_left)), "from_left");
+	if (!values_column.empty()) {
+		vector<unique_ptr<ParsedExpression>> schema;
+		AppendStructField(schema, Constant(Value()), values_column);
+		AppendStructField(fields, Function("struct_pack", std::move(schema)), "values");
+	}
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(Function("struct_pack", std::move(fields)));
+	auto result = make_uniq<TableFunctionRef>();
+	result->function = make_uniq<FunctionExpression>("gql_csr_all_shortest", std::move(arguments));
+	result->alias = Identifier(edge_alias);
+	return std::move(result);
+}
+
 static unique_ptr<TableRef> RelationalPathExpansionTable(const GqlTableGraphBinding &graph, const string &vertex_alias,
                                                          const string &vertex_key, const GqlBindingAccessPath &path,
                                                          const string &edge_alias) {
@@ -1531,6 +1626,11 @@ static unique_ptr<ParsedExpression> GraphPathValue(const GqlExpressionProgram &p
                                                    const GqlTableGraphBinding &graph,
                                                    const vector<GqlPatternElementType> &binding_types,
                                                    const vector<RelationalIdentityAccess> &identities) {
+	for (const auto binding : program.binding_indices) {
+		if (binding < identities.size() && !identities[binding].length_column.empty()) {
+			throw NotImplementedException("GQL path values of ANY SHORTEST; use PATH_LENGTH");
+		}
+	}
 	if (program.node_types.empty() ||
 	    static_cast<GqlExpressionType>(program.node_types[0]) != GqlExpressionType::FUNCTION ||
 	    program.values[0] != "__gql_path" || program.child_counts[0] + 1 != program.node_types.size()) {
@@ -2117,6 +2217,12 @@ static vector<idx_t> FindIndependentOptionalBranches(const RelationalMatchInput 
 	bool has_aggregate = false;
 	for (const auto &program : match.projections) {
 		for (idx_t node = 0; node < program.node_types.size(); node++) {
+			// These read their path's columns, which the union carries, not whole elements.
+			if (static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::FUNCTION &&
+			    (program.values[node] == "__gql_path_values" || program.values[node] == "path_length")) {
+				node = ExpressionEnd(program, node) - 1;
+				continue;
+			}
 			const auto type = static_cast<GqlTypeId>(program.result_types[node]);
 			if (type != GqlTypeId::NODE && type != GqlTypeId::EDGE && type != GqlTypeId::PATH) {
 				continue;
@@ -2259,6 +2365,40 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 	}
 	for (const auto &node : match.nodes) {
 		access_input.nodes.push_back({node.type, node.child, node.right, node.payload});
+	}
+	// Which vertex property each ALL SHORTEST edge reports for [n IN NODES(p) | n.property].
+	vector<string> path_value_columns(match.binding_types.size());
+	for (const auto &program : match.projections) {
+		for (idx_t node = 0; node < program.node_types.size(); node++) {
+			if (static_cast<GqlExpressionType>(program.node_types[node]) != GqlExpressionType::FUNCTION ||
+			    program.values[node] != "__gql_path_values") {
+				continue;
+			}
+			const auto path_root = node + 1;
+			const auto property = program.values[ExpressionEnd(program, path_root)];
+			for (idx_t child = path_root + 1; child < ExpressionEnd(program, path_root); child++) {
+				const auto binding = NumericCast<idx_t>(program.binding_indices[child]);
+				if (binding >= match.binding_types.size() || match.binding_types[binding] != GqlPatternElementType::EDGE) {
+					continue;
+				}
+				string column;
+				FindPropertyColumn(graph.vertex, property, column);
+				if (!path_value_columns[binding].empty() && path_value_columns[binding] != column) {
+					throw NotImplementedException("Node values of more than one property for a GQL path");
+				}
+				path_value_columns[binding] = column;
+			}
+		}
+	}
+	// Relational hops cannot report a distance, so a path search always runs over a current CSR.
+	for (const auto &stage : match.match_stages) {
+		for (const auto &pattern : stage.patterns) {
+			for (const auto &element : pattern.elements) {
+				if (element.shortest) {
+					GqlGetOrBuildCsrSnapshot(context, graph_name, GQL_CSR_FULL, nullptr, string());
+				}
+			}
+		}
 	}
 	auto access_plan = GqlOptimizeAccessPaths(context, graph_name, graph, access_input);
 	const bool cycle_pipeline = CanLowerCyclePipeline(match, graph, access_plan);
@@ -2568,6 +2708,25 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				}
 			}
 		}
+		// An edge bound by an earlier stage already names this vertex's ID, so a scan of
+		// every vertex would only find rows that a fetch can read directly.
+		vector<pair<idx_t, string>> bound_edge_endpoint(match.binding_types.size(), {DConstants::INVALID_INDEX, string()});
+		if (csr_snapshot && csr_snapshot->HasVertexRowIds() && StringUtil::CIEquals(graph.vertex.ownership, "MANAGED")) {
+			for (const auto &pattern : stage.patterns) {
+				for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+					const auto &edge = pattern.elements[index];
+					if (!available[edge.binding_index]) {
+						continue;
+					}
+					const auto &left = pattern.elements[index - 1];
+					const auto &right = pattern.elements[index + 1];
+					bound_edge_endpoint[left.binding_index] = {
+					    edge.binding_index, edge.reverse ? graph.edge_target_column : graph.edge_source_column};
+					bound_edge_endpoint[right.binding_index] = {
+					    edge.binding_index, edge.reverse ? graph.edge_source_column : graph.edge_target_column};
+				}
+			}
+		}
 		auto required_neighbor_label = [&](idx_t edge_binding, const GqlBindingAccessPath &path) {
 			for (idx_t binding = 0; binding < endpoint_edge.size(); binding++) {
 				if (endpoint_edge[binding] == edge_binding) {
@@ -2598,6 +2757,10 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		for (const auto &pattern : stage.patterns) {
 			for (idx_t index = 1; index < pattern.elements.size(); index += 2) {
 				const auto &edge = pattern.elements[index];
+				// ALL SHORTEST is given both endpoints, and its edge columns describe one step.
+				if (edge.shortest >= GQL_PATH_SEARCH_ALL) {
+					continue;
+				}
 				endpoint_joins.push_back({edge.binding_index, pattern.elements[index - 1].binding_index,
 				                          edge.reverse ? graph.edge_target_column : graph.edge_source_column});
 				endpoint_joins.push_back({edge.binding_index, pattern.elements[index + 1].binding_index,
@@ -2623,6 +2786,16 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 					component = left;
 				}
 			}
+		};
+		auto path_search = [&](idx_t binding) -> uint8_t {
+			for (const auto &pattern : stage.patterns) {
+				for (const auto &element : pattern.elements) {
+					if (element.binding_index == binding && element.shortest) {
+						return element.shortest;
+					}
+				}
+			}
+			return 0;
 		};
 		auto merge_connected_endpoints = [&]() {
 			for (const auto &endpoint : endpoint_joins) {
@@ -2729,6 +2902,43 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				    graph, graph_name, identities[path.expansion_vertex_binding].table_alias,
 				    identities[path.expansion_vertex_binding].column_name, path, identities[binding_index].table_alias,
 				    required_neighbor_label(binding_index, path));
+			} else if ((path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION ||
+			            path.type == GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION) &&
+			           path_search(binding_index) >= GQL_PATH_SEARCH_ALL) {
+				const auto search = path_search(binding_index);
+				if (path.minimum_repetitions > 1) {
+					throw NotImplementedException("ALL SHORTEST with a minimum path length above one");
+				}
+				idx_t other = DConstants::INVALID_INDEX;
+				bool from_left = true;
+				for (const auto &pattern : stage.patterns) {
+					for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+						if (pattern.elements[index].binding_index == binding_index) {
+							from_left = pattern.elements[index - 1].binding_index == path.expansion_vertex_binding;
+							other = pattern.elements[from_left ? index + 1 : index - 1].binding_index;
+						}
+					}
+				}
+				if (other == DConstants::INVALID_INDEX || !available[other] || !available[path.expansion_vertex_binding]) {
+					throw NotImplementedException("ALL SHORTEST requires both endpoints bound by an earlier MATCH");
+				}
+				source = CsrAllShortestTable(graph_name,
+				                             Column(identities[path.expansion_vertex_binding].table_alias,
+				                                    identities[path.expansion_vertex_binding].column_name),
+				                             Column(identities[other].table_alias, identities[other].column_name), from_left,
+				                             path, search == GQL_PATH_SEARCH_ALL_STEPS, path_value_columns[binding_index],
+				                             identities[binding_index].table_alias);
+				identities[binding_index].length_column = "__gql_length";
+				if (!path_value_columns[binding_index].empty()) {
+					identities[binding_index].values_column = "__gql_node_values";
+				}
+			} else if ((path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION ||
+			            path.type == GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION) &&
+			           path_search(binding_index) == GQL_PATH_SEARCH_ANY) {
+				source = CsrShortestExpansionTable(graph_name, identities[path.expansion_vertex_binding].table_alias,
+				                                   identities[path.expansion_vertex_binding].column_name, path,
+				                                   identities[binding_index].table_alias);
+				identities[binding_index].length_column = "__gql_length";
 			} else if (path.type == GqlBindingAccessPathType::CSR_PATH_EXPANSION) {
 				source = CsrPathExpansionTable(graph_name, identities[path.expansion_vertex_binding].table_alias,
 				                               identities[path.expansion_vertex_binding].column_name, path,
@@ -2753,6 +2963,16 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				                           Column(identities[path.fetch_id_binding].table_alias, path.fetch_id_column),
 				                           identities[binding_index].table_alias, path.fetch_columns);
 
+			} else if (path.type == GqlBindingAccessPathType::TABLE_SCAN &&
+			           match.binding_types[binding_index] == GqlPatternElementType::VERTEX &&
+			           stage_plan.introduced[binding_index] &&
+			           bound_edge_endpoint[binding_index].first != DConstants::INVALID_INDEX &&
+			           !access_input.vertex_fetch_columns[binding_index].empty()) {
+				const auto &endpoint = bound_edge_endpoint[binding_index];
+				source = ElementFetchTable(graph_name, "vertex",
+				                           Column(identities[endpoint.first].table_alias, endpoint.second),
+				                           identities[binding_index].table_alias,
+				                           access_input.vertex_fetch_columns[binding_index]);
 			} else {
 				const auto &table =
 				    match.binding_types[binding_index] == GqlPatternElementType::EDGE ? graph.edge : graph.vertex;
@@ -2860,6 +3080,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				const auto &edge = pattern.elements[element_index];
 				const auto &right = pattern.elements[element_index + 1];
 				auto edge_alias = identities[edge.binding_index].table_alias;
+				if (edge.shortest >= GQL_PATH_SEARCH_ALL) {
+					continue;
+				}
 				if (!joined[edge.binding_index] || !joined[left.binding_index]) {
 					result.conditions.push_back(
 					    Equal(Column(edge_alias, edge.reverse ? graph.edge_target_column : graph.edge_source_column),
@@ -3029,9 +3252,20 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		vector<BranchColumn> columns;
 		for (idx_t binding = 0; binding < binding_branch.size(); binding++) {
 			if (base_binding[binding] || binding_branch[binding] != DConstants::INVALID_INDEX) {
+				string length_name, values_name;
+				if (!identities[binding].length_column.empty()) {
+					length_name = "gql_length_" + to_string(binding);
+					columns.push_back({binding_branch[binding], identities[binding].table_alias,
+					                   identities[binding].length_column, length_name});
+				}
+				if (!identities[binding].values_column.empty()) {
+					values_name = "gql_values_" + to_string(binding);
+					columns.push_back({binding_branch[binding], identities[binding].table_alias,
+					                   identities[binding].values_column, values_name});
+				}
 				columns.push_back({binding_branch[binding], identities[binding].table_alias,
 				                   identities[binding].column_name, "gql_binding_" + to_string(binding)});
-				identities[binding] = {union_alias, columns.back().name};
+				identities[binding] = {union_alias, columns.back().name, length_name, values_name};
 			}
 		}
 		idx_t property_column = 0;
@@ -3198,7 +3432,8 @@ TableFunction GqlRelationalMatchFunction() {
 	                        LogicalType::BOOLEAN,
 	                        LogicalType::UBIGINT,
 	                        LogicalType::BOOLEAN,
-	                        LogicalType::UBIGINT},
+	                        LogicalType::UBIGINT,
+	                        LogicalType::LIST(LogicalType::UTINYINT)},
 	                       nullptr, nullptr);
 	function.bind_replace = RelationalMatchBindReplace;
 	return function;
