@@ -140,6 +140,61 @@ def check_concurrency(db):
     check('concurrency: fresh MATCH equals the table', actual, truth_rows)
 
 
+def check_wide_edge_ids_under_writes(db):
+    # IDs past 32 bits, written while readers read and a rebuild keeps replacing the CSR.
+    base = 2 ** 33
+    db.query("CALL gql_build_csr('delta')")
+    errors, stop = [], threading.Event()
+
+    def count(connection):
+        return connection.query(f"SELECT count(*) AS n FROM gql_data.graph_1_edges WHERE __gql_target_id = {HUB}")[0]['n']
+
+    def write(writer):
+        try:
+            for index in range(WRITES):
+                writer.query("INSERT INTO gql_data.graph_1_edges (__gql_edge_id, __gql_source_id, __gql_target_id, __gql_type) "
+                             f"VALUES ({base + index}, {30000 + index}, {HUB}, 'r')")
+        except Exception as error:
+            errors.append(f'writer: {error}')
+
+    def read(reader):
+        reader.query('SESSION SET GRAPH delta')
+        latest = 0
+        try:
+            while not stop.is_set():
+                rows = reader.query(f"SELECT edge_id FROM gql_neighbors('delta', {HUB}, 'in')")
+                if len(rows) < latest:
+                    errors.append(f'went backwards: {latest} then {len(rows)}')
+                latest = len(rows)
+                wide = [row['edge_id'] for row in rows if row['edge_id'] >= base]
+                if any(edge_id >= base + WRITES for edge_id in wide):
+                    errors.append(f'corrupted edge ID: {max(wide)}')
+        except Exception as error:
+            errors.append(f'reader: {error}')
+
+    def rebuild(builder):
+        try:
+            while not stop.is_set():
+                builder.query("CALL gql_build_csr('delta')")
+        except Exception as error:
+            errors.append(f'builder: {error}')
+
+    connections = [connection(db) for _ in range(3)]
+    writer = threading.Thread(target=write, args=(connections[0],))
+    others = [threading.Thread(target=read, args=(connections[1],)), threading.Thread(target=rebuild, args=(connections[2],))]
+    for thread in others + [writer]:
+        thread.start()
+    writer.join()
+    stop.set()
+    for thread in others:
+        thread.join()
+    check('wide edge IDs under writes: no errors', errors[:5], [])
+    rows = db.query(f"SELECT edge_id FROM gql_neighbors('delta', {HUB}, 'in')")
+    check('wide edge IDs under writes: all present', sorted(row['edge_id'] for row in rows if row['edge_id'] >= base),
+          list(range(base, base + WRITES)))
+    check('wide edge IDs under writes: counts agree', len(rows), count(db))
+
+
 def check_renamed_file(db, directory):
     expected = values(db.query('MATCH (a:A)-[:R]->(b) WHERE a.id = 7 RETURN b.id'))
     db.query('CHECKPOINT')
@@ -163,6 +218,7 @@ def main():
     check_prepared(db)
     check_appender(db)
     check_concurrency(db)
+    check_wide_edge_ids_under_writes(db)
     check_renamed_file(db, directory)
     print('FAILED: ' + ', '.join(failures) if failures else 'all passed')
     sys.exit(1 if failures else 0)

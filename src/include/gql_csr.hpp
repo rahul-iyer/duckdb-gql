@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/function/table_function.hpp"
 
@@ -93,7 +94,11 @@ public:
 
 	void Set(idx_t index, idx_t ordinal) {
 		if (compact) {
-			D_ASSERT(ordinal <= std::numeric_limits<uint32_t>::max());
+			// Only builds write here, so this costs reads nothing. A silent cut would corrupt the CSR.
+			if (ordinal > std::numeric_limits<uint32_t>::max()) {
+				throw InternalException("GQL CSR value %llu does not fit the width chosen for it",
+				                        static_cast<unsigned long long>(ordinal));
+			}
 			compact_values[index] = static_cast<uint32_t>(ordinal);
 		} else {
 			wide_values[index] = ordinal;
@@ -106,6 +111,10 @@ public:
 
 	idx_t size() const {
 		return compact ? compact_values.size() : wide_values.size();
+	}
+
+	bool empty() const {
+		return size() == 0;
 	}
 
 	uint8_t WidthBytes() const {
@@ -296,8 +305,9 @@ struct GqlCsrSnapshot {
 	//! Physical row IDs by CSR ordinal, independent of parallel import order.
 	//! Empty when canonical IDs already encode physical row IDs.
 	GqlCsrOrdinals vertex_row_ids;
-	//! The reverse, for the same snapshots. A row outside the build has no entry.
-	unordered_map<uint64_t, idx_t> vertex_ordinal_by_row_id;
+	//! The reverse, for the same snapshots, indexed by row ID. Gaps hold a stale ordinal, so
+	//! a read checks it against vertex_row_ids.
+	GqlCsrOrdinals vertex_ordinal_by_row_id;
 	bool edge_ids_match_rowids = false;
 	idx_t edge_count = 0;
 	GqlCsrVertexIds vertex_ids;
@@ -309,11 +319,11 @@ struct GqlCsrSnapshot {
 	vector<uint64_t> outgoing_offsets;
 	GqlCsrOrdinals outgoing_degrees;
 	GqlCsrOrdinals outgoing_neighbors;
-	vector<uint64_t> outgoing_edge_ids;
+	GqlCsrOrdinals outgoing_edge_ids;
 	GqlCsrEdgeLabels outgoing_label_ids;
 	vector<uint64_t> incoming_offsets;
 	GqlCsrOrdinals incoming_neighbors;
-	vector<uint64_t> incoming_edge_ids;
+	GqlCsrOrdinals incoming_edge_ids;
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
 	vector<GqlCsrEdgeLabelStats> edge_label_stats;

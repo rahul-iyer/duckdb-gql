@@ -297,12 +297,11 @@ bool GqlTryGetCsrOrdinalByRowId(const GqlCsrSnapshot &snapshot, uint64_t row_id,
 	if (snapshot.vertex_ids_match_rowids) {
 		return GqlTryGetCsrOrdinal(snapshot, row_id + 1, ordinal);
 	}
-	auto entry = snapshot.vertex_ordinal_by_row_id.find(row_id);
-	if (entry == snapshot.vertex_ordinal_by_row_id.end()) {
+	if (row_id >= snapshot.vertex_ordinal_by_row_id.size()) {
 		return false;
 	}
-	ordinal = entry->second;
-	return true;
+	ordinal = snapshot.vertex_ordinal_by_row_id[row_id];
+	return ordinal < snapshot.vertex_ids.size() && snapshot.vertex_row_ids[ordinal] == row_id;
 }
 
 static bool CsrTryGetOrdinal(const GqlCsrSnapshot &snapshot, const GqlCsrDelta *delta, uint64_t vertex_id,
@@ -647,9 +646,14 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		snapshot->vertex_row_ids = GqlCsrOrdinals();
 	}
 	if (build_vertex_row_ids && !snapshot->vertex_ids_match_rowids) {
-		snapshot->vertex_ordinal_by_row_id.reserve(snapshot->vertex_ids.size());
+		uint64_t row_count = 0;
 		for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
-			snapshot->vertex_ordinal_by_row_id.emplace(snapshot->vertex_row_ids[ordinal], ordinal);
+			row_count = MaxValue<uint64_t>(row_count, snapshot->vertex_row_ids[ordinal] + 1);
+		}
+		snapshot->vertex_ordinal_by_row_id.Resize(NumericCast<idx_t>(row_count),
+		                                          snapshot->vertex_ids.size() <= std::numeric_limits<uint32_t>::max());
+		for (idx_t ordinal = 0; ordinal < snapshot->vertex_ids.size(); ordinal++) {
+			snapshot->vertex_ordinal_by_row_id.Set(snapshot->vertex_row_ids[ordinal], ordinal);
 		}
 	}
 	snapshot->dense_vertex_ids = true;
@@ -743,6 +747,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	auto degree_rows = make_uniq<QueryResultStream<>>(connection.Submit(endpoint_projection));
 
 	idx_t counted_edges = 0;
+	uint64_t max_edge_id = 0;
 	snapshot->edge_ids_match_rowids = build_edge_ids && StringUtil::CIEquals(binding.edge.ownership, "MANAGED");
 	while (auto chunk = FetchCsrRows(*degree_rows)) {
 		UnifiedVectorFormat edge_id_data;
@@ -769,6 +774,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				                            "must not contain NULL values");
 			}
 			auto edge_id = build_edge_ids ? edge_id_values[edge_index] : NumericCast<uint64_t>(counted_edges + 1);
+			max_edge_id = MaxValue<uint64_t>(max_edge_id, edge_id);
 			if (build_edge_ids) {
 				snapshot->edge_ids_match_rowids =
 				    snapshot->edge_ids_match_rowids && edge_id > 0 && row_id_values[row_id_index] == edge_id - 1;
@@ -796,6 +802,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 		throw InternalException("GQL CSR edge scan returned an unexpected row count");
 	}
 	degree_rows.reset();
+	const bool compact_edge_ids = max_edge_id <= std::numeric_limits<uint32_t>::max();
 
 	if (build_outgoing) {
 		FinalizeOffsets(snapshot->outgoing_offsets);
@@ -811,7 +818,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			snapshot->outgoing_weights.resize(expected_edges);
 		}
 		if (build_edge_ids) {
-			snapshot->outgoing_edge_ids.resize(expected_edges);
+			snapshot->outgoing_edge_ids.Resize(expected_edges, compact_edge_ids);
 		}
 		if (build_edge_labels) {
 			snapshot->outgoing_label_ids.Reset(expected_edges, true, 0);
@@ -823,7 +830,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			snapshot->incoming_weights.resize(expected_edges);
 		}
 		if (build_edge_ids) {
-			snapshot->incoming_edge_ids.resize(expected_edges);
+			snapshot->incoming_edge_ids.Resize(expected_edges, compact_edge_ids);
 		}
 		if (build_edge_labels) {
 			snapshot->incoming_label_ids.Reset(expected_edges, true, 0);
@@ -919,7 +926,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 					snapshot->outgoing_weights[outgoing] = weight;
 				}
 				if (build_edge_ids) {
-					snapshot->outgoing_edge_ids[outgoing] = edge_id;
+					snapshot->outgoing_edge_ids.Set(outgoing, edge_id);
 				}
 				if (build_edge_labels && !edge_labels_uniform) {
 					snapshot->outgoing_label_ids.Set(outgoing, label_id);
@@ -932,7 +939,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 					snapshot->incoming_weights[incoming] = weight;
 				}
 				if (build_edge_ids) {
-					snapshot->incoming_edge_ids[incoming] = edge_id;
+					snapshot->incoming_edge_ids.Set(incoming, edge_id);
 				}
 				if (build_edge_labels && !edge_labels_uniform) {
 					snapshot->incoming_label_ids.Set(incoming, label_id);
@@ -1023,8 +1030,8 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    snapshot->outgoing_degrees.AllocatedBytes();
 	snapshot->identity_bytes = snapshot->vertex_ids.AllocatedBytes() +
 	                           snapshot->vertex_row_ids.AllocatedBytes() +
-	                           snapshot->outgoing_edge_ids.capacity() * sizeof(uint64_t) +
-	                           snapshot->incoming_edge_ids.capacity() * sizeof(uint64_t);
+	                           snapshot->outgoing_edge_ids.AllocatedBytes() +
+	                           snapshot->incoming_edge_ids.AllocatedBytes();
 	snapshot->label_bytes =
 	    snapshot->vertex_label_offsets.capacity() * sizeof(idx_t) +
 	    snapshot->vertex_label_ids.capacity() * sizeof(uint32_t) +
@@ -1035,7 +1042,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	    snapshot->weight_property.capacity() +
 	    (snapshot->outgoing_weights.capacity() + snapshot->incoming_weights.capacity()) * sizeof(double) +
 	    sizeof(GqlCsrSnapshot) + HashContainerStorageBytes(snapshot->ordinal_by_id) +
-	    HashContainerStorageBytes(snapshot->vertex_ordinal_by_row_id) +
+	    snapshot->vertex_ordinal_by_row_id.AllocatedBytes() +
 	    snapshot->source_catalog.capacity() + snapshot->vertex_table_key.capacity() +
 	    snapshot->edge_table_key.capacity() + snapshot->edge_label_stats.capacity() * sizeof(GqlCsrEdgeLabelStats);
 	snapshot->auxiliary_bytes += HashContainerStorageBytes(snapshot->source_write_generations);

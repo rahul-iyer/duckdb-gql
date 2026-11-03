@@ -402,7 +402,7 @@ static bool InVertexProjection(const vector<uint8_t> &mask, idx_t vertex) {
 
 template <class CALLBACK>
 static bool VisitRange(const vector<uint64_t> &offsets, const GqlCsrOrdinals &neighbors,
-                       const vector<uint64_t> &edge_ids, const GqlCsrEdgeLabels &label_ids, idx_t vertex,
+                       const GqlCsrOrdinals &edge_ids, const GqlCsrEdgeLabels &label_ids, idx_t vertex,
                        bool filter_label, uint32_t required_label, CALLBACK &&callback) {
 	for (idx_t offset = offsets[vertex]; offset < offsets[vertex + 1]; offset++) {
 		if (filter_label && label_ids[offset] != required_label) {
@@ -579,7 +579,7 @@ template <class VISITOR>
 static void VisitWeightedNeighbors(const WeightedSsspBindData &data, const WeightedSsspState &state, idx_t vertex,
                                    VISITOR &&visitor) {
 	auto &snapshot = *state.snapshot;
-	auto visit = [&](const vector<uint64_t> &offsets, const GqlCsrOrdinals &neighbors, const vector<uint64_t> &edge_ids,
+	auto visit = [&](const vector<uint64_t> &offsets, const GqlCsrOrdinals &neighbors, const GqlCsrOrdinals &edge_ids,
 	                 const GqlCsrEdgeLabels &labels, const vector<double> &weights) {
 		for (idx_t edge = offsets[vertex]; edge < offsets[vertex + 1]; edge++) {
 			auto neighbor = neighbors[edge];

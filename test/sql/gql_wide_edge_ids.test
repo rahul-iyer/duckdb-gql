@@ -1,0 +1,115 @@
+# name: test/sql/gql_wide_edge_ids.test
+# description: Edge IDs past 32 bits survive builds, the delta, and rebuilds that change the storage width
+# group: [gql]
+
+require duckgql
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'P',10),(2,'P',20),(3,'P',30)) v(":ID",":LABEL","score:int")) TO '{TEST_DIR}/wide_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R'),(2,3,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/wide_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH wide ANY
+
+statement ok
+COPY GRAPH wide FROM (VERTICES '{TEST_DIR}/wide_nodes.csv', EDGES '{TEST_DIR}/wide_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH wide
+
+statement ok
+CALL gql_build_csr('wide')
+
+statement ok
+SET VARIABLE builds = (SELECT build_count FROM gql_csr_stats('wide'))
+
+# The IDs start small, so they take four bytes. The largest value that fits still does.
+query II rowsort
+SELECT neighbor_id, edge_id < 100 FROM gql_neighbors('wide', 2, 'in')
+----
+1	true
+
+statement ok
+INSERT INTO gql_data.graph_1_edges (__gql_edge_id, __gql_source_id, __gql_target_id, __gql_type) VALUES (4294967295, 1, 3, 'r')
+
+statement ok
+CALL gql_build_csr('wide')
+
+query II
+SELECT neighbor_id, edge_id FROM gql_neighbors('wide', 1, 'out') WHERE neighbor_id = 3
+----
+3	4294967295
+
+# One past it needs eight bytes for the whole CSR, and the others keep their values.
+statement ok
+INSERT INTO gql_data.graph_1_edges (__gql_edge_id, __gql_source_id, __gql_target_id, __gql_type) VALUES (4294967296, 3, 1, 'r')
+
+statement ok
+CALL gql_build_csr('wide')
+
+query II rowsort
+SELECT neighbor_id, edge_id FROM gql_neighbors('wide', 1, 'in')
+----
+3	4294967296
+
+query II
+SELECT neighbor_id, edge_id FROM gql_neighbors('wide', 1, 'out') WHERE neighbor_id = 3
+----
+3	4294967295
+
+query I
+SELECT __gql_edge_id FROM (VALUES (3::UBIGINT)) seed(id),
+LATERAL gql_csr_expand(struct_pack(graph_name := 'wide', vertex_id := seed.id, direction := 'out', edge_label := 'r')) e
+----
+4294967296
+
+# Row IDs no longer match these IDs, so the next wide ID stays in the delta.
+statement ok
+INSERT INTO gql_data.graph_1_edges (__gql_edge_id, __gql_source_id, __gql_target_id, __gql_type) VALUES (9000000000000, 3, 2, 'r')
+
+query I
+SELECT delta_edge_count FROM gql_csr_stats('wide')
+----
+1
+
+query II rowsort
+SELECT neighbor_id, edge_id FROM gql_neighbors('wide', 3, 'out')
+----
+1	4294967296
+2	9000000000000
+
+# Paths, searches, and a rebuild folding the delta into eight-byte arrays all agree.
+query I rowsort
+MATCH (a:P)-[:R]->{1,2}(b) WHERE a.score = 30 RETURN DISTINCT b.score
+----
+10
+20
+30
+
+statement ok
+CALL gql_build_csr('wide')
+
+query II
+SELECT delta_edge_count, edge_count FROM gql_csr_stats('wide')
+----
+0	5
+
+query II rowsort
+SELECT neighbor_id, edge_id FROM gql_neighbors('wide', 3, 'out')
+----
+1	4294967296
+2	9000000000000
+
+# Removing the wide IDs and rebuilding goes back to four bytes.
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_edge_id > 4294967295
+
+statement ok
+CALL gql_build_csr('wide')
+
+query I rowsort
+SELECT edge_id = 4294967295 FROM gql_neighbors('wide', 3, 'in') WHERE neighbor_id = 1
+----
+true
