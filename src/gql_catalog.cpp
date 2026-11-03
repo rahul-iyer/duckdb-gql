@@ -1101,6 +1101,10 @@ static bool LoadTableGraph(ClientContext &context, const string &graph_name, Gql
 		target->schema_name = tables->GetValue(3, row).GetValue<string>();
 		target->table_name = tables->GetValue(4, row).GetValue<string>();
 		target->ownership = tables->GetValue(6, row).GetValue<string>();
+		// Managed tables live beside this metadata, whose catalog is named after the file.
+		if (target->ownership == "MANAGED") {
+			target->catalog_name = MetadataDatabase(context)->GetName().GetIdentifierName();
+		}
 		auto key_columns_value = tables->GetValue(5, row);
 		const auto &key_columns = ListValue::GetChildren(key_columns_value);
 		if (kind == "EDGE" && target->ownership == "REFERENCED" && key_columns.empty()) {

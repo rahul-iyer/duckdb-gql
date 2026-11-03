@@ -2391,10 +2391,17 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 	}
 	// Relational hops cannot report a distance, so a path search always runs over a current CSR.
+	// Each relational hop of a long path is a join per repetition, which costs more than a build.
+	static constexpr idx_t MAX_RELATIONAL_PATH_HOPS = 4;
+	const bool can_build_for_paths = context.transaction.IsAutoCommit() &&
+	                                 StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") &&
+	                                 StringUtil::CIEquals(graph.edge.ownership, "MANAGED");
 	for (const auto &stage : match.match_stages) {
 		for (const auto &pattern : stage.patterns) {
 			for (const auto &element : pattern.elements) {
-				if (element.shortest && !GqlTryGetCsrSnapshot(context, graph_name)) {
+				const bool long_path = element.quantified && can_build_for_paths &&
+				                       (element.unbounded || element.maximum_repetitions > MAX_RELATIONAL_PATH_HOPS);
+				if ((element.shortest || long_path) && !GqlTryGetCsrSnapshot(context, graph_name)) {
 					GqlGetOrBuildCsrSnapshot(context, graph_name, GQL_CSR_FULL, nullptr, string());
 				}
 			}

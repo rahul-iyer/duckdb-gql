@@ -105,6 +105,36 @@ static GqlType NumericResult(const GqlType &left, const GqlType &right) {
 	return result;
 }
 
+// Planners treat a quantified edge as a factor only when it is alone in its pattern. Edges of
+// different types cannot be the same edge, so splitting at the shared vertices keeps the
+// pattern's answers. The rest would need trail checks across the factors, and stay whole.
+static void SplitQuantifiedPattern(GqlBoundPattern pattern, bool can_split, vector<GqlBoundPattern> &result) {
+	bool has_quantified = false;
+	unordered_set<string> labels;
+	idx_t edges = 0;
+	for (idx_t index = 1; index < pattern.elements.size(); index += 2) {
+		const auto &edge = pattern.elements[index];
+		has_quantified = has_quantified || edge.quantified;
+		can_split = can_split && edge.labels.size() == 1 && !edge.shortest;
+		if (edge.labels.size() == 1) {
+			labels.insert(StringUtil::Lower(edge.labels[0]));
+		}
+		edges++;
+	}
+	if (!has_quantified || edges < 2 || !can_split || labels.size() != edges) {
+		result.push_back(std::move(pattern));
+		return;
+	}
+	for (idx_t index = 1; index < pattern.elements.size(); index += 2) {
+		GqlBoundPattern part;
+		part.optional = pattern.optional;
+		part.optional_stage = pattern.optional_stage;
+		part.source = pattern.source;
+		part.elements = {pattern.elements[index - 1], pattern.elements[index], pattern.elements[index + 1]};
+		result.push_back(std::move(part));
+	}
+}
+
 void GqlBinder::ResetScopes() {
 	scopes.clear();
 	scopes.emplace_back();
@@ -762,7 +792,7 @@ GqlLogicalPlan GqlBinder::Bind(const GqlMatchStatement &statement) {
 				if (pattern.optional != clause.optional || pattern.optional_stage != clause.optional_stage) {
 					throw InternalException("GQL MATCH clause optionality disagrees with its pattern");
 				}
-				match_stage->patterns.push_back(bind_pattern(pattern));
+				SplitQuantifiedPattern(bind_pattern(pattern), pattern.variable.IsEmpty(), match_stage->patterns);
 				bound_patterns[pattern_index] = true;
 			}
 			shared_ptr<GqlLogicalOperator> stage = std::move(match_stage);

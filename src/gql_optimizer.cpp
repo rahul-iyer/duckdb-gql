@@ -1863,6 +1863,10 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 				    stage_plan.bindings[element.binding_index].type != GqlBindingAccessPathType::CSR_PATH_EXPANSION &&
 				    stage_plan.bindings[element.binding_index].type !=
 				        GqlBindingAccessPathType::RELATIONAL_PATH_EXPANSION) {
+					if (pattern.elements.size() > 3) {
+						throw NotImplementedException("A GQL quantified edge in a longer pattern must differ in type "
+						                              "from the pattern's other edges");
+					}
 					throw InvalidInputException("Unbounded composed GQL paths require a current CSR snapshot; "
 					                            "run CALL gql_build_csr('%s') first",
 					                            graph_name);

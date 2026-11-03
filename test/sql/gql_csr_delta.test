@@ -493,6 +493,42 @@ SELECT count(*) FROM gql_csr_vertices('delta', 'A') v WHERE v.__gql_id IN (SELEC
 ----
 2
 
+# Without a CSR a long path builds one, since relational hops would be a join each.
+statement ok
+CALL gql_build_csr('delta')
+
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_edge_id = (SELECT max(__gql_edge_id) FROM gql_data.graph_1_edges)
+
+statement error
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out')
+----
+has not been built
+
+query I
+MATCH (a:A)-[:R]->{1,5}(b) WHERE a.score = 100 RETURN count(*)
+----
+0
+
+query I
+SELECT count(*) > 0 FROM gql_neighbors('delta', 1, 'out')
+----
+true
+
+# A short one stays relational.
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_edge_id = (SELECT max(__gql_edge_id) FROM gql_data.graph_1_edges)
+
+query I
+MATCH (a:A)-[:R]->{1,2}(b) WHERE a.score = 100 RETURN count(*)
+----
+0
+
+statement error
+SELECT count(*) FROM gql_neighbors('delta', 1, 'out')
+----
+has not been built
+
 # Dropping and replacing the graph does not reuse the old CSR or its delta.
 statement ok
 DROP GRAPH delta

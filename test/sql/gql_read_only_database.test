@@ -1,0 +1,47 @@
+# name: test/sql/gql_read_only_database.test
+# description: A graph in a read-only database can be selected, read, and traversed over a CSR, and writes say why they fail
+# group: [gql]
+
+require duckgql
+
+load __TEST_DIR__/gql_read_only.db
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'A',10),(2,'A',20)) v(":ID",":LABEL","score:int")) TO '{TEST_DIR}/ro_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/ro_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH ro ANY
+
+statement ok
+COPY GRAPH ro FROM (VERTICES '{TEST_DIR}/ro_nodes.csv', EDGES '{TEST_DIR}/ro_edges.csv') FORMAT GRAPH
+
+load __TEST_DIR__/gql_read_only.db readonly
+
+statement ok
+SESSION SET GRAPH ro
+
+query I
+MATCH (a:A)-[:R]->(b) RETURN b.score
+----
+20
+
+statement ok
+CALL gql_build_csr('ro')
+
+query I
+SELECT neighbor_id FROM gql_neighbors('ro', 1, 'out')
+----
+2
+
+query I
+MATCH (a:A)-[:R]->{1,5}(b) RETURN b.score
+----
+20
+
+statement error
+INSERT (:A {score: 30})
+----
+read-only

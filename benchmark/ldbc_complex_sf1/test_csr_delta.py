@@ -4,7 +4,7 @@
 Covers what sqllogictest cannot: prepared MATCH statements, appenders, and threads. Run
 from the checkout after building the release library; exits non-zero on any failure.
 """
-import sys, tempfile, threading
+import shutil, sys, tempfile, threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -140,6 +140,22 @@ def check_concurrency(db):
     check('concurrency: fresh MATCH equals the table', actual, truth_rows)
 
 
+def check_renamed_file(db, directory):
+    expected = values(db.query('MATCH (a:A)-[:R]->(b) WHERE a.id = 7 RETURN b.id'))
+    db.query('CHECKPOINT')
+    db.close()
+    shutil.move(f'{directory}/test.duckdb', f'{directory}/renamed.duckdb')
+    renamed = DB(f'{directory}/renamed.duckdb', threads=4)
+    renamed.query('SESSION SET GRAPH delta')
+    check('renamed file: relational read', values(renamed.query('MATCH (a:A)-[:R]->(b) WHERE a.id = 7 RETURN b.id')), expected)
+    renamed.query("CALL gql_build_csr('delta')")
+    check('renamed file: read over the CSR', values(renamed.query('MATCH (a:A)-[:R]->(b) WHERE a.id = 7 RETURN b.id')), expected)
+    renamed.query('MATCH (a:A), (b:A) WHERE a.id = 7 AND b.id = 9 INSERT (a)-[:R]->(b)')
+    check('renamed file: write reaches the delta', stats(renamed, 'delta_edge_count'), (1,))
+    check('renamed file: write visible', (9,) in values(renamed.query('MATCH (a:A)-[:R]->(b) WHERE a.id = 7 RETURN b.id')), True)
+    renamed.close()
+
+
 def main():
     directory = tempfile.mkdtemp(prefix='gql_csr_delta_')
     db = DB(f'{directory}/test.duckdb', threads=4)
@@ -147,6 +163,7 @@ def main():
     check_prepared(db)
     check_appender(db)
     check_concurrency(db)
+    check_renamed_file(db, directory)
     print('FAILED: ' + ', '.join(failures) if failures else 'all passed')
     sys.exit(1 if failures else 0)
 

@@ -1,0 +1,91 @@
+# name: test/sql/gql_composed_quantified.test
+# description: A quantified edge beside other edges of different types in one pattern, with answers worked out by hand
+# group: [gql]
+
+require duckgql
+
+# 1 -R-> 2 -T-> 3 -S-> 4 -S-> 5, and 2 -T-> 6, which has no S edges.
+statement ok
+COPY (SELECT * FROM (VALUES (1,'A','a1'),(2,'B','b2'),(3,'C','c3'),(4,'C','c4'),(5,'C','c5'),(6,'C','c6')) v(":ID",":LABEL","name:string")) TO '{TEST_DIR}/composed_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R'),(2,3,'T'),(3,4,'S'),(4,5,'S'),(2,6,'T')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/composed_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH composed ANY
+
+statement ok
+COPY GRAPH composed FROM (VERTICES '{TEST_DIR}/composed_nodes.csv', EDGES '{TEST_DIR}/composed_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH composed
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Short bounds, which a graph without a CSR answers relationally.
+query I rowsort
+MATCH (a:A)-[:R]->(b)-[:T]->(c:C)-[:S]->{1,3}(d:C) RETURN d.name
+----
+c4
+c5
+
+statement ok
+CALL gql_build_csr('composed')
+
+# The same patterns over the CSR, with the quantified edge at the end, middle and start.
+query I rowsort
+MATCH (a:A)-[:R]->(b)-[:T]->(c:C)-[:S]->{1,3}(d:C) RETURN d.name
+----
+c4
+c5
+
+query II rowsort
+MATCH (a:A)-[:R]->(b)-[:T]->(c:C)-[:S]->{1,30}(d:C) WHERE a.name = 'a1' AND d.name = 'c5' RETURN c.name, d.name
+----
+c3	c5
+
+query I rowsort
+MATCH (a:A)-[:R]->{1,2}(b)-[:T]->(c:C) RETURN c.name
+----
+c3
+c6
+
+query I
+MATCH (a:A)-[:R]->(b)-[:T]->{1,2}(c:C)-[:S]->(d:C) RETURN d.name
+----
+c4
+
+query I rowsort
+MATCH (x:C)-[:S]->{1,2}(y:C)<-[:T]-(z:B) RETURN x.name
+----
+
+query I
+MATCH (b:B)-[:T]->(c:C)-[:S]->*(d:C) WHERE d.name = 'c6' RETURN b.name
+----
+b2
+
+query I rowsort
+MATCH (b:B)-[:T]->(c:C)-[:S]->+(d:C) RETURN d.name
+----
+c4
+c5
+
+# Bound before, then OPTIONAL.
+query II rowsort
+MATCH (b:B)-[:T]->(c:C)
+OPTIONAL MATCH (b)-[:T]->(c)-[:S]->{1,3}(d:C) WHERE d.name = 'c5'
+RETURN c.name, d.name
+----
+c3	c5
+c6	NULL
+
+# Edges of the same type could be one edge, which needs trail checks across the factors.
+statement error
+MATCH (a:C)-[:S]->(b:C)-[:S]->{1,2}(c:C) RETURN c.name
+----
+must differ in type
+
+endloop

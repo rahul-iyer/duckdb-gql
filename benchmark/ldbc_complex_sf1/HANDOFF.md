@@ -2,7 +2,38 @@
 
 Updated: 2026-11-03 local time. Repository: `/Users/rahuliyer/duckdb-gql`.
 
-## Incremental CSR (newest; supersedes the stale-read figures in the next section)
+## Long paths, composed paths, read-only files (newest)
+
+- Quantified edges over 4 hops or unbounded build a CSR before planning on managed graphs outside explicit
+  transactions, as path searches do. A {1,30} path over 71 vertices took 1.25 s relationally.
+- `(a)-[:R]->(b)-[:S]->{1,3}(c)` is split at shared vertices in the binder when edge types differ. Same-type
+  edges would need trail checks across factors, and now say so instead of asking for `gql_build_csr`.
+- Renamed database files work: managed tables resolve to the metadata's catalog when loaded.
+- Read-only files work: `GqlEnsureStorage` no longer tries to create metadata in one.
+
+SF10 on the delta build: 16/16 validated on both planners, and legacy no longer beats cost (14 timed queries
+942 ms cost, 951 ms legacy; IC11 5.6 vs 6.6). IC1, IC7, IC10, IC12 and IC14 are still listed as unsupported in
+that harness, whose text predates them.
+
+Tried and reverted:
+
+- Fetch cost at 24 + width/4 per row, from SF10 measurements of 17 units warm and 107 cold at 150 bytes. SF10
+  IC2 172 -> 126 and IC4 69 -> 53, but SF10 IC11 5.6 -> 26.7, and SF1 IC10 13.3 -> 32.3, IC3 16.9 -> 33.8, IC9
+  66.7 -> 78.2. The better lead: SF10 IC2 reads 30M rows, and a scan filtered by the join's IDs took 47 ms.
+- `cost` as the default: 6 test files fail, mostly legacy plan shapes, and each stops at its first failure. The
+  user's call, since it means pinning those tests to legacy.
+
+The IC12 internal error is not root-caused. It needs 2+ threads, real writes, and that plan's join order
+(`disabled_optimizers` of `join_order`, `build_side_probe_side` or `unused_columns` avoid it; perfect hash
+and caching operators are not involved). **It is still reachable in an explicit transaction**, where no CSR is
+available. Reproduce: 100 stream writes, `BEGIN`, IC12. It can invalidate the database.
+
+Next: DuckLake writes, not started. Per `docs/ducklake-zero-copy-design.md`: `ACCESS_MODE 'READ_WRITE'`,
+caller-supplied keys since DuckLake has no sequences, one DuckLake transaction per command, CSR freshness from
+the snapshot ID. Referenced vertex IDs are dense and snapshot-local, so targets must be mapped to source keys
+before anything is written, and mutation lowering needs non-canonical columns. Only the design survey is done.
+
+## Incremental CSR (supersedes the stale-read figures in the next section)
 
 Inserts reach reads through an immutable `GqlCsrDelta` over the immutable snapshot. Mixed workload on
 the cost planner, right after writes, before -> after (ms): IC8 86.5 -> 4.9, IC10 919 -> 19.3,
@@ -49,13 +80,10 @@ rebuild (`fast`), and after a write that removes the CSR (`stale`, forced by an 
 
 Open, in priority order:
 
-1. **Internal error:** IC12, cost planner, with no CSR, which now takes a delete, update or prepared write:
-   `dict-surviving join ... build pipeline is not single-source`. It can invalidate the database. Not
-   caused by fence removal or the delim setting; the plan has 477 scans and estimates near 5.9e18 rows.
-   Not yet proven a DuckDB bug. `--skip-stale 12` keeps the harness running.
+1. **Internal error:** IC12, cost planner, no CSR. Outside transactions a long path now builds a CSR; see the
+   newest section for what remains.
 2. Incremental CSR: done, see above.
-3. SF10: legacy beats cost (IC11, IC5, IC4), and IC2 regressed since August on both planners.
-4. Renaming a database file breaks its graph: metadata stores the catalog name.
+3. SF10: rerun, cost has caught up with legacy. Scans of 30M to 286M rows remain the largest gap there.
 
 ## GQL query parameters (newest; removes the "no parameters" limit noted below)
 

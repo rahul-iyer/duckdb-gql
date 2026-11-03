@@ -3,6 +3,8 @@
 #include "gql_catalog.hpp"
 #include "gql_sql_utils.hpp"
 
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -40,6 +42,12 @@ string GqlGetSelectedGraph(ClientContext &context) {
 }
 
 void GqlEnsureStorage(Connection &connection) {
+	// A read-only file can't be migrated, and is read with the metadata it has.
+	auto &manager = DatabaseManager::Get(*connection.context);
+	auto database = manager.GetDatabase(manager.GetDefaultDatabase());
+	if (database && database->IsReadOnly()) {
+		return;
+	}
 	GqlQuery(connection, "CREATE SCHEMA IF NOT EXISTS gql_internal");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.graph_id_seq START 1");
 	GqlQuery(connection, "CREATE SEQUENCE IF NOT EXISTS gql_internal.element_table_id_seq START 1");
