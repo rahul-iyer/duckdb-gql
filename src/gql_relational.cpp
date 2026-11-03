@@ -1191,10 +1191,14 @@ static bool ContainsAggregate(const GqlExpressionProgram &program) {
 }
 
 static bool AllowsDuplicateElimination(const GqlExpressionProgram &program) {
-	if (ContainsAggregate(program)) {
-		return false;
-	}
 	for (idx_t node = 0; node < program.node_types.size(); node++) {
+		if (program.aggregate[node]) {
+			const auto &name = program.values[node];
+			if (name != "min" && name != "max" && !((name == "count" || name == "collect_list") && program.distinct[node])) {
+				return false;
+			}
+			continue;
+		}
 		if (static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::FUNCTION &&
 		    !StringUtil::CIEquals(program.values[node], "coalesce") &&
 		    !StringUtil::CIEquals(program.values[node], "element_id")) {
@@ -1305,6 +1309,14 @@ static unique_ptr<TableRef> CsrPathExpansionTable(const string &graph_name, cons
 	AppendStructField(fields, Constant(Value::UBIGINT(path.minimum_repetitions)), "minimum_repetitions");
 	AppendStructField(fields, Constant(Value::UBIGINT(path.maximum_repetitions)), "maximum_repetitions");
 	AppendStructField(fields, Constant(Value(path.unbounded)), "unbounded");
+	vector<unique_ptr<ParsedExpression>> search_fields;
+	for (const auto &field : fields) {
+		search_fields.push_back(field->Copy());
+	}
+	AppendStructField(search_fields, Constant(Value(LogicalType::UBIGINT)), "target_id");
+	vector<unique_ptr<ParsedExpression>> search_arguments;
+	search_arguments.push_back(Function("struct_pack", std::move(search_fields)));
+	auto search = make_uniq<FunctionExpression>("gql_csr_shortest_expand", std::move(search_arguments));
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(Function("struct_pack", std::move(fields)));
 	auto result = make_uniq<TableFunctionRef>();
@@ -1312,6 +1324,13 @@ static unique_ptr<TableRef> CsrPathExpansionTable(const string &graph_name, cons
 	result->alias = Identifier(edge_alias);
 	if (path.distinct_endpoints) {
 		result->alias = Identifier(edge_alias + "_trails");
+		// Only endpoints are observed. From one hop on, what a trail can reach is what a walk can, since
+		// a shortest walk repeats no edge, so a search replaces enumerating every trail. Trails can't.
+		if (path.minimum_repetitions == 1) {
+			result = make_uniq<TableFunctionRef>();
+			result->function = std::move(search);
+			result->alias = Identifier(edge_alias + "_trails");
+		}
 		auto select = make_uniq<SelectNode>();
 		select->select_list.push_back(Aliased(Constant(Value::UBIGINT(0)), "__gql_edge_id"));
 		for (const auto &column : {"__gql_source_id", "__gql_target_id", "__gql_type"}) {
@@ -2344,7 +2363,11 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 	access_input.projections = match.projections;
 	access_input.predicates = match.predicates;
 	access_input.vertex_fetch_columns = std::move(vertex_fetch_columns);
+	// Without DISTINCT, duplicates can only go unnoticed under aggregates that ignore them.
 	access_input.duplicate_insensitive = match.modifiers.distinct;
+	for (const auto &program : match.projections) {
+		access_input.duplicate_insensitive |= ContainsAggregate(program);
+	}
 	for (const auto &program : match.projections) {
 		access_input.duplicate_insensitive &= AllowsDuplicateElimination(program);
 	}

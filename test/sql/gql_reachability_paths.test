@@ -1,0 +1,114 @@
+# name: test/sql/gql_reachability_paths.test
+# description: Paths observed only through distinct endpoints run as a search, with answers worked out by hand
+# group: [gql]
+
+require duckgql
+
+# 1 -> 2 -> 3 -> 4, a shortcut 1 -> 3, 4 -> 1 closes a cycle, and 1 -> 2 is doubled.
+# 6 -> 5 is out of reach of the others.
+statement ok
+COPY (SELECT i AS ":ID", 'P' AS ":LABEL", i::INTEGER AS "id:int" FROM range(1, 7) t(i)) TO '{TEST_DIR}/reach_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'K'),(1,2,'K'),(2,3,'K'),(3,4,'K'),(1,3,'K'),(4,1,'K'),(6,5,'K')) e(":START_ID",":END_ID",":TYPE")) TO '{TEST_DIR}/reach_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH reach ANY
+
+statement ok
+COPY GRAPH reach FROM (VERTICES '{TEST_DIR}/reach_nodes.csv', EDGES '{TEST_DIR}/reach_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH reach
+
+statement ok
+CALL gql_build_csr('reach')
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+query II
+EXPLAIN MATCH (a:P)-[:K]->{1,6}(b) WHERE a.id = 1 RETURN count(DISTINCT b.id)
+----
+physical_plan	<REGEX>:.*gql_csr_shortest_expand.*
+
+# The start is reachable through the cycle.
+query I
+MATCH (a:P)-[:K]->{1,6}(b) WHERE a.id = 1 RETURN count(DISTINCT b.id)
+----
+4
+
+query I rowsort
+MATCH (a:P)-[:K]->{1,2}(b) WHERE a.id = 1 RETURN DISTINCT b.id
+----
+2
+3
+4
+
+query II
+MATCH (a:P)-[:K]->{1,6}(b) WHERE a.id = 1 RETURN min(b.id), max(b.id)
+----
+1	4
+
+# Unbounded, and per group of many starts.
+query I
+MATCH (a:P)-[:K]->+(b) WHERE a.id = 6 RETURN count(DISTINCT b.id)
+----
+1
+
+query II rowsort
+MATCH (a:P)-[:K]->{1,2}(b) WHERE a.id <= 2 RETURN a.id, count(DISTINCT b.id)
+----
+1	3
+2	2
+
+# A minimum above one is about trails, which a search can't answer: 1 -> 3 -> 4 -> 1 and
+# 1 -> 2 -> 3 -> 4 and 1 -> 2 -> 3 are the ways of length two or three, not everything reached.
+query I rowsort
+MATCH (a:P)-[:K]->{2,3}(b) WHERE a.id = 1 RETURN DISTINCT b.id
+----
+1
+3
+4
+
+# Star includes the start at zero hops.
+query I rowsort
+MATCH (a:P)-[:K]->*(b) WHERE a.id = 6 RETURN DISTINCT b.id
+----
+5
+6
+
+# Anything that counts paths still enumerates them: to 2 twice, to 3 once directly and twice via 2, to 4 once.
+query I
+MATCH (a:P)-[:K]->{1,2}(b) WHERE a.id = 1 RETURN count(*)
+----
+6
+
+query I
+MATCH (a:P)-[:K]->{1,2}(b) WHERE a.id = 1 RETURN count(b.id)
+----
+6
+
+query II
+EXPLAIN MATCH (a:P)-[:K]->{1,2}(b) WHERE a.id = 1 RETURN count(*)
+----
+physical_plan	<!REGEX>:.*gql_csr_shortest_expand.*
+
+# Inserts reach the search through the delta.
+statement ok
+MATCH (a:P), (b:P) WHERE a.id = 4 AND b.id = 5 INSERT (a)-[:K]->(b)
+
+query I
+MATCH (a:P)-[:K]->{1,6}(b) WHERE a.id = 1 RETURN count(DISTINCT b.id)
+----
+5
+
+statement ok
+DELETE FROM gql_data.graph_1_edges WHERE __gql_target_id = 5 AND __gql_source_id = 4
+
+statement ok
+CALL gql_build_csr('reach')
+
+endloop
