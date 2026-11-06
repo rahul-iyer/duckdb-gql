@@ -38,6 +38,26 @@ storage and execution engine, plus an explicit CSR layer for graph algorithms.
   persistence, vectorized scans, joins, aggregation, and recursive CTE
   execution beneath the GQL layer.
 
+The implemented `INSERT`, `LET`, and `FOR` subsets correspond to clauses
+13.2, 14.7, and 14.8 of the GQL second-edition working draft 2IWD12
+(2026-09-01). This describes implementation coverage, not a claim of conformance
+to those clauses or the complete optional features:
+
+- `INSERT` accepts standalone comma-separated node and directed-path patterns
+  and fixed directed `MATCH`-and-`INSERT` patterns. Undirected insertion and
+  general modification pipelines remain incomplete. See
+  [`gql_open_gql_extensions.test`](test/sql/gql_open_gql_extensions.test) and
+  [`gql_native_insert.test`](test/sql/gql_native_insert.test).
+- `LET` supports untyped scalar and record bindings, including `LET VALUE`,
+  comma-separated definitions, and references to preceding definitions. Typed
+  definitions and the complete variable/type system remain incomplete. See
+  [`gql_open_gql_extensions.test`](test/sql/gql_open_gql_extensions.test).
+- `FOR` supports expanding an `ALL SHORTEST` edge group variable for use in a
+  later query stage. General list/binding-table sources, `WITH ORDINALITY`,
+  and `WITH OFFSET` remain unsupported. See
+  [`gql_all_shortest.test`](test/sql/gql_all_shortest.test), including its
+  expected diagnostics for unsupported forms.
+
 ## Install
 
 DuckGQL is available from DuckDB Community Extensions:
@@ -673,8 +693,8 @@ alternative.
 - Bulk import currently accepts one vertex file, one edge file, at most one
   scalar vertex label column, and one edge type column. Every relationship row
   must contain exactly one non-empty type.
-- Multiple-path and undirected insertion, general runtime property maps, and
-  open-graph schema evolution remain incomplete.
+- Undirected insertion, general runtime property maps, and open-graph schema
+  evolution remain incomplete.
 - Path modes, searches, shortest-path groups, query composition, procedure
   semantics, named graph types, typed storage enforcement, and the complete
   GQL value/type system remain incomplete.
