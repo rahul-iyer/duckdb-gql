@@ -1158,6 +1158,9 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			}
 			arguments.push_back(LowerExpression(program, cursor, property_aliases, identities, desired));
 		}
+		if (name == "power") {
+			lowered_name = "gql_power";
+		}
 		if (name == "coalesce") {
 			return make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE, std::move(arguments));
 		}

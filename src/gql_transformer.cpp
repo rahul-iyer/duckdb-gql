@@ -2035,6 +2035,22 @@ bool GqlTransformer::TransformNumericFunction(GQLParser::NumericValueFunctionCon
 	if (auto exponential = context.exponentialFunction()) {
 		return make_function("exp", *exponential->numericValueExpression());
 	}
+	if (auto power = context.powerFunction()) {
+		auto expression = make_shared_ptr<GqlExpression>();
+		expression->type = GqlExpressionType::FUNCTION;
+		expression->function_name = "power";
+		expression->source = SourceRange(context);
+		shared_ptr<GqlExpression> base;
+		shared_ptr<GqlExpression> exponent;
+		if (!TransformNumericExpression(*power->numericValueExpressionBase()->numericValueExpression(), base) ||
+		    !TransformNumericExpression(*power->numericValueExpressionExponent()->numericValueExpression(), exponent)) {
+			return false;
+		}
+		expression->arguments.push_back(std::move(base));
+		expression->arguments.push_back(std::move(exponent));
+		result = std::move(expression);
+		return true;
+	}
 	if (auto square_root = context.squareRoot()) {
 		return make_function("sqrt", *square_root->numericValueExpression());
 	}

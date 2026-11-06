@@ -448,6 +448,18 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			result->result_type = {GqlTypeId::DOUBLE, result->arguments[0]->result_type.nullable};
 			return result;
 		}
+		if (name == "power") {
+			if (result->arguments.size() != 2 ||
+			    (!IsNumeric(result->arguments[0]->result_type.id) &&
+			     result->arguments[0]->result_type.id != GqlTypeId::NULL_VALUE) ||
+			    (!IsNumeric(result->arguments[1]->result_type.id) &&
+			     result->arguments[1]->result_type.id != GqlTypeId::NULL_VALUE)) {
+				throw BinderException("GQL function 'power' requires two numeric arguments");
+			}
+			result->result_type = {GqlTypeId::DOUBLE, result->arguments[0]->result_type.nullable ||
+			                                              result->arguments[1]->result_type.nullable};
+			return result;
+		}
 		if (name == "abs" || name == "ceil" || name == "floor" || name == "sqrt" || name == "mod") {
 			if (!IsNumeric(result->arguments[0]->result_type.id)) {
 				throw BinderException("GQL function '%s' requires numeric arguments", expression.function_name);
