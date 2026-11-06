@@ -208,6 +208,14 @@ LET VALUE source_name = a.name
 RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
 ```
 
+`POWER` follows GQL 2IWD12 clause 20.22 using `DOUBLE` arithmetic.
+`POWER(base, exponent)` raises a base to an exponent. NULL stays NULL, and
+`POWER(0, 0)` is one. A zero base with a negative exponent or a negative base
+with a non-integral exponent raises an invalid-argument error containing
+status `2201F`. Non-finite inputs and overflowing results raise status `22003`.
+Exact integer and decimal exponents are checked before floating-point
+conversion to preserve the domain check and parity for negative bases.
+
 `EXP` returns *e* raised to a numeric argument, while `LN` returns its natural
 logarithm. Both functions use DuckDB's floating-point and domain behavior and
 preserve `NULL` inputs.

@@ -1,0 +1,147 @@
+# name: test/sql/gql_power_function.test
+# description: GQL POWER values, result types, nulls and standard domain diagnostics
+# group: [sql]
+
+require duckgql
+
+statement ok
+CREATE GRAPH power_values TYPED {
+    (Sample :Sample {id INT64 NOT NULL, amount DOUBLE, exponent_value DOUBLE, text_value STRING})
+}
+
+statement ok
+SESSION SET GRAPH power_values
+
+statement ok
+INSERT (:Sample {id: 1, amount: 100.0, exponent_value: 0.5, text_value: 'not numeric'}),
+       (:Sample {id: 2})
+
+query IIIIII
+MATCH (n:Sample) WHERE n.id = 1
+RETURN POWER(2, 3) = 8.0, POWER(9, 0.5) = 3.0,
+       POWER(2.0, -2) = 0.25, POWER(-2, 3) = -8.0,
+       POWER(-2, 4.0) = 16.0, POWER(-2, -3) = -0.125
+----
+true	true	true	true	true	true
+
+query III
+MATCH (n:Sample) WHERE n.id = 1
+RETURN POWER(0, 0) = 1.0, POWER(0, 2) = 0.0, POWER(5, 0) = 1.0
+----
+true	true	true
+
+query R
+MATCH (n:Sample) WHERE n.id = 1 RETURN POWER(n.amount, n.exponent_value)
+----
+10.0
+
+query RRR
+MATCH (n:Sample) WHERE n.id = 2
+RETURN POWER(n.amount, 2), POWER(2, n.exponent_value), POWER(n.amount, n.exponent_value)
+----
+NULL	NULL	NULL
+
+query RR
+MATCH (n:Sample) WHERE n.id = 1 RETURN POWER(NULL, 2), POWER(2, NULL)
+----
+NULL	NULL
+
+query T
+SELECT typeof(gql_power(2, 3))
+----
+DOUBLE
+
+# Large integer exponents keep their parity before conversion to DOUBLE.
+query RRR
+MATCH (n:Sample) WHERE n.id = 1
+RETURN POWER(-1, 9007199254740993), POWER(-1, 9007199254740992), POWER(-1, -9007199254740993)
+----
+-1.0	1.0	-1.0
+
+# Exact decimal scale and parity are checked before rounding to DOUBLE.
+query RR
+MATCH (n:Sample) WHERE n.id = 1
+RETURN POWER(-1, 9007199254740993.0), POWER(-1, -9007199254740993.0)
+----
+-1.0	-1.0
+
+statement error
+MATCH (n:Sample) RETURN POWER(-1, 1.000000000000000001)
+----
+2201F
+
+# NULL takes precedence over domain checks on the other argument.
+query RR
+MATCH (n:Sample) WHERE n.id = 2 RETURN POWER(n.amount, -1), POWER(-2, n.exponent_value)
+----
+NULL	NULL
+
+statement error
+MATCH (n:Sample) RETURN POWER(0, -1)
+----
+2201F
+
+statement error
+MATCH (n:Sample) RETURN POWER(-2, 0.5)
+----
+2201F
+
+statement error
+MATCH (n:Sample) RETURN POWER(10, 400)
+----
+22003
+
+statement error
+MATCH (n:Sample) RETURN POWER('text', 2)
+----
+requires two numeric arguments
+
+statement error
+MATCH (n:Sample) RETURN POWER(2, 'text')
+----
+requires two numeric arguments
+
+statement error
+MATCH (n:Sample) RETURN POWER(n.amount, n.text_value)
+----
+<REGEX>:.*gql_power.*VARCHAR.*
+
+query RR
+MATCH (n:Sample) WHERE n.id = 1
+OPTIONAL MATCH (missing:Sample) WHERE missing.id = 3
+RETURN POWER(missing.amount, 2), POWER(2, missing.exponent_value)
+----
+NULL	NULL
+
+statement ok
+CREATE TABLE power_inputs AS SELECT i, CASE WHEN i % 3 = 0 THEN NULL ELSE 2.0 END AS value FROM range(5000) t(i)
+
+query II
+SELECT count(gql_power(value, 3)), sum(gql_power(value, 3)) FROM power_inputs
+----
+3333	26664
+
+# Decimal exponent callbacks cover all four physical widths.
+query RRRR
+SELECT gql_power(-2, 3::DECIMAL(4,1)), gql_power(-2, 3::DECIMAL(9,2)),
+       gql_power(-2, 3::DECIMAL(18,3)), gql_power(-2, 3::DECIMAL(38,18))
+----
+-8.0	-8.0	-8.0	-8.0
+
+query II
+SELECT count(*), sum(gql_power(-1, i::DECIMAL(18,0))) FROM range(5000) t(i)
+----
+5000	0
+
+statement error
+SELECT gql_power(2, 'NaN'::DOUBLE)
+----
+22003
+
+statement error
+MATCH (n:Sample) RETURN POWER(2)
+----
+GQL parser error
+
+statement ok
+DROP GRAPH power_values

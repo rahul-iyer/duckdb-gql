@@ -30,6 +30,7 @@
 #include "gql_plan_reuse.hpp"
 #include "gql_relational.hpp"
 #include "gql_referenced.hpp"
+#include "gql_power.hpp"
 #include "gql_storage.hpp"
 
 namespace duckdb {
@@ -174,6 +175,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlRecursiveMatchFunction());
 	loader.RegisterFunction(GqlAlgorithmCallFunction());
 	loader.RegisterFunction(GqlAlgorithmResultFunction());
+	loader.RegisterFunction(GqlPowerFunction());
 	loader.RegisterFunction(GqlMutationTargetFunction());
 	loader.RegisterFunction(GqlClearPropertiesSourceFunction());
 	loader.RegisterFunction(GqlMutationGraphFunction());
