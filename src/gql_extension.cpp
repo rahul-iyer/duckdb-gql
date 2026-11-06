@@ -24,6 +24,7 @@
 #include "gql_batched_inout.hpp"
 #include "gql_csr.hpp"
 #include "gql_import.hpp"
+#include "gql_log10.hpp"
 #include "gql_mutation.hpp"
 #include "gql_optimizer.hpp"
 #include "gql_parser.hpp"
@@ -171,6 +172,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlOptimizerPlanFunction());
 	loader.RegisterFunction(GqlTrailUniqueFunction());
 	loader.RegisterFunction(GqlFloatCastFunction());
+	loader.RegisterFunction(GqlLog10Function());
 	loader.RegisterFunction(GqlRecursiveMatchFunction());
 	loader.RegisterFunction(GqlAlgorithmCallFunction());
 	loader.RegisterFunction(GqlAlgorithmResultFunction());
