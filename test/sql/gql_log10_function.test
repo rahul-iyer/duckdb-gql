@@ -1,0 +1,96 @@
+# name: test/sql/gql_log10_function.test
+# description: GQL LOG10 values, result types, nulls and standard domain diagnostics
+# group: [sql]
+
+require duckgql
+
+statement ok
+CREATE GRAPH log10_values TYPED {
+    (Sample :Sample {id INT64 NOT NULL, amount DOUBLE, exponent_value DOUBLE, text_value STRING})
+}
+
+statement ok
+SESSION SET GRAPH log10_values
+
+statement ok
+INSERT (:Sample {id: 1, amount: 100.0, exponent_value: 0.5, text_value: 'not numeric'}),
+       (:Sample {id: 2})
+
+query IIII
+MATCH (n:Sample) WHERE n.id = 1
+RETURN LOG10(1) = 0.0, LOG10(100) = 2.0,
+       ABS(LOG10(0.01) + 2.0) < 1E-12,
+       ABS(LOG10(EXP(1)) - 0.4342944819032518) < 1E-12
+----
+true	true	true	true
+
+query R
+MATCH (n:Sample) WHERE n.id = 1 RETURN LOG10(n.amount)
+----
+2.0
+
+query R
+MATCH (n:Sample) WHERE n.id = 2 RETURN LOG10(n.amount)
+----
+NULL
+
+query R
+MATCH (n:Sample) WHERE n.id = 1 RETURN LOG10(NULL)
+----
+NULL
+
+query T
+SELECT typeof(gql_log10(10))
+----
+DOUBLE
+
+# Invalid arguments use the general logarithm status required by 2IWD12.
+statement error
+MATCH (n:Sample) RETURN LOG10(0)
+----
+2201Z
+
+statement error
+MATCH (n:Sample) RETURN LOG10(-1.0)
+----
+2201Z
+
+statement error
+MATCH (n:Sample) RETURN LOG10('text')
+----
+requires one numeric argument
+
+statement error
+MATCH (n:Sample) RETURN LOG10(n.text_value)
+----
+<REGEX>:.*gql_log10.*VARCHAR.*
+
+# Missing OPTIONAL MATCH bindings propagate NULL without invoking the domain check.
+query R
+MATCH (n:Sample) WHERE n.id = 1
+OPTIONAL MATCH (missing:Sample) WHERE missing.id = 3
+RETURN LOG10(missing.amount)
+----
+NULL
+
+# Vector execution must respect filters and NULLs across chunk boundaries.
+statement ok
+CREATE TABLE log_values AS SELECT i, CASE WHEN i % 3 = 0 THEN NULL ELSE 100.0 END AS value FROM range(5000) t(i)
+
+query II
+SELECT count(gql_log10(value)), sum(gql_log10(value)) FROM log_values
+----
+3333	6666
+
+statement error
+SELECT gql_log10('Infinity'::DOUBLE)
+----
+22003
+
+statement error
+MATCH (n:Sample) RETURN LOG10(1, 2)
+----
+GQL parser error
+
+statement ok
+DROP GRAPH log10_values

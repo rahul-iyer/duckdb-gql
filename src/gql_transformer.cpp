@@ -2029,6 +2029,9 @@ bool GqlTransformer::TransformNumericFunction(GQLParser::NumericValueFunctionCon
 		result = std::move(expression);
 		return true;
 	}
+	if (auto logarithm = context.commonLogarithm()) {
+		return make_function("log10", *logarithm->numericValueExpression());
+	}
 	if (auto logarithm = context.naturalLogarithm()) {
 		return make_function("ln", *logarithm->numericValueExpression());
 	}

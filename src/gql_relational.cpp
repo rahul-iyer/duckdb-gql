@@ -1146,6 +1146,9 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			return std::move(result);
 		}
 		auto lowered_name = name == "count" && program.child_counts[node] == 0 ? "count_star" : name;
+		if (name == "log10") {
+			lowered_name = "gql_log10";
+		}
 		vector<unique_ptr<ParsedExpression>> arguments;
 		for (idx_t child = 0; child < program.child_counts[node]; child++) {
 			auto desired = GqlTypeId::UNKNOWN;
