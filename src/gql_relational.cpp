@@ -45,12 +45,12 @@
 
 namespace duckdb {
 
-// Evaluate trail uniqueness as one predicate over the complete edge tuple.
-// Pairwise inequalities must not become early joins between unrelated edges.
+// Evaluate that element IDs differ as one predicate over all of them. A plain
+// inequality would become a join edge, letting DuckDB join unrelated elements on it.
 static void TrailUnique(DataChunk &args, ExpressionState &, Vector &result) {
 	auto columns = args.ColumnCount();
-	if (columns < 3) {
-		throw InvalidInputException("gql_trail_unique requires at least three edge IDs");
+	if (columns < 2) {
+		throw InvalidInputException("gql_trail_unique requires at least two element IDs");
 	}
 	auto edge_count = columns;
 	vector<UnifiedVectorFormat> formats(columns);
@@ -66,6 +66,19 @@ static void TrailUnique(DataChunk &args, ExpressionState &, Vector &result) {
 	bool all_valid = true;
 	for (const auto &format : formats) {
 		all_valid = all_valid && format.validity.AllValid();
+	}
+	if (all_valid && edge_count == 2) {
+		auto left = values[0], right = values[1];
+		if (formats[0].sel->IsSet() || formats[1].sel->IsSet()) {
+			for (idx_t row = 0; row < args.size(); row++) {
+				output[row] = left[formats[0].sel->get_index(row)] != right[formats[1].sel->get_index(row)];
+			}
+		} else {
+			for (idx_t row = 0; row < args.size(); row++) {
+				output[row] = left[row] != right[row];
+			}
+		}
+		return;
 	}
 	if (all_valid && edge_count == 3) {
 		for (idx_t row = 0; row < args.size(); row++) {
@@ -96,7 +109,7 @@ static void TrailUnique(DataChunk &args, ExpressionState &, Vector &result) {
 }
 
 ScalarFunction GqlTrailUniqueFunction() {
-	ScalarFunction function("gql_trail_unique", vector<LogicalType>(3, LogicalType::UBIGINT), LogicalType::BOOLEAN,
+	ScalarFunction function("gql_trail_unique", vector<LogicalType>(2, LogicalType::UBIGINT), LogicalType::BOOLEAN,
 	                        TrailUnique);
 	function.GetSignature().AddArgs("args", LogicalType::UBIGINT);
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
@@ -666,6 +679,119 @@ static unique_ptr<ParsedExpression> Equal(unique_ptr<ParsedExpression> left, uni
 
 static unique_ptr<ParsedExpression> NotEqual(unique_ptr<ParsedExpression> left, unique_ptr<ParsedExpression> right) {
 	return Compare(ExpressionType::COMPARE_NOTEQUAL, std::move(left), std::move(right));
+}
+
+static bool IsIdentityColumn(const ParsedExpression &expression, const GqlTableGraphBinding &graph) {
+	if (expression.GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+		return false;
+	}
+	auto &column = expression.Cast<ColumnRefExpression>();
+	if (column.ColumnNames().size() != 2) {
+		return false;
+	}
+	auto name = column.GetColumnName().GetIdentifierName();
+	return name == graph.vertex.key_column || name == graph.edge.key_column;
+}
+
+static string ColumnTable(const ParsedExpression &expression) {
+	if (expression.GetExpressionClass() != ExpressionClass::COLUMN_REF) {
+		return string();
+	}
+	auto &column = expression.Cast<ColumnRefExpression>();
+	return column.ColumnNames().size() == 2 ? column.ColumnNames()[0].GetIdentifierName() : string();
+}
+
+using TableLinks = unordered_map<string, unordered_set<string>>;
+
+//! Records which tables the conjuncts join directly on an equality.
+static void CollectEqualityLinks(const vector<unique_ptr<ParsedExpression>> &filters, TableLinks &links) {
+	for (const auto &filter : filters) {
+		if (filter->GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+			CollectEqualityLinks(filter->Cast<ConjunctionExpression>().GetChildren(), links);
+			continue;
+		}
+		if (filter->GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+			continue;
+		}
+		auto &comparison = filter->Cast<ComparisonExpression>();
+		auto left = ColumnTable(comparison.Left()), right = ColumnTable(comparison.Right());
+		if (!left.empty() && !right.empty() && left != right) {
+			links[left].insert(right);
+			links[right].insert(left);
+		}
+	}
+}
+
+//! Records the equalities in the ON conditions of a join tree, without entering subqueries.
+static void CollectJoinLinks(const TableRef &table, TableLinks &links) {
+	if (table.type != TableReferenceType::JOIN) {
+		return;
+	}
+	auto &join = table.Cast<JoinRef>();
+	if (join.condition) {
+		vector<unique_ptr<ParsedExpression>> condition;
+		condition.push_back(join.condition->Copy());
+		CollectEqualityLinks(condition, links);
+	}
+	CollectJoinLinks(*join.left, links);
+	CollectJoinLinks(*join.right, links);
+}
+
+//! Whether two tables join on an equality directly or through one shared table.
+static bool Linked(const TableLinks &links, const string &left, const string &right) {
+	auto entry = links.find(left);
+	if (entry == links.end()) {
+		return false;
+	}
+	if (entry->second.count(right)) {
+		return true;
+	}
+	auto other = links.find(right);
+	if (other == links.end()) {
+		return false;
+	}
+	for (const auto &shared : entry->second) {
+		if (other->second.count(shared)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void DeferIdentityInequalities(vector<unique_ptr<ParsedExpression>> &filters, const GqlTableGraphBinding &graph,
+                                      const TableLinks &links) {
+	for (auto &filter : filters) {
+		if (filter->GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+			DeferIdentityInequalities(filter->Cast<ConjunctionExpression>().GetChildrenMutable(), graph, links);
+			continue;
+		}
+		if (filter->GetExpressionType() != ExpressionType::COMPARE_NOTEQUAL) {
+			continue;
+		}
+		auto &comparison = filter->Cast<ComparisonExpression>();
+		if (!IsIdentityColumn(comparison.Left(), graph) || !IsIdentityColumn(comparison.Right(), graph)) {
+			continue;
+		}
+		auto left = ColumnTable(comparison.Left()), right = ColumnTable(comparison.Right());
+		if (left == right || Linked(links, left, right)) {
+			continue;
+		}
+		vector<unique_ptr<ParsedExpression>> arguments;
+		arguments.push_back(std::move(comparison.LeftMutable()));
+		arguments.push_back(std::move(comparison.RightMutable()));
+		filter = make_uniq<FunctionExpression>(Identifier("gql_trail_unique"), std::move(arguments));
+	}
+}
+
+//! Keeps conjuncts saying two distant elements differ out of DuckDB's join graph. They reject
+//! almost nothing, so as join edges they only let it join the far ends of a pattern on an
+//! inequality alone. Elements already joined nearby keep the faster plain comparison.
+static void DeferIdentityInequalities(vector<unique_ptr<ParsedExpression>> &filters, const TableRef &source,
+                                      const GqlTableGraphBinding &graph) {
+	TableLinks links;
+	CollectEqualityLinks(filters, links);
+	CollectJoinLinks(source, links);
+	DeferIdentityInequalities(filters, graph, links);
 }
 
 static unique_ptr<ParsedExpression> And(vector<unique_ptr<ParsedExpression>> expressions) {
@@ -1466,8 +1592,11 @@ static unique_ptr<TableRef> CsrVerticesTable(const string &graph_name, const str
 
 static unique_ptr<TableRef> LabelPostingFetchTable(const string &graph_name, const string &alias,
                                                    const GqlBindingAccessPath &path) {
-	if (path.label_postings.size() != 1 || path.fetch_columns.empty()) {
+	if (path.label_postings.size() != 1) {
 		throw InternalException("Invalid GQL label posting fetch access path");
+	}
+	if (path.fetch_columns.empty()) {
+		return CsrVerticesTable(graph_name, path.label_postings[0], alias);
 	}
 	auto posting_alias = alias + "_label_ids";
 	auto fetch_alias = alias + "_label_rows";
@@ -2076,8 +2205,7 @@ static unique_ptr<TableRef> RecursiveMatchBindReplace(ClientContext &context, Ta
 // A predicate-free, identity-only pipeline with branches from cycle vertices
 // to one shared seed can be evaluated from its closing cycle outward. Restrict
 // this heuristic to fixed managed scans; other pipelines retain native planning.
-static bool CanLowerCyclePipeline(const RelationalMatchInput &match, const GqlTableGraphBinding &graph,
-                                  const GqlAccessPathPlan &access_plan) {
+static bool CanLowerCyclePipeline(const RelationalMatchInput &match, const GqlTableGraphBinding &graph) {
 	if (!match.predicates.empty() || match.match_stages.size() < 3 ||
 	    !StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") ||
 	    !StringUtil::CIEquals(graph.edge.ownership, "MANAGED") || graph.vertex.key_column != "__gql_id" ||
@@ -2124,13 +2252,6 @@ static bool CanLowerCyclePipeline(const RelationalMatchInput &match, const GqlTa
 		if (part + 1 < match.match_stages.size() &&
 		    (!cycle_vertices.count(elements.front().binding_index) || elements.back().binding_index != seed)) {
 			return false;
-		}
-	}
-	for (const auto &stage : access_plan.stages) {
-		for (const auto &path : stage.bindings) {
-			if (path.type != GqlBindingAccessPathType::TABLE_SCAN) {
-				return false;
-			}
 		}
 	}
 	for (const auto &node : match.nodes) {
@@ -2276,6 +2397,84 @@ static vector<idx_t> FindIndependentOptionalBranches(const RelationalMatchInput 
 		}
 	}
 	return has_aggregate ? chain : vector<idx_t>();
+}
+
+//! Each binding's one label and the stage naming it. Empty when it has none, several, or labels
+//! in more than one stage.
+static vector<string> SingleBindingLabels(const RelationalMatchInput &match, vector<idx_t> &label_stage) {
+	vector<string> labels(match.binding_types.size());
+	vector<bool> several(match.binding_types.size(), false);
+	label_stage.assign(match.binding_types.size(), DConstants::INVALID_INDEX);
+	for (idx_t stage = 0; stage < match.match_stages.size(); stage++) {
+		for (const auto &pattern : match.match_stages[stage].patterns) {
+			for (const auto &element : pattern.elements) {
+				auto binding = element.binding_index;
+				if (element.label.empty()) {
+					continue;
+				}
+				several[binding] =
+				    several[binding] || element.label.find(';') != string::npos ||
+				    (!labels[binding].empty() && !StringUtil::CIEquals(element.label, labels[binding])) ||
+				    (label_stage[binding] != DConstants::INVALID_INDEX && label_stage[binding] != stage);
+				labels[binding] = element.label;
+				label_stage[binding] = stage;
+			}
+		}
+	}
+	for (idx_t binding = 0; binding < labels.size(); binding++) {
+		if (several[binding]) {
+			labels[binding].clear();
+		}
+	}
+	return labels;
+}
+
+//! A vertex used only by its ID, with one label, reads that label's CSR posting list instead of
+//! scanning and label-testing the whole vertex table. The list is smaller, and its exact size
+//! reaches DuckDB's join ordering, where a label test on the table is only a fixed guess.
+static void ReadIdOnlyVerticesFromPostings(ClientContext &context, const string &graph_name,
+                                           const GqlTableGraphBinding &graph, const RelationalMatchInput &match,
+                                           const vector<bool> &vertex_row_read, GqlAccessPathPlan &access_plan) {
+	if (!StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") || graph.vertex.key_column != "__gql_id") {
+		return;
+	}
+	auto snapshot = GqlTryGetCsrSnapshot(context, graph_name);
+	if (!snapshot || !GqlCsrHasVertexLabels(*snapshot)) {
+		return;
+	}
+	vector<idx_t> label_stage;
+	auto labels = SingleBindingLabels(match, label_stage);
+	for (idx_t stage_index = 0; stage_index < access_plan.stages.size(); stage_index++) {
+		auto &stage = access_plan.stages[stage_index];
+		// The ends of an edge bound by an earlier stage or expanded through the CSR are reached from
+		// that edge, which is cheaper than any independent source.
+		vector<bool> expansion_end(stage.bindings.size(), false);
+		for (const auto &pattern : match.match_stages[stage_index].patterns) {
+			for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+				auto edge = pattern.elements[index].binding_index;
+				auto type = stage.bindings[edge].type;
+				if (!stage.introduced[edge] || type == GqlBindingAccessPathType::CSR_EXPANSION ||
+				    type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION ||
+				    type == GqlBindingAccessPathType::CSR_PATH_EXPANSION) {
+					expansion_end[pattern.elements[index - 1].binding_index] = true;
+					expansion_end[pattern.elements[index + 1].binding_index] = true;
+				}
+			}
+		}
+		for (idx_t binding = 0; binding < stage.bindings.size(); binding++) {
+			auto &path = stage.bindings[binding];
+			// A label named in another stage is tested against the vertex table there.
+			if (match.binding_types[binding] != GqlPatternElementType::VERTEX || !stage.introduced[binding] ||
+			    expansion_end[binding] || label_stage[binding] != stage_index || vertex_row_read[binding] ||
+			    path.type != GqlBindingAccessPathType::TABLE_SCAN || !path.label_postings.empty() ||
+			    labels[binding].empty() || !GqlLabelPostingBeatsScan(*snapshot, labels[binding])) {
+				continue;
+			}
+			path.type = GqlBindingAccessPathType::LABEL_POSTING_FETCH;
+			path.label_postings = {labels[binding]};
+			path.fetch_columns.clear();
+		}
+	}
 }
 
 static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const string &graph_name,
@@ -2432,7 +2631,20 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 	}
 	auto access_plan = GqlOptimizeAccessPaths(context, graph_name, graph, access_input);
-	const bool cycle_pipeline = CanLowerCyclePipeline(match, graph, access_plan);
+	// The cycle pipeline joins each stage's tables to the closing cycle first. Per-binding CSR
+	// sources would instead evaluate the stages one after another, before the cycle limits them.
+	const bool cycle_pipeline = CanLowerCyclePipeline(match, graph);
+	if (cycle_pipeline) {
+		for (auto &stage : access_plan.stages) {
+			for (auto &path : stage.bindings) {
+				auto cardinality = path.cardinality;
+				path = GqlBindingAccessPath();
+				path.cardinality = cardinality;
+			}
+		}
+	} else {
+		ReadIdOnlyVerticesFromPostings(context, graph_name, graph, match, vertex_row_read, access_plan);
+	}
 
 	// Apply single-binding literal checks before dependent graph expansion.
 	// Native predicate pushdown cannot always cross the delim/CTE boundaries
@@ -3396,6 +3608,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 
 	auto select = make_uniq<SelectNode>();
 	select->from_table = std::move(pipeline.from);
+	DeferIdentityInequalities(pipeline.filters, *select->from_table, graph);
 	select->where_clause = And(std::move(pipeline.filters));
 	AppendProjections(*select, match.projections, match.projection_names, property_aliases, identities, graph,
 	                  match.binding_types);

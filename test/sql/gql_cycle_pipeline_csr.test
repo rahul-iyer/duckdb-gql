@@ -1,0 +1,85 @@
+# name: test/sql/gql_cycle_pipeline_csr.test
+# description: A cycle joined to per-node stages goes first even when a CSR offers cheaper sources for the stages
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+# 4 countries, 40 cities, 2000 persons and 20000 messages. Persons i, i+40 and i+80 share a city
+# and form a friendship triangle; other friendships cross countries.
+statement ok
+COPY (SELECT 'c' || i AS ":ID", 'Country' AS ":LABEL" FROM range(4) t(i)
+      UNION ALL SELECT 'y' || i, 'City' FROM range(40) t(i)
+      UNION ALL SELECT 'p' || i, 'Person' FROM range(2000) t(i)
+      UNION ALL SELECT 'm' || i, 'Message' FROM range(20000) t(i)) TO '{TEST_DIR}/cycle_csr_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'y' || i AS ":START_ID", 'c' || (i % 4) AS ":END_ID", 'IS_PART_OF' AS ":TYPE" FROM range(40) t(i)
+      UNION ALL SELECT 'p' || i, 'y' || (i % 40), 'IS_LOCATED_IN' FROM range(2000) t(i)
+      UNION ALL SELECT 'm' || i, 'c' || (i % 4), 'IS_LOCATED_IN' FROM range(20000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 7 + 3) % 2000), 'KNOWS' FROM range(2000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 13 + 5) % 2000), 'KNOWS' FROM range(2000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || (i + 40), 'KNOWS' FROM range(300) t(i)
+      UNION ALL SELECT 'p' || (i + 40), 'p' || (i + 80), 'KNOWS' FROM range(300) t(i)
+      UNION ALL SELECT 'p' || (i + 80), 'p' || i, 'KNOWS' FROM range(300) t(i)) TO '{TEST_DIR}/cycle_csr_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH cycle_csr ANY
+
+statement ok
+COPY GRAPH cycle_csr FROM (VERTICES '{TEST_DIR}/cycle_csr_nodes.csv', EDGES '{TEST_DIR}/cycle_csr_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cycle_csr
+
+query I
+MATCH (country:Country)
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country)
+MATCH (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+MATCH (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+3120
+
+statement ok
+CALL gql_build_csr('cycle_csr')
+
+# Each stage joins the cycle's tables; CSR sources would evaluate the stages before the cycle.
+query II
+EXPLAIN MATCH (country:Country)
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country)
+MATCH (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+MATCH (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+physical_plan	<!REGEX>:.*GQL_CSR.*
+
+query I
+MATCH (country:Country)
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country)
+MATCH (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+MATCH (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+3120
+
+# Outside a cycle, an ID-only vertex with a selective label reads the CSR's list of that label.
+query II
+EXPLAIN MATCH (country:Country)<-[:IS_PART_OF]-(y:City) RETURN count(*)
+----
+physical_plan	<REGEX>:.*GQL_CSR_VERTICES.*
+
+query I
+MATCH (country:Country)<-[:IS_PART_OF]-(y:City) RETURN count(*)
+----
+40
+
+query I
+MATCH (p:Person)-[:KNOWS]->(q:Person) RETURN count(*)
+----
+4900

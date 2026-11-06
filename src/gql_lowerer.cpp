@@ -433,8 +433,9 @@ static unique_ptr<QueryNode> LowerSelectNode(const GqlLogicalPlan &plan) {
 	if (visible_count == project.projections.size()) {
 		select->select_list.push_back(make_uniq<StarExpression>());
 	} else {
+		// By position: default names such as "expression" can repeat.
 		for (idx_t index = 0; index < visible_count; index++) {
-			auto expression = make_uniq<ColumnRefExpression>(Identifier(project.projections[index].name));
+			auto expression = make_uniq<PositionalReferenceExpression>(index + 1);
 			expression->SetAlias(Identifier(project.projections[index].name));
 			select->select_list.push_back(std::move(expression));
 		}

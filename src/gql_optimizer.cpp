@@ -421,16 +421,6 @@ static bool ProgramProjectsGraphValue(const GqlExpressionProgram &program, idx_t
 	return false;
 }
 
-static idx_t LabelPostingCardinality(const GqlCsrSnapshot &snapshot, const string &label) {
-	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
-	if (entry == snapshot.label_ids.end() || entry->second + 1 >= snapshot.vertex_label_posting_offsets.size()) {
-		return 0;
-	}
-	auto start = snapshot.vertex_label_posting_offsets[entry->second];
-	auto end = snapshot.vertex_label_posting_offsets[entry->second + 1];
-	return NumericCast<idx_t>(end - start);
-}
-
 static bool ContainsLabel(const vector<string> &labels, const string &candidate) {
 	for (const auto &label : labels) {
 		if (StringUtil::CIEquals(label, candidate)) {
@@ -996,7 +986,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 						for (const auto &label : StringUtil::Split(element.label, ';')) {
 							if (!label.empty())
 								path.cardinality.rows =
-								    MinValue<idx_t>(path.cardinality.rows, LabelPostingCardinality(*snapshot, label));
+								    MinValue<idx_t>(path.cardinality.rows, GqlLabelPostingSize(*snapshot, label));
 						}
 					} else if (!is_vertex) {
 						path.edge_label = element.label;
@@ -1074,7 +1064,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							if (stage_allows_element_fetch && pattern.elements.size() > 1 && has_literal_seed) {
 								continue;
 							}
-							auto cardinality = LabelPostingCardinality(*snapshot, label);
+							auto cardinality = GqlLabelPostingSize(*snapshot, label);
 							// A small, selective posting is a bounded independent
 							// frontier; fetch its requested columns, not the table.
 							if (can_fetch_vertices && element.binding_index < input.vertex_fetch_columns.size() &&
@@ -1090,13 +1080,13 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							}
 							continue;
 						}
-						if (cost_model.Fetch(LabelPostingCardinality(*snapshot, label), 8).Total() >=
+						if (cost_model.Fetch(GqlLabelPostingSize(*snapshot, label), 8).Total() >=
 						        AccessCost(cost_model, path, vertex_count).Total() ||
 						    ContainsLabel(path.label_postings, label)) {
 							continue;
 						}
 						path.label_postings.push_back(label);
-						auto cardinality = LabelPostingCardinality(*snapshot, label);
+						auto cardinality = GqlLabelPostingSize(*snapshot, label);
 						if (path.cardinality.rows == DConstants::INVALID_INDEX || cardinality < path.cardinality.rows) {
 							path.cardinality.rows = cardinality;
 						}
@@ -1172,7 +1162,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 					}
 					if (!can_use_vertex_postings)
 						continue;
-					auto count = LabelPostingCardinality(*snapshot, name);
+					auto count = GqlLabelPostingSize(*snapshot, name);
 					if (population_labels[binding].empty() || count < population_rows[binding]) {
 						population_labels[binding] = name;
 						population_rows[binding] = count;

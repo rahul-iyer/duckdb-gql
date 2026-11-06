@@ -806,6 +806,10 @@ TableFunction GqlCsrAllShortestFunction();
 uint64_t GqlCsrBuildCount(ClientContext &context);
 //! Whether expansion can test neighbor labels, which it does for its neighbor_label argument.
 bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot);
+//! Vertices carrying a label in this snapshot.
+idx_t GqlLabelPostingSize(const GqlCsrSnapshot &snapshot, const string &label);
+//! Whether reading a label's posting list is cheaper than scanning the vertex table for it.
+bool GqlLabelPostingBeatsScan(const GqlCsrSnapshot &snapshot, const string &label);
 //! Whether filtering an expansion by the far endpoint's label removes enough rows.
 bool GqlNeighborLabelIsSelective(const GqlCsrSnapshot &snapshot, const string &edge_label, const string &direction,
                                  const string &neighbor_label);

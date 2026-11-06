@@ -3759,6 +3759,21 @@ TableFunctionSet GqlCsrExpandFunctions() {
 	return functions;
 }
 
+idx_t GqlLabelPostingSize(const GqlCsrSnapshot &snapshot, const string &label) {
+	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
+	if (entry == snapshot.label_ids.end() || entry->second + 1 >= snapshot.vertex_label_posting_offsets.size()) {
+		return 0;
+	}
+	auto start = snapshot.vertex_label_posting_offsets[entry->second];
+	auto end = snapshot.vertex_label_posting_offsets[entry->second + 1];
+	return NumericCast<idx_t>(end - start);
+}
+
+bool GqlLabelPostingBeatsScan(const GqlCsrSnapshot &snapshot, const string &label) {
+	auto threshold = MaxValue<idx_t>(1024, snapshot.vertex_ids.size() / 16);
+	return GqlLabelPostingSize(snapshot, label) <= threshold;
+}
+
 bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot) {
 	return snapshot.vertex_label_offsets.size() == snapshot.vertex_ids.size() + 1;
 }

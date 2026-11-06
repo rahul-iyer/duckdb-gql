@@ -1,0 +1,67 @@
+# name: test/sql/gql_distant_inequality.test
+# description: Checks that far-apart elements differ stay out of join ordering, while nearby ones stay plain comparisons
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+# Two messages with tags; c1 replies to m1 and c2 to m2. t1 is on both ends of the first pair.
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('t1', 'Tag'), ('t2', 'Tag'), ('t3', 'Tag'),
+    ('m1', 'Message'), ('m2', 'Message'), ('c1', 'Comment'), ('c2', 'Comment')
+) v(":ID", ":LABEL")) TO '{TEST_DIR}/distinct_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('m1', 't1', 'HAS_TAG'), ('m1', 't2', 'HAS_TAG'), ('c1', 't1', 'HAS_TAG'), ('c1', 't3', 'HAS_TAG'),
+    ('m2', 't2', 'HAS_TAG'), ('c2', 't2', 'HAS_TAG'),
+    ('c1', 'm1', 'REPLY_OF'), ('c2', 'm2', 'REPLY_OF'),
+    ('m1', 'm2', 'FOLLOWS'), ('m2', 'm1', 'FOLLOWS')
+) e(":START_ID", ":END_ID", ":TYPE")) TO '{TEST_DIR}/distinct_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH distinct_ends ANY
+
+statement ok
+COPY GRAPH distinct_ends FROM (VERTICES '{TEST_DIR}/distinct_nodes.csv', EDGES '{TEST_DIR}/distinct_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH distinct_ends
+
+# The tags at the two ends are three hops apart, so their inequality becomes a deferred check.
+query II
+EXPLAIN MATCH (tag1:Tag)<-[:HAS_TAG]-(:Message)<-[:REPLY_OF]-(:Comment)-[:HAS_TAG]->(tag2:Tag)
+WHERE element_id(tag1) <> element_id(tag2)
+RETURN count(*)
+----
+physical_plan	<REGEX>:.*gql_trail_unique.*
+
+# Pairs: m1 has t1,t2 and c1 has t1,t3, so 4 pairs minus (t1,t1); m2/c2 only share t2.
+query I
+MATCH (tag1:Tag)<-[:HAS_TAG]-(:Message)<-[:REPLY_OF]-(:Comment)-[:HAS_TAG]->(tag2:Tag)
+WHERE element_id(tag1) <> element_id(tag2)
+RETURN count(*)
+----
+3
+
+# The same pattern without the predicate keeps the (t1, t1) and (t2, t2) pairs.
+query I
+MATCH (tag1:Tag)<-[:HAS_TAG]-(:Message)<-[:REPLY_OF]-(:Comment)-[:HAS_TAG]->(tag2:Tag)
+RETURN count(*)
+----
+5
+
+# Adjacent edges of one type join on their shared node, so their trail check stays a plain comparison.
+query II
+EXPLAIN MATCH (a:Message)-[:FOLLOWS]->(b:Message)-[:FOLLOWS]->(c:Message) RETURN count(*)
+----
+physical_plan	<!REGEX>:.*gql_trail_unique.*
+
+# m1 -> m2 -> m1 and m2 -> m1 -> m2 use two different edges each.
+query I
+MATCH (a:Message)-[:FOLLOWS]->(b:Message)-[:FOLLOWS]->(c:Message) RETURN count(*)
+----
+2

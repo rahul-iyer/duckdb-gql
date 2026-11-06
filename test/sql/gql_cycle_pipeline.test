@@ -143,5 +143,29 @@ RETURN count(*)
 statement ok
 ROLLBACK
 
+# The same bags with a CSR built.
+statement ok
+CALL gql_build_csr('cycle_pipeline')
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]->(b)-[e2:R]->(c)-[e3:R]->(a)
+RETURN count(*)
+----
+162
+
+query I
+MATCH (country:N)
+MATCH (a:N)-[a1:R]->(x:N)-[a2:S]->(country)
+MATCH (b:N)-[b1:R]->(y:N)-[b2:S]->(country)
+MATCH (c:N)-[c1:R]->(z:N)-[c2:S]->(country)
+MATCH (a)-[e1:R]-(b)-[e2:R]-(c)-[e3:R]-(a)
+RETURN count(*)
+----
+1296
+
 statement ok
 DROP GRAPH cycle_pipeline

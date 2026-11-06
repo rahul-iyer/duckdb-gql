@@ -125,21 +125,6 @@ static bool ProgramProjectsGraphValue(const GqlExpressionProgram &program, idx_t
 	return false;
 }
 
-static idx_t LabelPostingCardinality(const GqlCsrSnapshot &snapshot, const string &label) {
-	auto entry = snapshot.label_ids.find(StringUtil::Lower(label));
-	if (entry == snapshot.label_ids.end() || entry->second + 1 >= snapshot.vertex_label_posting_offsets.size()) {
-		return 0;
-	}
-	auto start = snapshot.vertex_label_posting_offsets[entry->second];
-	auto end = snapshot.vertex_label_posting_offsets[entry->second + 1];
-	return NumericCast<idx_t>(end - start);
-}
-
-static bool LabelPostingBeatsScan(const GqlCsrSnapshot &snapshot, const string &label) {
-	auto threshold = MaxValue<idx_t>(1024, snapshot.vertex_ids.size() / 16);
-	return LabelPostingCardinality(snapshot, label) <= threshold;
-}
-
 static bool ContainsLabel(const vector<string> &labels, const string &candidate) {
 	for (const auto &label : labels) {
 		if (StringUtil::CIEquals(label, candidate)) {
@@ -423,7 +408,7 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 							if (stage_allows_element_fetch && pattern.elements.size() > 1 && has_literal_seed) {
 								continue;
 							}
-							auto cardinality = LabelPostingCardinality(*snapshot, label);
+							auto cardinality = GqlLabelPostingSize(*snapshot, label);
 							// A small, selective posting is a bounded independent
 							// frontier; fetch its requested columns, not the table.
 							if (can_fetch_postings && element.binding_index < input.vertex_fetch_columns.size() &&
@@ -439,11 +424,11 @@ GqlAccessPathPlan GqlOptimizeAccessPathsLegacy(ClientContext &context, const str
 							}
 							continue;
 						}
-						if (!LabelPostingBeatsScan(*snapshot, label) || ContainsLabel(path.label_postings, label)) {
+						if (!GqlLabelPostingBeatsScan(*snapshot, label) || ContainsLabel(path.label_postings, label)) {
 							continue;
 						}
 						path.label_postings.push_back(label);
-						auto cardinality = LabelPostingCardinality(*snapshot, label);
+						auto cardinality = GqlLabelPostingSize(*snapshot, label);
 						if (path.cardinality.rows == DConstants::INVALID_INDEX || cardinality < path.cardinality.rows) {
 							path.cardinality.rows = cardinality;
 						}

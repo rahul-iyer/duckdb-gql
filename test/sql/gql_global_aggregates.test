@@ -156,6 +156,12 @@ MATCH (a)-[:R]-(b) RETURN min(a.score), max(a.score) ORDER BY count(*)
 ----
 1	2
 
+# One MATCH alternative takes the same path: repeated default names stay distinct columns.
+query II
+MATCH (a)-[:R]->(b) RETURN min(a.score), max(a.score) ORDER BY count(*)
+----
+1	2
+
 # Grouped LIMIT/OFFSET on an unreturned aggregate retain only visible fields.
 query T
 MATCH (a)-[:R]-(b) RETURN a.name ORDER BY count(*) DESC, a.name OFFSET 1 LIMIT 1
