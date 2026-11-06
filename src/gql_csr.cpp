@@ -3704,20 +3704,18 @@ static void CsrEdgeStatsFunction(ClientContext &, TableFunctionInput &input, Dat
 	for (idx_t index = 0; index < count; index++) {
 		const auto &label = state.labels[state.offset + index];
 		const auto &stats = state.snapshot->edge_label_stats[label.second];
-		output.SetValue(0, index, Value(label.first));
-		output.SetValue(1, index, Value::UBIGINT(stats.edge_count));
-		output.SetValue(2, index, Value::UBIGINT(stats.outgoing_vertex_count));
-		output.SetValue(3, index, Value::UBIGINT(stats.incoming_vertex_count));
-		output.SetValue(4, index,
-		                Value(stats.outgoing_vertex_count == 0
-		                          ? 0.0
-		                          : static_cast<double>(stats.edge_count) / stats.outgoing_vertex_count));
-		output.SetValue(5, index,
-		                Value(stats.incoming_vertex_count == 0
-		                          ? 0.0
-		                          : static_cast<double>(stats.edge_count) / stats.incoming_vertex_count));
-		output.SetValue(6, index, Value::UBIGINT(stats.max_outgoing_degree));
-		output.SetValue(7, index, Value::UBIGINT(stats.max_incoming_degree));
+		output.data[0].SetValue(index, Value(label.first));
+		output.data[1].SetValue(index, Value::UBIGINT(stats.edge_count));
+		output.data[2].SetValue(index, Value::UBIGINT(stats.outgoing_vertex_count));
+		output.data[3].SetValue(index, Value::UBIGINT(stats.incoming_vertex_count));
+		output.data[4].SetValue(index, Value(stats.outgoing_vertex_count == 0 ? 0.0
+		                                                                      : static_cast<double>(stats.edge_count) /
+		                                                                            stats.outgoing_vertex_count));
+		output.data[5].SetValue(index, Value(stats.incoming_vertex_count == 0 ? 0.0
+		                                                                      : static_cast<double>(stats.edge_count) /
+		                                                                            stats.incoming_vertex_count));
+		output.data[6].SetValue(index, Value::UBIGINT(stats.max_outgoing_degree));
+		output.data[7].SetValue(index, Value::UBIGINT(stats.max_incoming_degree));
 	}
 	state.offset += count;
 	output.SetChildCardinality(count);
