@@ -292,7 +292,7 @@ struct GqlReferencedGraphDefinition {
 
 class GqlStatement {
 public:
-	GqlStatement(GqlStatementType type_p, GqlSourceRange source_p) : type(type_p), source(std::move(source_p)) {
+	GqlStatement(GqlStatementType type_p, GqlSourceRange source_p) : type(type_p), source(source_p) {
 	}
 	virtual ~GqlStatement() {
 	}
@@ -317,7 +317,7 @@ class GqlCreateGraphStatement final : public GqlStatement {
 public:
 	GqlCreateGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p, bool if_not_exists_p,
 	                        GqlGraphSchemaDefinition schema_p)
-	    : GqlStatement(GqlStatementType::CREATE_GRAPH, std::move(source_p)), graph_name(std::move(graph_name_p)),
+	    : GqlStatement(GqlStatementType::CREATE_GRAPH, source_p), graph_name(std::move(graph_name_p)),
 	      if_not_exists(if_not_exists_p), schema(std::move(schema_p)) {
 	}
 
@@ -329,7 +329,7 @@ public:
 
 struct GqlAnalyzeGraphStatement : GqlStatement {
 	GqlAnalyzeGraphStatement(GqlSourceRange source, GqlIdentifier name)
-	    : GqlStatement(GqlStatementType::ANALYZE_GRAPH, std::move(source)), graph_name(std::move(name)) {
+	    : GqlStatement(GqlStatementType::ANALYZE_GRAPH, source), graph_name(std::move(name)) {
 	}
 	GqlIdentifier graph_name;
 };
@@ -338,7 +338,7 @@ class GqlCopyGraphStatement final : public GqlStatement {
 public:
 	GqlCopyGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p, string vertex_path_p, string edge_path_p,
 	                      bool validate_p)
-	    : GqlStatement(GqlStatementType::COPY_GRAPH, std::move(source_p)), graph_name(std::move(graph_name_p)),
+	    : GqlStatement(GqlStatementType::COPY_GRAPH, source_p), graph_name(std::move(graph_name_p)),
 	      vertex_path(std::move(vertex_path_p)), edge_path(std::move(edge_path_p)), validate(validate_p) {
 	}
 
@@ -351,7 +351,7 @@ public:
 class GqlDropGraphStatement final : public GqlStatement {
 public:
 	GqlDropGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p, bool if_exists_p)
-	    : GqlStatement(GqlStatementType::DROP_GRAPH, std::move(source_p)), graph_name(std::move(graph_name_p)),
+	    : GqlStatement(GqlStatementType::DROP_GRAPH, source_p), graph_name(std::move(graph_name_p)),
 	      if_exists(if_exists_p) {
 	}
 
@@ -362,7 +362,7 @@ public:
 class GqlSessionSetGraphStatement final : public GqlStatement {
 public:
 	GqlSessionSetGraphStatement(GqlSourceRange source_p, GqlIdentifier graph_name_p)
-	    : GqlStatement(GqlStatementType::SESSION_SET_GRAPH, std::move(source_p)), graph_name(std::move(graph_name_p)) {
+	    : GqlStatement(GqlStatementType::SESSION_SET_GRAPH, source_p), graph_name(std::move(graph_name_p)) {
 	}
 
 	GqlIdentifier graph_name;
@@ -371,7 +371,7 @@ public:
 class GqlSessionResetGraphStatement final : public GqlStatement {
 public:
 	explicit GqlSessionResetGraphStatement(GqlSourceRange source_p)
-	    : GqlStatement(GqlStatementType::SESSION_RESET_GRAPH, std::move(source_p)) {
+	    : GqlStatement(GqlStatementType::SESSION_RESET_GRAPH, source_p) {
 	}
 };
 
@@ -383,7 +383,7 @@ struct GqlInsertResultProjection {
 
 class GqlInsertStatement final : public GqlStatement {
 public:
-	explicit GqlInsertStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::INSERT, std::move(source_p)) {
+	explicit GqlInsertStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::INSERT, source_p) {
 	}
 
 	vector<GqlInsertElement> vertices;
@@ -396,7 +396,7 @@ public:
 // define a MERGE statement.
 class GqlMergeStatement final : public GqlStatement {
 public:
-	explicit GqlMergeStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::MERGE, std::move(source_p)) {
+	explicit GqlMergeStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::MERGE, source_p) {
 	}
 
 	GqlInsertElement vertex;
@@ -404,7 +404,7 @@ public:
 
 class GqlCallStatement final : public GqlStatement {
 public:
-	explicit GqlCallStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::CALL, std::move(source_p)) {
+	explicit GqlCallStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::CALL, source_p) {
 	}
 
 	GqlIdentifier procedure_namespace;
@@ -426,7 +426,7 @@ public:
 
 class GqlMatchStatement final : public GqlStatement {
 public:
-	explicit GqlMatchStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::MATCH, std::move(source_p)) {
+	explicit GqlMatchStatement(GqlSourceRange source_p) : GqlStatement(GqlStatementType::MATCH, source_p) {
 	}
 
 	vector<GqlQueryClause> clauses;
@@ -451,7 +451,7 @@ public:
 class GqlUnsupportedStatement final : public GqlStatement {
 public:
 	GqlUnsupportedStatement(GqlSourceRange source_p, string feature_p)
-	    : GqlStatement(GqlStatementType::UNSUPPORTED, std::move(source_p)), feature(std::move(feature_p)) {
+	    : GqlStatement(GqlStatementType::UNSUPPORTED, source_p), feature(std::move(feature_p)) {
 	}
 
 	string feature;
