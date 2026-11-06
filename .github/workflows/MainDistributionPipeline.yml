@@ -27,11 +27,40 @@ jobs:
       ci_tools_version: v2.0-cyanoptera
       extension_name: duckgql
 
-  # code-quality-check:
-  #   name: Code Quality Check
-  #   uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v2.0-cyanoptera
-  #   with:
-  #     duckdb_version: v2.0.0
-  #     ci_tools_version: v2.0-cyanoptera
-  #     extension_name: duckgql
-  #     format_checks: 'format;tidy'
+  code-quality-check:
+    name: Code Quality Check
+    runs-on: ubuntu-24.04
+    env:
+      GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install quality tools
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ninja-build clang-tidy
+          python -m pip install 'clang_format==11.0.1' 'black==24.*' cmake-format cxxheaderparser pcpp
+      - name: Format Check
+        run: make format-check
+      - name: Set up build dependencies
+        if: ${{ !cancelled() }}
+        run: make setup-vcpkg
+      - name: Tidy Check
+        if: ${{ !cancelled() }}
+        run: |
+          cmake -G Ninja -S duckdb -B build/tidy \
+            -DCMAKE_BUILD_TYPE=Debug -DDISABLE_UNITY=1 -DCLANG_TIDY=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="$PWD/extension_config.cmake" \
+            -DDUCKDB_EXPLICIT_VERSION=v2.0.0 -DCMAKE_CXX_STANDARD=17 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_TOOLCHAIN_PATH" \
+            -DVCPKG_MANIFEST_DIR="$PWD"
+          cp duckdb/.clang-tidy build/tidy/.clang-tidy
+          cd build/tidy
+          python ../../duckdb/scripts/run-clang-tidy.py -p . -j 4 -quiet \
+            -config="$(cat .clang-tidy)" \
+            -header-filter="$GITHUB_WORKSPACE/src/include/.*" "$GITHUB_WORKSPACE/src/[^/]+\\.cpp$"
