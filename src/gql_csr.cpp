@@ -3620,50 +3620,48 @@ static void CsrStatsFunction(ClientContext &context, TableFunctionInput &input, 
 	const idx_t delta_vertices = delta ? delta->vertex_ids.size() : 0;
 	const idx_t delta_edges = delta ? delta->edge_count : 0;
 	output.SetChildCardinality(1);
-	output.SetValue(0, 0, Value(data.graph_name));
-	output.SetValue(1, 0, Value::UBIGINT(snapshot->graph_version));
-	output.SetValue(2, 0, Value::UBIGINT(snapshot->vertex_ids.size() + delta_vertices));
-	output.SetValue(3, 0, Value::UBIGINT(snapshot->edge_count + delta_edges));
-	output.SetValue(4, 0, Value::UBIGINT(snapshot->memory_bytes));
-	output.SetValue(5, 0, Value::UBIGINT(build_count));
-	output.SetValue(6, 0, Value(true));
-	output.SetValue(7, 0,
-	                Value::UBIGINT((snapshot->capabilities & GQL_CSR_OUTGOING)
-	                                   ? snapshot->outgoing_neighbors.WidthBytes()
-	                                   : snapshot->incoming_neighbors.WidthBytes()));
-	output.SetValue(8, 0, Value(!snapshot->vertex_ids.IsImplicitDense()));
-	output.SetValue(9, 0, Value(snapshot->outgoing_label_ids.IsUniform()));
-	output.SetValue(10, 0, Value::UBIGINT(snapshot->topology_bytes));
-	output.SetValue(11, 0, Value::UBIGINT(snapshot->identity_bytes));
-	output.SetValue(12, 0, Value::UBIGINT(snapshot->label_bytes));
-	output.SetValue(13, 0, Value::UBIGINT(snapshot->auxiliary_bytes));
-	output.SetValue(14, 0, Value::UBIGINT(snapshot->build_auxiliary_bytes));
-	output.SetValue(15, 0, Value::UBIGINT(snapshot->capabilities));
-	output.SetValue(16, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_OUTGOING));
-	output.SetValue(17, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_INCOMING));
-	output.SetValue(18, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_IDS));
-	output.SetValue(19, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_LABELS));
-	output.SetValue(20, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABELS));
-	output.SetValue(21, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS));
-	output.SetValue(22, 0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_STATS));
-	output.SetValue(27, 0, Value::BOOLEAN(snapshot->has_label_fanout_stats));
-	output.SetValue(28, 0, Value::UBIGINT(snapshot->label_fanout_stats.size()));
-	output.SetValue(29, 0, Value(snapshot->endpoint_statistics_status));
-	output.SetValue(30, 0,
-	                Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->groups.size() : 0));
-	output.SetValue(31, 0,
-	                Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->counts.size() : 0));
-	output.SetValue(
-	    32, 0, Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->AllocatedBytes() : 0));
-	output.SetValue(
-	    23, 0,
-	    Value::BOOLEAN((snapshot->capabilities & GQL_CSR_OUT_DEGREES) || (snapshot->capabilities & GQL_CSR_OUTGOING)));
-	output.SetValue(24, 0, Value::UBIGINT(storage->acquisition_count.load()));
-	output.SetValue(25, 0, snapshot->has_source_snapshot ? Value(snapshot->source_catalog) : Value());
-	output.SetValue(26, 0, snapshot->has_source_snapshot ? Value::UBIGINT(snapshot->source_snapshot_id) : Value());
-	output.SetValue(33, 0, Value::UBIGINT(delta_vertices));
-	output.SetValue(34, 0, Value::UBIGINT(delta_edges));
-	output.SetValue(35, 0, Value::BOOLEAN(snapshot->loaded_from_disk));
+	output.data[0].SetValue(0, Value(data.graph_name));
+	output.data[1].SetValue(0, Value::UBIGINT(snapshot->graph_version));
+	output.data[2].SetValue(0, Value::UBIGINT(snapshot->vertex_ids.size() + delta_vertices));
+	output.data[3].SetValue(0, Value::UBIGINT(snapshot->edge_count + delta_edges));
+	output.data[4].SetValue(0, Value::UBIGINT(snapshot->memory_bytes));
+	output.data[5].SetValue(0, Value::UBIGINT(build_count));
+	output.data[6].SetValue(0, Value(true));
+	output.data[7].SetValue(0, Value::UBIGINT((snapshot->capabilities & GQL_CSR_OUTGOING)
+	                                              ? snapshot->outgoing_neighbors.WidthBytes()
+	                                              : snapshot->incoming_neighbors.WidthBytes()));
+	output.data[8].SetValue(0, Value(!snapshot->vertex_ids.IsImplicitDense()));
+	output.data[9].SetValue(0, Value(snapshot->outgoing_label_ids.IsUniform()));
+	output.data[10].SetValue(0, Value::UBIGINT(snapshot->topology_bytes));
+	output.data[11].SetValue(0, Value::UBIGINT(snapshot->identity_bytes));
+	output.data[12].SetValue(0, Value::UBIGINT(snapshot->label_bytes));
+	output.data[13].SetValue(0, Value::UBIGINT(snapshot->auxiliary_bytes));
+	output.data[14].SetValue(0, Value::UBIGINT(snapshot->build_auxiliary_bytes));
+	output.data[15].SetValue(0, Value::UBIGINT(snapshot->capabilities));
+	output.data[16].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_OUTGOING));
+	output.data[17].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_INCOMING));
+	output.data[18].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_IDS));
+	output.data[19].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_LABELS));
+	output.data[20].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABELS));
+	output.data[21].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_VERTEX_LABEL_POSTINGS));
+	output.data[22].SetValue(0, Value::BOOLEAN(snapshot->capabilities & GQL_CSR_EDGE_STATS));
+	output.data[27].SetValue(0, Value::BOOLEAN(snapshot->has_label_fanout_stats));
+	output.data[28].SetValue(0, Value::UBIGINT(snapshot->label_fanout_stats.size()));
+	output.data[29].SetValue(0, Value(snapshot->endpoint_statistics_status));
+	output.data[30].SetValue(
+	    0, Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->groups.size() : 0));
+	output.data[31].SetValue(
+	    0, Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->counts.size() : 0));
+	output.data[32].SetValue(
+	    0, Value::UBIGINT(snapshot->endpoint_statistics ? snapshot->endpoint_statistics->AllocatedBytes() : 0));
+	output.data[23].SetValue(0, Value::BOOLEAN((snapshot->capabilities & GQL_CSR_OUT_DEGREES) ||
+	                                           (snapshot->capabilities & GQL_CSR_OUTGOING)));
+	output.data[24].SetValue(0, Value::UBIGINT(storage->acquisition_count.load()));
+	output.data[25].SetValue(0, snapshot->has_source_snapshot ? Value(snapshot->source_catalog) : Value());
+	output.data[26].SetValue(0, snapshot->has_source_snapshot ? Value::UBIGINT(snapshot->source_snapshot_id) : Value());
+	output.data[33].SetValue(0, Value::UBIGINT(delta_vertices));
+	output.data[34].SetValue(0, Value::UBIGINT(delta_edges));
+	output.data[35].SetValue(0, Value::BOOLEAN(snapshot->loaded_from_disk));
 	state.done = true;
 }
 
@@ -3704,20 +3702,18 @@ static void CsrEdgeStatsFunction(ClientContext &, TableFunctionInput &input, Dat
 	for (idx_t index = 0; index < count; index++) {
 		const auto &label = state.labels[state.offset + index];
 		const auto &stats = state.snapshot->edge_label_stats[label.second];
-		output.SetValue(0, index, Value(label.first));
-		output.SetValue(1, index, Value::UBIGINT(stats.edge_count));
-		output.SetValue(2, index, Value::UBIGINT(stats.outgoing_vertex_count));
-		output.SetValue(3, index, Value::UBIGINT(stats.incoming_vertex_count));
-		output.SetValue(4, index,
-		                Value(stats.outgoing_vertex_count == 0
-		                          ? 0.0
-		                          : static_cast<double>(stats.edge_count) / stats.outgoing_vertex_count));
-		output.SetValue(5, index,
-		                Value(stats.incoming_vertex_count == 0
-		                          ? 0.0
-		                          : static_cast<double>(stats.edge_count) / stats.incoming_vertex_count));
-		output.SetValue(6, index, Value::UBIGINT(stats.max_outgoing_degree));
-		output.SetValue(7, index, Value::UBIGINT(stats.max_incoming_degree));
+		output.data[0].SetValue(index, Value(label.first));
+		output.data[1].SetValue(index, Value::UBIGINT(stats.edge_count));
+		output.data[2].SetValue(index, Value::UBIGINT(stats.outgoing_vertex_count));
+		output.data[3].SetValue(index, Value::UBIGINT(stats.incoming_vertex_count));
+		output.data[4].SetValue(index, Value(stats.outgoing_vertex_count == 0 ? 0.0
+		                                                                      : static_cast<double>(stats.edge_count) /
+		                                                                            stats.outgoing_vertex_count));
+		output.data[5].SetValue(index, Value(stats.incoming_vertex_count == 0 ? 0.0
+		                                                                      : static_cast<double>(stats.edge_count) /
+		                                                                            stats.incoming_vertex_count));
+		output.data[6].SetValue(index, Value::UBIGINT(stats.max_outgoing_degree));
+		output.data[7].SetValue(index, Value::UBIGINT(stats.max_incoming_degree));
 	}
 	state.offset += count;
 	output.SetChildCardinality(count);
