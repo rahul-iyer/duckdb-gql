@@ -941,36 +941,6 @@ static string ArithmeticName(GqlBinaryOperator operation) {
 	throw InternalException("GQL operation is not arithmetic");
 }
 
-static idx_t ExpressionEnd(const GqlExpressionProgram &program, idx_t node) {
-	if (node >= program.node_types.size()) {
-		throw InternalException("Truncated GQL expression program");
-	}
-	auto type = static_cast<GqlExpressionType>(program.node_types[node]);
-	auto cursor = node + 1;
-	switch (type) {
-	case GqlExpressionType::LITERAL:
-	case GqlExpressionType::VARIABLE_REFERENCE:
-		return cursor;
-	case GqlExpressionType::LIST_CONSTRUCTOR:
-	case GqlExpressionType::RECORD_CONSTRUCTOR:
-		throw InternalException("GQL collection constructor reached relational expression lowering");
-	case GqlExpressionType::PROPERTY_REFERENCE:
-	case GqlExpressionType::ELEMENT_ID:
-	case GqlExpressionType::UNARY:
-	case GqlExpressionType::IS_NULL:
-	case GqlExpressionType::LABELED:
-		return ExpressionEnd(program, cursor);
-	case GqlExpressionType::BINARY:
-		return ExpressionEnd(program, ExpressionEnd(program, cursor));
-	case GqlExpressionType::FUNCTION:
-		for (idx_t child = 0; child < program.child_counts[node]; child++) {
-			cursor = ExpressionEnd(program, cursor);
-		}
-		return cursor;
-	}
-	throw InternalException("Unknown GQL expression program node");
-}
-
 static unique_ptr<ParsedExpression> Function(const string &name, vector<unique_ptr<ParsedExpression>> arguments) {
 	return make_uniq<FunctionExpression>(Identifier(name), std::move(arguments));
 }
@@ -1087,7 +1057,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 			if (!values) {
 				throw NotImplementedException("GQL node values of a path other than ALL SHORTEST");
 			}
-			cursor = ExpressionEnd(program, node);
+			cursor = GqlExpressionEnd(program, node);
 			return values;
 		}
 		if (name == "path_length") {
@@ -1126,7 +1096,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 				    Column(identities[binding_index].table_alias, identities[binding_index].column_name)));
 				path_cursor++;
 			}
-			cursor = ExpressionEnd(program, path_root);
+			cursor = GqlExpressionEnd(program, path_root);
 			if (missing_elements.empty()) {
 				throw InternalException("GQL fixed path has no elements");
 			}
@@ -1238,7 +1208,7 @@ static unique_ptr<ParsedExpression> LowerExpression(const GqlExpressionProgram &
 	}
 	case GqlExpressionType::BINARY: {
 		auto left_root = cursor;
-		auto right_root = ExpressionEnd(program, left_root);
+		auto right_root = GqlExpressionEnd(program, left_root);
 		auto left_type = static_cast<GqlTypeId>(program.result_types[left_root]);
 		auto right_type = static_cast<GqlTypeId>(program.result_types[right_root]);
 		auto left_desired = left_type == GqlTypeId::PROPERTY_VALUE ? right_type : GqlTypeId::UNKNOWN;
@@ -2202,85 +2172,6 @@ static unique_ptr<TableRef> RecursiveMatchBindReplace(ClientContext &context, Ta
 	return TableBackedNativeRecursiveMatch(table_graph, match);
 }
 
-// A predicate-free, identity-only pipeline with branches from cycle vertices
-// to one shared seed can be evaluated from its closing cycle outward. Restrict
-// this heuristic to fixed managed scans; other pipelines retain native planning.
-static bool CanLowerCyclePipeline(const RelationalMatchInput &match, const GqlTableGraphBinding &graph) {
-	if (!match.predicates.empty() || match.match_stages.size() < 3 ||
-	    !StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") ||
-	    !StringUtil::CIEquals(graph.edge.ownership, "MANAGED") || graph.vertex.key_column != "__gql_id" ||
-	    graph.edge.key_column != "__gql_edge_id" || graph.edge.label_is_list || !graph.edge.static_labels.empty() ||
-	    graph.edge.label_column.empty()) {
-		return false;
-	}
-	const auto &first = match.match_stages.front().patterns;
-	const auto &last = match.match_stages.back().patterns;
-	if (first.size() != 1 || first[0].elements.size() != 1 || last.size() != 1 || last[0].elements.size() < 7 ||
-	    last[0].elements.front().binding_index != last[0].elements.back().binding_index) {
-		return false;
-	}
-	auto seed = first[0].elements[0].binding_index;
-	unordered_set<idx_t> cycle_vertices;
-	for (const auto &element : last[0].elements) {
-		if (element.type == GqlPatternElementType::VERTEX) {
-			cycle_vertices.insert(element.binding_index);
-		}
-	}
-	if (cycle_vertices.count(seed)) {
-		return false;
-	}
-	unordered_set<idx_t> edges;
-	for (idx_t part = 1; part < match.match_stages.size(); part++) {
-		const auto &patterns = match.match_stages[part].patterns;
-		if (patterns.size() != 1 || patterns[0].elements.size() < 5) {
-			return false;
-		}
-		const auto &elements = patterns[0].elements;
-		unordered_set<idx_t> bindings;
-		for (idx_t index = 0; index < elements.size(); index++) {
-			const auto &element = elements[index];
-			bool closing = part + 1 == match.match_stages.size() && index + 1 == elements.size();
-			if (element.quantified || (!closing && !bindings.insert(element.binding_index).second)) {
-				return false;
-			}
-			if (element.type == GqlPatternElementType::EDGE &&
-			    (element.label.empty() || element.label.find(';') != string::npos ||
-			     !edges.insert(element.binding_index).second)) {
-				return false;
-			}
-		}
-		if (part + 1 < match.match_stages.size() &&
-		    (!cycle_vertices.count(elements.front().binding_index) || elements.back().binding_index != seed)) {
-			return false;
-		}
-	}
-	for (const auto &node : match.nodes) {
-		if (node.type == GqlLogicalOperatorType::LEFT_APPLY || node.type == GqlLogicalOperatorType::CALL) {
-			return false;
-		}
-	}
-	for (const auto &program : match.projections) {
-		for (idx_t node = 0; node < program.node_types.size(); node++) {
-			if (static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::VARIABLE_REFERENCE &&
-			    (node == 0 ||
-			     static_cast<GqlExpressionType>(program.node_types[node - 1]) != GqlExpressionType::ELEMENT_ID)) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
-// Sibling OPTIONAL MATCH branches join into a per-row product: n matches of one and
-// m of the other give n*m rows, although each aggregate may only observe one branch.
-// Returns the LEFT_APPLY chain, outermost first, when X |><| A |><| B can instead run
-// as (X |><| A) UNION ALL (X |><| B) with the other branch's columns NULL. They are
-// equivalent when:
-// - no branch references another's bindings, and nothing filters above the branches;
-// - grouping keys read only X, whose rows survive both forms via the LEFT join;
-// - no projection reads a whole element, whose columns the union would not carry;
-// - each aggregate reads one property, skips NULL, and ignores duplicates, so it sees
-//   the same set of values whether they repeat m times or are padded with NULL rows.
 static bool TryGetManagedColumnType(ClientContext &context, const GqlElementTableBinding &table, const string &column,
                                     LogicalType &result) {
 	if (!StringUtil::CIEquals(table.ownership, "MANAGED") || !table.relation_sql.empty()) {
@@ -2298,183 +2189,6 @@ static bool TryGetManagedColumnType(ClientContext &context, const GqlElementTabl
 	}
 	result = native.GetColumn(Identifier(column)).Type();
 	return true;
-}
-
-static vector<idx_t> FindIndependentOptionalBranches(const RelationalMatchInput &match,
-                                                     const GqlAccessPathPlan &plan) {
-	vector<idx_t> chain;
-	for (auto node = match.root; match.nodes[node].type == GqlLogicalOperatorType::LEFT_APPLY;
-	     node = match.nodes[node].child) {
-		chain.push_back(node);
-	}
-	if (chain.size() < 2) {
-		return {};
-	}
-	vector<idx_t> binding_branch(match.binding_types.size(), DConstants::INVALID_INDEX);
-	vector<idx_t> branch_stage(chain.size());
-	vector<vector<idx_t>> branch_predicates(chain.size());
-	for (idx_t branch = 0; branch < chain.size(); branch++) {
-		auto right = match.nodes[chain[branch]].right;
-		while (match.nodes[right].type == GqlLogicalOperatorType::FILTER) {
-			branch_predicates[branch].push_back(match.nodes[right].payload);
-			right = match.nodes[right].child;
-		}
-		if (match.nodes[right].type != GqlLogicalOperatorType::MATCH) {
-			return {};
-		}
-		branch_stage[branch] = match.nodes[right].payload;
-		const auto &introduced = plan.stages[branch_stage[branch]].introduced;
-		bool any_binding = false;
-		for (idx_t binding = 0; binding < introduced.size(); binding++) {
-			if (introduced[binding]) {
-				binding_branch[binding] = branch;
-				any_binding = true;
-			}
-		}
-		if (!any_binding) {
-			return {};
-		}
-	}
-	auto foreign_binding = [&](idx_t binding, idx_t branch) {
-		return binding < binding_branch.size() && binding_branch[binding] != DConstants::INVALID_INDEX &&
-		       binding_branch[binding] != branch;
-	};
-	for (idx_t branch = 0; branch < chain.size(); branch++) {
-		for (const auto &pattern : match.match_stages[branch_stage[branch]].patterns) {
-			for (const auto &element : pattern.elements) {
-				if (foreign_binding(element.binding_index, branch)) {
-					return {};
-				}
-			}
-		}
-		for (const auto predicate : branch_predicates[branch]) {
-			for (const auto binding : match.predicates[predicate].binding_indices) {
-				if (foreign_binding(binding, branch)) {
-					return {};
-				}
-			}
-		}
-	}
-	bool has_aggregate = false;
-	for (const auto &program : match.projections) {
-		for (idx_t node = 0; node < program.node_types.size(); node++) {
-			// These read their path's columns, which the union carries, not whole elements.
-			if (static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::FUNCTION &&
-			    (program.values[node] == "__gql_path_values" || program.values[node] == "path_length")) {
-				node = ExpressionEnd(program, node) - 1;
-				continue;
-			}
-			const auto type = static_cast<GqlTypeId>(program.result_types[node]);
-			if (type != GqlTypeId::NODE && type != GqlTypeId::EDGE && type != GqlTypeId::PATH) {
-				continue;
-			}
-			const auto previous =
-			    node == 0 ? GqlExpressionType::LITERAL : static_cast<GqlExpressionType>(program.node_types[node - 1]);
-			if (previous != GqlExpressionType::PROPERTY_REFERENCE && previous != GqlExpressionType::ELEMENT_ID &&
-			    previous != GqlExpressionType::LABELED) {
-				return {};
-			}
-		}
-		for (idx_t node = 0; node < program.node_types.size();) {
-			if (!program.aggregate[node]) {
-				const auto binding = program.binding_indices[node];
-				if (binding < binding_branch.size() && binding_branch[binding] != DConstants::INVALID_INDEX) {
-					return {};
-				}
-				node++;
-				continue;
-			}
-			const auto &name = program.values[node];
-			const bool ignores_duplicates = name == "min" || name == "max" ||
-			                                ((name == "count" || name == "collect_list") && program.distinct[node]);
-			const auto argument = node + 1;
-			if (!ignores_duplicates || program.child_counts[node] != 1 || argument >= program.node_types.size() ||
-			    static_cast<GqlExpressionType>(program.node_types[argument]) != GqlExpressionType::PROPERTY_REFERENCE) {
-				return {};
-			}
-			has_aggregate = true;
-			node = ExpressionEnd(program, node);
-		}
-	}
-	return has_aggregate ? chain : vector<idx_t>();
-}
-
-//! Each binding's one label and the stage naming it. Empty when it has none, several, or labels
-//! in more than one stage.
-static vector<string> SingleBindingLabels(const RelationalMatchInput &match, vector<idx_t> &label_stage) {
-	vector<string> labels(match.binding_types.size());
-	vector<bool> several(match.binding_types.size(), false);
-	label_stage.assign(match.binding_types.size(), DConstants::INVALID_INDEX);
-	for (idx_t stage = 0; stage < match.match_stages.size(); stage++) {
-		for (const auto &pattern : match.match_stages[stage].patterns) {
-			for (const auto &element : pattern.elements) {
-				auto binding = element.binding_index;
-				if (element.label.empty()) {
-					continue;
-				}
-				several[binding] =
-				    several[binding] || element.label.find(';') != string::npos ||
-				    (!labels[binding].empty() && !StringUtil::CIEquals(element.label, labels[binding])) ||
-				    (label_stage[binding] != DConstants::INVALID_INDEX && label_stage[binding] != stage);
-				labels[binding] = element.label;
-				label_stage[binding] = stage;
-			}
-		}
-	}
-	for (idx_t binding = 0; binding < labels.size(); binding++) {
-		if (several[binding]) {
-			labels[binding].clear();
-		}
-	}
-	return labels;
-}
-
-//! A vertex used only by its ID, with one label, reads that label's CSR posting list instead of
-//! scanning and label-testing the whole vertex table. The list is smaller, and its exact size
-//! reaches DuckDB's join ordering, where a label test on the table is only a fixed guess.
-static void ReadIdOnlyVerticesFromPostings(ClientContext &context, const string &graph_name,
-                                           const GqlTableGraphBinding &graph, const RelationalMatchInput &match,
-                                           const vector<bool> &vertex_row_read, GqlAccessPathPlan &access_plan) {
-	if (!StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") || graph.vertex.key_column != "__gql_id") {
-		return;
-	}
-	auto snapshot = GqlTryGetCsrSnapshot(context, graph_name);
-	if (!snapshot || !GqlCsrHasVertexLabels(*snapshot)) {
-		return;
-	}
-	vector<idx_t> label_stage;
-	auto labels = SingleBindingLabels(match, label_stage);
-	for (idx_t stage_index = 0; stage_index < access_plan.stages.size(); stage_index++) {
-		auto &stage = access_plan.stages[stage_index];
-		// The ends of an edge bound by an earlier stage or expanded through the CSR are reached from
-		// that edge, which is cheaper than any independent source.
-		vector<bool> expansion_end(stage.bindings.size(), false);
-		for (const auto &pattern : match.match_stages[stage_index].patterns) {
-			for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
-				auto edge = pattern.elements[index].binding_index;
-				auto type = stage.bindings[edge].type;
-				if (!stage.introduced[edge] || type == GqlBindingAccessPathType::CSR_EXPANSION ||
-				    type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION ||
-				    type == GqlBindingAccessPathType::CSR_PATH_EXPANSION) {
-					expansion_end[pattern.elements[index - 1].binding_index] = true;
-					expansion_end[pattern.elements[index + 1].binding_index] = true;
-				}
-			}
-		}
-		for (idx_t binding = 0; binding < stage.bindings.size(); binding++) {
-			auto &path = stage.bindings[binding];
-			// A label named in another stage is tested against the vertex table there.
-			if (match.binding_types[binding] != GqlPatternElementType::VERTEX || !stage.introduced[binding] ||
-			    expansion_end[binding] || label_stage[binding] != stage_index || vertex_row_read[binding] ||
-			    path.type != GqlBindingAccessPathType::TABLE_SCAN || !path.label_postings.empty() ||
-			    labels[binding].empty() || !GqlLabelPostingBeatsScan(*snapshot, labels[binding])) {
-				continue;
-			}
-			path.type = GqlBindingAccessPathType::LABEL_POSTING_FETCH;
-			path.label_postings = {labels[binding]};
-			path.fetch_columns.clear();
-		}
-	}
 }
 
 static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const string &graph_name,
@@ -2562,6 +2276,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 	access_input.projections = match.projections;
 	access_input.predicates = match.predicates;
 	access_input.vertex_fetch_columns = std::move(vertex_fetch_columns);
+	access_input.vertex_row_read = vertex_row_read;
 	// Without DISTINCT, duplicates can only go unnoticed under aggregates that ignore them.
 	access_input.duplicate_insensitive = match.modifiers.distinct;
 	for (const auto &program : match.projections) {
@@ -2580,7 +2295,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			for (const auto &element : pattern.elements) {
 				access_pattern.elements.push_back({element.type, element.binding_index, element.label, element.reverse,
 				                                   element.quantified, element.unbounded, element.minimum_repetitions,
-				                                   element.maximum_repetitions, element.shortest >= GQL_PATH_SEARCH_ALL});
+				                                   element.maximum_repetitions, element.shortest >= GQL_PATH_SEARCH_ALL,
+				                                   element.shortest != 0});
 			}
 			access_stage.patterns.push_back(std::move(access_pattern));
 		}
@@ -2598,8 +2314,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				continue;
 			}
 			const auto path_root = node + 1;
-			const auto property = program.values[ExpressionEnd(program, path_root)];
-			for (idx_t child = path_root + 1; child < ExpressionEnd(program, path_root); child++) {
+			const auto property = program.values[GqlExpressionEnd(program, path_root)];
+			for (idx_t child = path_root + 1; child < GqlExpressionEnd(program, path_root); child++) {
 				const auto binding = NumericCast<idx_t>(program.binding_indices[child]);
 				if (binding >= match.binding_types.size() || match.binding_types[binding] != GqlPatternElementType::EDGE) {
 					continue;
@@ -2613,38 +2329,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			}
 		}
 	}
-	// Relational hops cannot report a distance, so a path search always runs over a current CSR.
-	// Each relational hop of a long path is a join per repetition, which costs more than a build.
-	static constexpr idx_t MAX_RELATIONAL_PATH_HOPS = 4;
-	const bool can_build_for_paths = context.transaction.IsAutoCommit() &&
-	                                 StringUtil::CIEquals(graph.vertex.ownership, "MANAGED") &&
-	                                 StringUtil::CIEquals(graph.edge.ownership, "MANAGED");
-	for (const auto &stage : match.match_stages) {
-		for (const auto &pattern : stage.patterns) {
-			for (const auto &element : pattern.elements) {
-				const bool long_path = element.quantified && can_build_for_paths &&
-				                       (element.unbounded || element.maximum_repetitions > MAX_RELATIONAL_PATH_HOPS);
-				if ((element.shortest || long_path) && !GqlTryGetCsrSnapshot(context, graph_name)) {
-					GqlGetOrBuildCsrSnapshot(context, graph_name, GQL_CSR_FULL, nullptr, string());
-				}
-			}
-		}
-	}
 	auto access_plan = GqlOptimizeAccessPaths(context, graph_name, graph, access_input);
-	// The cycle pipeline joins each stage's tables to the closing cycle first. Per-binding CSR
-	// sources would instead evaluate the stages one after another, before the cycle limits them.
-	const bool cycle_pipeline = CanLowerCyclePipeline(match, graph);
-	if (cycle_pipeline) {
-		for (auto &stage : access_plan.stages) {
-			for (auto &path : stage.bindings) {
-				auto cardinality = path.cardinality;
-				path = GqlBindingAccessPath();
-				path.cardinality = cardinality;
-			}
-		}
-	} else {
-		ReadIdOnlyVerticesFromPostings(context, graph_name, graph, match, vertex_row_read, access_plan);
-	}
+	const bool cycle_pipeline = access_plan.cycle_pipeline;
 
 	// Apply single-binding literal checks before dependent graph expansion.
 	// Native predicate pushdown cannot always cross the delim/CTE boundaries
@@ -2670,7 +2356,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			}
 			auto operation = static_cast<GqlBinaryOperator>(program.operators[root]);
 			auto left = root + 1;
-			auto right = ExpressionEnd(program, left);
+			auto right = GqlExpressionEnd(program, left);
 			if (operation == GqlBinaryOperator::AND) {
 				self(self, left);
 				self(self, right);
@@ -3079,7 +2765,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				vector<unique_ptr<ParsedExpression>> filters;
 				for (const auto &entry : checks) {
 					const auto &program = match.predicates[entry.first];
-					auto left = entry.second + 1, right = ExpressionEnd(program, left);
+					auto left = entry.second + 1, right = GqlExpressionEnd(program, left);
 					auto property = static_cast<GqlExpressionType>(program.node_types[left]) ==
 					                        GqlExpressionType::PROPERTY_REFERENCE
 					                    ? left
@@ -3475,10 +3161,9 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		throw InternalException("Unknown GQL logical operator");
 	};
 	PipelineState pipeline;
-	const auto optional_branches =
-	    cycle_pipeline ? vector<idx_t>() : FindIndependentOptionalBranches(match, access_plan);
+	const auto &optional_branches = access_plan.independent_optional_branches;
 	if (!optional_branches.empty()) {
-		// See FindIndependentOptionalBranches for why this equals the nested joins.
+		// See FindIndependentOptionalBranches in the optimizer for why this equals the nested joins.
 		const auto base_node = match.nodes[optional_branches.back()].child;
 		const string union_alias = "gql_optional_branches";
 		vector<PipelineState> branch_pipelines;

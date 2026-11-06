@@ -30,6 +30,8 @@ struct GqlAccessPatternElement {
 	idx_t maximum_repetitions = 1;
 	//! ALL SHORTEST between two given vertices.
 	bool all_shortest = false;
+	//! Any shortest-path search, which only a CSR can answer.
+	bool shortest = false;
 };
 
 struct GqlAccessPattern {
@@ -58,6 +60,8 @@ struct GqlAccessPathInput {
 	// potentially volatile expressions between MATCH and that DISTINCT.
 	bool duplicate_insensitive = false;
 	vector<vector<string>> vertex_fetch_columns;
+	//! Whether a vertex's row is read beyond its identity; otherwise its edge suffices.
+	vector<bool> vertex_row_read;
 };
 
 enum class GqlBindingAccessPathType : uint8_t {
@@ -117,11 +121,19 @@ struct GqlStageAccessPlan {
 struct GqlAccessPathPlan {
 	vector<GqlStageAccessPlan> stages;
 	string optimizer_mode = "cost";
+	//! Evaluate the closing cycle stage first and join every other stage to it as plain
+	//! table scans, instead of nesting the stages in order.
+	bool cycle_pipeline = false;
+	//! LEFT_APPLY chain, outermost first, whose sibling OPTIONAL branches run as a UNION ALL
+	//! of the base joined to each branch instead of their per-row product. Empty otherwise.
+	vector<idx_t> independent_optional_branches;
 };
 
 // Chooses graph-specific physical access paths that DuckDB's relational
-// optimizer cannot invent. Relational lowering must consume this plan without
-// reapplying eligibility or selectivity policy.
+// optimizer cannot invent, and the structural strategy that combines them.
+// The result is final: relational lowering follows it without reapplying
+// eligibility, selectivity, or strategy policy, and gql_optimizer_plan()
+// reports exactly this plan. Builds a CSR when a path search requires one.
 GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
                                          const GqlTableGraphBinding &graph, const GqlAccessPathInput &input);
 

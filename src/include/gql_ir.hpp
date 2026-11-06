@@ -294,6 +294,8 @@ struct GqlExpressionProgram {
 LogicalType GqlExpressionProgramType();
 Value GqlSerializeExpression(const GqlBoundExpression &expression);
 GqlExpressionProgram GqlDeserializeExpression(const Value &value);
+// One past the last node of the expression rooted at node; programs are stored in prefix order.
+idx_t GqlExpressionEnd(const GqlExpressionProgram &program, idx_t node);
 LogicalType GqlDuckType(const GqlType &type);
 
 } // namespace duckdb

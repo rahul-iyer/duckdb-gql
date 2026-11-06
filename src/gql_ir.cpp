@@ -242,4 +242,34 @@ GqlExpressionProgram GqlDeserializeExpression(const Value &value) {
 	return result;
 }
 
+idx_t GqlExpressionEnd(const GqlExpressionProgram &program, idx_t node) {
+	if (node >= program.node_types.size()) {
+		throw InternalException("Truncated GQL expression program");
+	}
+	auto type = static_cast<GqlExpressionType>(program.node_types[node]);
+	auto cursor = node + 1;
+	switch (type) {
+	case GqlExpressionType::LITERAL:
+	case GqlExpressionType::VARIABLE_REFERENCE:
+		return cursor;
+	case GqlExpressionType::LIST_CONSTRUCTOR:
+	case GqlExpressionType::RECORD_CONSTRUCTOR:
+		throw InternalException("GQL collection constructor has no prefix extent");
+	case GqlExpressionType::PROPERTY_REFERENCE:
+	case GqlExpressionType::ELEMENT_ID:
+	case GqlExpressionType::UNARY:
+	case GqlExpressionType::IS_NULL:
+	case GqlExpressionType::LABELED:
+		return GqlExpressionEnd(program, cursor);
+	case GqlExpressionType::BINARY:
+		return GqlExpressionEnd(program, GqlExpressionEnd(program, cursor));
+	case GqlExpressionType::FUNCTION:
+		for (idx_t child = 0; child < program.child_counts[node]; child++) {
+			cursor = GqlExpressionEnd(program, cursor);
+		}
+		return cursor;
+	}
+	throw InternalException("Unknown GQL expression program node");
+}
+
 } // namespace duckdb

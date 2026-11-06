@@ -68,6 +68,12 @@ RETURN count(*)
 ----
 3120
 
+# Diagnostics report the table scans that run, not the CSR sources the cycle replaced.
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path <> 'TABLE_SCAN'
+----
+0
+
 # Outside a cycle, an ID-only vertex with a selective label reads the CSR's list of that label.
 query II
 EXPLAIN MATCH (country:Country)<-[:IS_PART_OF]-(y:City) RETURN count(*)
