@@ -213,7 +213,8 @@ RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
 `POWER(0, 0)` is one. A zero base with a negative exponent or a negative base
 with a non-integral exponent raises an invalid-argument error containing
 status `2201F`. Non-finite inputs and overflowing results raise status `22003`.
-`INT64` exponents retain their exact parity for negative bases.
+Exact integer and decimal exponents are checked before floating-point
+conversion to preserve the domain check and parity for negative bases.
 
 `EXP` returns *e* raised to a numeric argument, while `LN` returns its natural
 logarithm. Both functions use DuckDB's floating-point and domain behavior and
