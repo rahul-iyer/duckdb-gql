@@ -1,0 +1,219 @@
+# name: test/sql/gql_optimizer_equivalence.test
+# description: Both graph optimizers preserve result bags, NULLs and optional matches before and after CSR construction
+# group: [sql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,'Node',NULL),(2,'Node',20),(3,'Node',30),(4,'Node',NULL),(10,'Hub',10)) v(":ID",":LABEL","score:int")
+ UNION ALL SELECT i,'Leaf',i FROM range(100,164) t(i)) TO '{TEST_DIR}/equivalent_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES (1,2,'R'),(1,2,'R'),(1,3,'R'),(2,3,'R'),(3,1,'R'),(1,1,'R')) e(":START_ID",":END_ID",":TYPE")
+ UNION ALL SELECT 10,i,'R' FROM range(100,164) t(i)) TO '{TEST_DIR}/equivalent_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH equivalent ANY
+
+statement ok
+COPY GRAPH equivalent FROM (VERTICES '{TEST_DIR}/equivalent_nodes.csv', EDGES '{TEST_DIR}/equivalent_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH equivalent
+
+# Native tables only.
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Parallel edges keep duplicate result rows; the self-loop keeps the NULL property.
+query II
+MATCH (a:Node)-[:R]->(b:Node) WHERE a.score IS NULL AND element_id(a) = 1
+RETURN element_id(b), b.score ORDER BY element_id(b)
+----
+1	NULL
+2	20
+2	20
+3	30
+
+# Reverse traversal must follow incoming edges, including the self-loop.
+query I
+MATCH (a:Node)<-[:R]-(b:Node) WHERE element_id(a) = 1
+RETURN element_id(b) ORDER BY element_id(b)
+----
+1
+3
+
+# The same edge cannot occur twice in a trail; parallel edges remain distinct.
+query I
+MATCH (a:Node)-[:R]->(b:Node)-[:R]->(c:Node)
+WHERE element_id(a) = 1 AND element_id(c) = 3
+RETURN element_id(b) ORDER BY element_id(b)
+----
+1
+2
+2
+
+query II
+MATCH (a:Node) WHERE element_id(a) = 4
+OPTIONAL MATCH (a)-[:R]->(b:Node)
+RETURN element_id(a), b.score
+----
+4	NULL
+
+# A predicate inside an optional branch does not remove its incoming row.
+query II
+MATCH (a:Node) WHERE element_id(a) = 4
+OPTIONAL MATCH (a)-[:R]->(b:Node) WHERE b.score > 25
+RETURN element_id(a), b.score
+----
+4	NULL
+
+query I
+MATCH (a:Node) WHERE element_id(a) = 1
+OPTIONAL MATCH (a)-[:R]->(b:Node) WHERE b.score > 25
+RETURN b.score
+----
+30
+
+query IIII
+MATCH (a:Node)
+OPTIONAL MATCH (a)-[e:R]->(b:Node)
+RETURN element_id(a), count(e), count(b.score), sum(b.score)
+GROUP BY a ORDER BY element_id(a)
+----
+1	4	3	70
+2	1	1	30
+3	1	0	NULL
+4	0	0	NULL
+
+# A separate high-degree population must not change the selective answers.
+query I
+MATCH (:Hub)-[:R]->(:Leaf) RETURN count(*)
+----
+64
+
+query I
+MATCH (:Absent)-[:R]->(:Node) RETURN count(*)
+----
+0
+
+statement error
+MATCH (a:Node) RETURN not_bound.score
+----
+is not defined
+
+endloop
+
+statement ok
+CALL gql_build_csr('equivalent')
+
+# Repeat the same semantic assertions with CSR access paths available.
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+# Parallel edges keep duplicate result rows; the self-loop keeps the NULL property.
+query II
+MATCH (a:Node)-[:R]->(b:Node) WHERE a.score IS NULL AND element_id(a) = 1
+RETURN element_id(b), b.score ORDER BY element_id(b)
+----
+1	NULL
+2	20
+2	20
+3	30
+
+# Reverse traversal must follow incoming edges, including the self-loop.
+query I
+MATCH (a:Node)<-[:R]-(b:Node) WHERE element_id(a) = 1
+RETURN element_id(b) ORDER BY element_id(b)
+----
+1
+3
+
+# The same edge cannot occur twice in a trail; parallel edges remain distinct.
+query I
+MATCH (a:Node)-[:R]->(b:Node)-[:R]->(c:Node)
+WHERE element_id(a) = 1 AND element_id(c) = 3
+RETURN element_id(b) ORDER BY element_id(b)
+----
+1
+2
+2
+
+query II
+MATCH (a:Node) WHERE element_id(a) = 4
+OPTIONAL MATCH (a)-[:R]->(b:Node)
+RETURN element_id(a), b.score
+----
+4	NULL
+
+# A predicate inside an optional branch does not remove its incoming row.
+query II
+MATCH (a:Node) WHERE element_id(a) = 4
+OPTIONAL MATCH (a)-[:R]->(b:Node) WHERE b.score > 25
+RETURN element_id(a), b.score
+----
+4	NULL
+
+query I
+MATCH (a:Node) WHERE element_id(a) = 1
+OPTIONAL MATCH (a)-[:R]->(b:Node) WHERE b.score > 25
+RETURN b.score
+----
+30
+
+query IIII
+MATCH (a:Node)
+OPTIONAL MATCH (a)-[e:R]->(b:Node)
+RETURN element_id(a), count(e), count(b.score), sum(b.score)
+GROUP BY a ORDER BY element_id(a)
+----
+1	4	3	70
+2	1	1	30
+3	1	0	NULL
+4	0	0	NULL
+
+# A separate high-degree population must not change the selective answers.
+query I
+MATCH (:Hub)-[:R]->(:Leaf) RETURN count(*)
+----
+64
+
+query I
+MATCH (:Absent)-[:R]->(:Node) RETURN count(*)
+----
+0
+
+statement error
+MATCH (a:Node) RETURN not_bound.score
+----
+is not defined
+
+endloop
+
+statement ok
+MATCH (a:Node), (b:Node) WHERE element_id(a) = 1 AND element_id(b) = 2 INSERT (a)-[:R]->(b)
+
+foreach optimizer legacy cost
+
+statement ok
+SET gql_optimizer='{optimizer}'
+
+query I
+MATCH (a:Node)-[:R]->(b:Node) WHERE element_id(a) = 1 RETURN count(*)
+----
+5
+
+endloop
+
+statement ok
+RESET gql_optimizer
+
+statement ok
+DROP GRAPH equivalent
