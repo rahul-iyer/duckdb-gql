@@ -2,6 +2,7 @@
 
 #include "gql_catalog.hpp"
 #include "gql_lowerer.hpp"
+#include "gql_sql_utils.hpp"
 #include "gql_storage.hpp"
 
 #include "duckdb/common/enums/join_type.hpp"
@@ -16,6 +17,7 @@
 #include "duckdb/parser/expression/operator_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/query_node/select_node.hpp"
@@ -1058,7 +1060,7 @@ static unique_ptr<SQLStatement> LowerInsertEdge(const string &snapshot_name, idx
 	return std::move(statement);
 }
 
-vector<unique_ptr<SQLStatement>> GqlLowerInsert(const GqlInsertStatement &input) {
+static GqlInsertStatement NormalizeInsert(const GqlInsertStatement &input) {
 	// Named nodes share one allocation across all paths in the graph pattern.
 	// Validate declarations before generating any DML.
 	GqlInsertStatement insert(input.source);
@@ -1098,6 +1100,11 @@ vector<unique_ptr<SQLStatement>> GqlLowerInsert(const GqlInsertStatement &input)
 	if (insert.vertices.empty()) {
 		throw BinderException("GQL INSERT requires at least one vertex");
 	}
+	return insert;
+}
+
+vector<unique_ptr<SQLStatement>> GqlLowerInsert(const GqlInsertStatement &input) {
+	auto insert = NormalizeInsert(input);
 	static atomic<uint64_t> next_insert_command_id(0);
 	auto command_id = "gql_insert_" + to_string(next_insert_command_id.fetch_add(1, std::memory_order_relaxed));
 	auto snapshot_name = "_" + command_id;
@@ -1395,6 +1402,562 @@ vector<unique_ptr<SQLStatement>> GqlLowerMutation(const vector<GqlLogicalPlan> &
 	statements.push_back(ControlStatement(command_id, false));
 	statements.push_back(ResultStatement());
 	return statements;
+}
+
+
+//===--------------------------------------------------------------------===//
+// Writes to referenced graphs
+//===--------------------------------------------------------------------===//
+// Element IDs of a referenced graph number the rows of its source tables, so a
+// write first maps matched IDs to source keys and only then changes the tables,
+// each by key. The source catalog commits the command as one change; for
+// DuckLake that new snapshot is also the graph's new version.
+
+bool GqlLoadReferencedWriteGraph(ClientContext &context, GqlTableGraphBinding &graph) {
+	auto graph_name = GqlGetSelectedGraph(context);
+	if (graph_name.empty() || !GqlTryLoadTableGraph(context, graph_name, graph) || graph.source_kind.empty()) {
+		return false;
+	}
+	if (!StringUtil::CIEquals(graph.access_mode, "READ_WRITE")) {
+		throw InvalidInputException("Graph '%s' is a read-only referenced graph; create it with ACCESS_MODE "
+		                            "'READ_WRITE' or mutate its source tables with SQL",
+		                            graph_name);
+	}
+	return true;
+}
+
+namespace {
+
+struct ReferencedWriter {
+	explicit ReferencedWriter(const GqlTableGraphBinding &graph, const string &prefix)
+	    : vertices(graph.vertex.referenced_sources), edges(graph.edge.referenced_sources) {
+		static atomic<uint64_t> next_command_id(0);
+		command_id = prefix + to_string(next_command_id.fetch_add(1, std::memory_order_relaxed));
+	}
+
+	const vector<GqlReferencedSource> &vertices;
+	const vector<GqlReferencedSource> &edges;
+	string command_id;
+	vector<unique_ptr<SQLStatement>> statements;
+	vector<string> temporaries;
+
+	void Add(const string &sql) {
+		auto parser = Parser::GetBuiltinParser();
+		parser.ParseQuery(sql);
+		for (auto &statement : parser.statements) {
+			statements.push_back(std::move(statement));
+		}
+	}
+
+	string Temporary(const string &suffix) {
+		auto name = "_" + command_id + "_" + suffix;
+		temporaries.push_back(name);
+		return "temp.main." + GqlQuoteIdentifier(name);
+	}
+
+	//! A failing check that runs only when the query finds a row. It returns no rows to the client.
+	void Reject(const string &from_where, const string &message) {
+		Add("CREATE TEMP TABLE " + Temporary("check_" + to_string(temporaries.size())) + " AS SELECT error(" +
+		    GqlQuoteLiteral(message) + ") FROM " + from_where + " LIMIT 1");
+	}
+
+	void Begin() {
+		statements.push_back(QuietBeginControlStatement(command_id));
+		statements.push_back(DropSnapshot(ControlSnapshotName(command_id)));
+	}
+
+	vector<unique_ptr<SQLStatement>> Finish() {
+		vector<unique_ptr<SQLStatement>> result;
+		for (auto &statement : statements) {
+			result.push_back(std::move(statement));
+		}
+		statements.clear();
+		for (const auto &name : temporaries) {
+			result.push_back(DropSnapshot(name));
+		}
+		result.push_back(ControlStatement(command_id, false));
+		result.push_back(ResultStatement());
+		return result;
+	}
+};
+
+} // namespace
+
+static string ReferencedTable(const GqlReferencedSource &source) {
+	return GqlQuoteIdentifier(source.catalog_name) + "." + GqlQuoteIdentifier(source.schema_name) + "." +
+	       GqlQuoteIdentifier(source.table_name);
+}
+
+static string ReferencedName(const GqlReferencedSource &source) {
+	return source.schema_name + "." + source.table_name;
+}
+
+static const string *ReferencedColumn(const GqlReferencedSource &source, const string &property) {
+	for (const auto &entry : source.property_columns) {
+		if (StringUtil::CIEquals(entry.first, property)) {
+			return &entry.second;
+		}
+	}
+	return nullptr;
+}
+
+static bool IsEndpointColumn(const GqlReferencedSource &source, const string &column) {
+	return (!source.source_column.empty() && StringUtil::CIEquals(column, source.source_column)) ||
+	       (!source.target_column.empty() && StringUtil::CIEquals(column, source.target_column));
+}
+
+static bool HasOwnKey(const GqlReferencedSource &source) {
+	return !source.key_column.empty() && !IsEndpointColumn(source, source.key_column);
+}
+
+//! The property assigned to the source table's key column.
+static string ReferencedKeyProperty(const GqlReferencedSource &source) {
+	for (const auto &entry : source.property_columns) {
+		if (StringUtil::CIEquals(entry.second, source.key_column)) {
+			return entry.first;
+		}
+	}
+	throw BinderException("GQL writes require the key column of %s to be mapped as a property",
+	                      ReferencedName(source));
+}
+
+static const string &ReferencedPropertyColumn(const GqlReferencedSource &source, const string &property) {
+	auto column = ReferencedColumn(source, property);
+	if (!column) {
+		throw BinderException("Property '%s' is not mapped for %s", property, ReferencedName(source));
+	}
+	if (IsEndpointColumn(source, *column)) {
+		throw BinderException("Property '%s' of %s is an edge endpoint and is set from the edge's nodes", property,
+		                      ReferencedName(source));
+	}
+	return *column;
+}
+
+static bool SameLabels(const vector<string> &left, const vector<string> &right) {
+	case_insensitive_set_t left_set(left.begin(), left.end());
+	case_insensitive_set_t right_set(right.begin(), right.end());
+	if (left_set.size() != right_set.size()) {
+		return false;
+	}
+	for (const auto &label : left_set) {
+		if (!right_set.count(label)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static idx_t ReferencedVertexTable(const ReferencedWriter &writer, const vector<string> &labels) {
+	for (idx_t index = 0; index < writer.vertices.size(); index++) {
+		if (SameLabels(writer.vertices[index].labels, labels)) {
+			return index;
+		}
+	}
+	throw BinderException("No vertex table of the referenced graph has labels %s",
+	                      StringUtil::Join(labels, labels.size(), ":", [](const string &label) { return label; }));
+}
+
+static string ReferencedEdgeType(const vector<string> &labels) {
+	case_insensitive_set_t unique(labels.begin(), labels.end());
+	if (unique.size() != 1) {
+		throw BinderException("DuckGQL edge insertion requires exactly one edge type");
+	}
+	return *unique.begin();
+}
+
+static const GqlReferencedSource &ReferencedVertexById(const ReferencedWriter &writer, uint64_t element_table_id) {
+	for (const auto &vertex : writer.vertices) {
+		if (vertex.element_table_id == element_table_id) {
+			return vertex;
+		}
+	}
+	throw InternalException("Referenced edge endpoint names an unknown vertex table");
+}
+
+static void RejectExistingKey(ReferencedWriter &writer, const GqlReferencedSource &source, const string &key_sql) {
+	writer.Reject(ReferencedTable(source) + " WHERE " + GqlQuoteIdentifier(source.key_column) + " = " + key_sql,
+	              "GQL INSERT key already exists in " + ReferencedName(source));
+}
+
+vector<unique_ptr<SQLStatement>> GqlLowerReferencedInsert(const GqlTableGraphBinding &graph,
+                                                          const GqlInsertStatement &input) {
+	auto insert = NormalizeInsert(input);
+	if (!insert.return_projections.empty()) {
+		throw NotImplementedException("INSERT ... RETURN is not supported for referenced graphs");
+	}
+	ReferencedWriter writer(graph, "gql_referenced_insert_");
+	writer.Begin();
+	vector<string> inserts;
+	vector<idx_t> vertex_tables;
+	vector<string> vertex_keys;
+	case_insensitive_set_t seen_keys;
+	auto check_unique = [&](const GqlReferencedSource &source, const string &key_sql) {
+		if (!seen_keys.insert(ReferencedTable(source) + "\x1f" + key_sql).second) {
+			throw InvalidInputException("GQL INSERT creates two elements with the same key in %s",
+			                            ReferencedName(source));
+		}
+		RejectExistingKey(writer, source, key_sql);
+	};
+	for (const auto &vertex : insert.vertices) {
+		vector<string> labels;
+		for (const auto &label : vertex.labels) {
+			labels.push_back(label.value);
+		}
+		auto table_index = ReferencedVertexTable(writer, labels);
+		const auto &source = writer.vertices[table_index];
+		vector<string> columns, values;
+		string key_sql;
+		for (const auto &property : vertex.properties) {
+			const auto &column = ReferencedPropertyColumn(source, property.name.value);
+			auto value = InsertLiteralValue(property.value).ToSQLString();
+			if (StringUtil::CIEquals(column, source.key_column)) {
+				key_sql = value;
+			}
+			columns.push_back(GqlQuoteIdentifier(column));
+			values.push_back(std::move(value));
+		}
+		if (!source.key_column.empty()) {
+			if (key_sql.empty() || key_sql == "NULL") {
+				throw InvalidInputException("GQL INSERT into %s requires property '%s'", ReferencedName(source),
+				                            ReferencedKeyProperty(source));
+			}
+			check_unique(source, key_sql);
+		}
+		vertex_tables.push_back(table_index);
+		vertex_keys.push_back(key_sql);
+		inserts.push_back("INSERT INTO " + ReferencedTable(source) +
+		                  (columns.empty() ? " DEFAULT VALUES"
+		                                   : " (" + StringUtil::Join(columns, ", ") + ") VALUES (" +
+		                                         StringUtil::Join(values, ", ") + ")"));
+	}
+	for (const auto &edge : insert.edges) {
+		vector<string> labels;
+		for (const auto &label : edge.labels) {
+			labels.push_back(label.value);
+		}
+		auto type = ReferencedEdgeType(labels);
+		const auto &source_vertex = writer.vertices[vertex_tables[edge.source_vertex]];
+		const auto &target_vertex = writer.vertices[vertex_tables[edge.target_vertex]];
+		const GqlReferencedSource *table = nullptr;
+		for (const auto &candidate : writer.edges) {
+			if (StringUtil::CIEquals(candidate.labels[0], type) &&
+			    candidate.source_table_id == source_vertex.element_table_id &&
+			    candidate.target_table_id == target_vertex.element_table_id) {
+				table = &candidate;
+				break;
+			}
+		}
+		if (!table) {
+			throw BinderException("No edge table of the referenced graph has type %s from %s to %s", type,
+			                      ReferencedName(source_vertex), ReferencedName(target_vertex));
+		}
+		vector<string> columns {GqlQuoteIdentifier(table->source_column), GqlQuoteIdentifier(table->target_column)};
+		vector<string> values {vertex_keys[edge.source_vertex], vertex_keys[edge.target_vertex]};
+		string key_sql;
+		for (const auto &property : edge.properties) {
+			const auto &column = ReferencedPropertyColumn(*table, property.name.value);
+			auto value = InsertLiteralValue(property.value).ToSQLString();
+			if (StringUtil::CIEquals(column, table->key_column)) {
+				key_sql = value;
+			}
+			columns.push_back(GqlQuoteIdentifier(column));
+			values.push_back(std::move(value));
+		}
+		if (HasOwnKey(*table)) {
+			if (key_sql.empty() || key_sql == "NULL") {
+				throw InvalidInputException("GQL INSERT into %s requires property '%s'", ReferencedName(*table),
+				                            ReferencedKeyProperty(*table));
+			}
+			check_unique(*table, key_sql);
+		}
+		inserts.push_back("INSERT INTO " + ReferencedTable(*table) + " (" + StringUtil::Join(columns, ", ") +
+		                  ") VALUES (" + StringUtil::Join(values, ", ") + ")");
+	}
+	for (const auto &sql : inserts) {
+		writer.Add(sql);
+	}
+	return writer.Finish();
+}
+
+//! Maps one ID column of a match table to the keys and row IDs of one source table.
+static string ReferencedKeys(ReferencedWriter &writer, const string &matches, const string &id_column,
+                             const GqlReferencedSource &source, const string &suffix, const string &value_column = "") {
+	auto keys = writer.Temporary(suffix);
+	writer.Add("CREATE TEMP TABLE " + keys + " AS SELECT DISTINCT gql_identity.gql_key, gql_identity.gql_rowid" +
+	           (value_column.empty() ? string()
+	                                 : ", gql_match." + GqlQuoteIdentifier(value_column) + " AS gql_value") +
+	           " FROM " + matches + " AS gql_match JOIN " + source.identity_sql + " AS gql_identity ON gql_match." +
+	           GqlQuoteIdentifier(id_column) + " = gql_identity.__gql_id");
+	return keys;
+}
+
+static string ReferencedRowFilter(const GqlReferencedSource &source, const string &keys) {
+	if (source.key_column.empty()) {
+		return "rowid IN (SELECT gql_rowid FROM " + keys + ")";
+	}
+	return GqlQuoteIdentifier(source.key_column) + " IN (SELECT gql_key FROM " + keys + ")";
+}
+
+static void ReferencedUpdate(ReferencedWriter &writer, const GqlReferencedSource &source, const string &keys,
+                             const vector<string> &columns, bool from_value) {
+	if (source.key_column.empty()) {
+		writer.Reject(keys, "GQL SET and REMOVE require a key column on " + ReferencedName(source));
+		return;
+	}
+	vector<string> assignments;
+	for (const auto &column : columns) {
+		assignments.push_back(GqlQuoteIdentifier(column) + " = " + (from_value ? "gql_keys.gql_value" : "NULL"));
+	}
+	writer.Add("UPDATE " + ReferencedTable(source) + " AS gql_target SET " + StringUtil::Join(assignments, ", ") +
+	           " FROM " + keys + " AS gql_keys WHERE gql_target." + GqlQuoteIdentifier(source.key_column) +
+	           " = gql_keys.gql_key");
+}
+
+vector<unique_ptr<SQLStatement>> GqlLowerReferencedMutation(const GqlTableGraphBinding &graph,
+                                                            const vector<GqlLogicalPlan> &plans) {
+	if (plans.empty() || plans[0].mutations.empty()) {
+		throw InternalException("GQL mutation lowering requires a bound mutation");
+	}
+	const auto &mutations = plans[0].mutations;
+	ReferencedWriter writer(graph, "gql_referenced_mutation_");
+	writer.Begin();
+	auto snapshot_name = "_" + writer.command_id + "_matches";
+	writer.statements.push_back(CreateSnapshot(plans, snapshot_name));
+	writer.temporaries.push_back(snapshot_name);
+	auto matches = "temp.main." + GqlQuoteIdentifier(snapshot_name);
+	// Every ID is mapped to a key before the first write renumbers the tables.
+	vector<vector<string>> keys(mutations.size());
+	for (idx_t index = 0; index < mutations.size(); index++) {
+		const auto &mutation = mutations[index];
+		switch (mutation.type) {
+		case GqlMutationType::SET_LABEL:
+		case GqlMutationType::REMOVE_LABEL:
+			throw NotImplementedException("Labels of a referenced graph come from its tables and can't be changed");
+		case GqlMutationType::SET_PROPERTIES:
+			throw InternalException("Unexpanded GQL property-map mutation reached physical lowering");
+		case GqlMutationType::MERGE_PROPERTIES:
+			continue;
+		default:
+			break;
+		}
+		const auto &sources = mutation.binding_type.id == GqlTypeId::EDGE ? writer.edges : writer.vertices;
+		for (idx_t table = 0; table < sources.size(); table++) {
+			keys[index].push_back(ReferencedKeys(
+			    writer, matches, TargetColumn(index), sources[table],
+			    "m" + to_string(index) + "_t" + to_string(table),
+			    mutation.type == GqlMutationType::SET_PROPERTY ? ValueColumn(index) : string()));
+		}
+	}
+	auto delete_program = mutations[0].type == GqlMutationType::DELETE_ELEMENT;
+	if (delete_program) {
+		// As for managed graphs: targeted edges first, then node constraints, then nodes.
+		for (idx_t index = 0; index < mutations.size(); index++) {
+			if (mutations[index].binding_type.id != GqlTypeId::EDGE) {
+				continue;
+			}
+			for (idx_t table = 0; table < writer.edges.size(); table++) {
+				writer.Add("DELETE FROM " + ReferencedTable(writer.edges[table]) + " WHERE " +
+				           ReferencedRowFilter(writer.edges[table], keys[index][table]));
+			}
+		}
+		for (idx_t index = 0; index < mutations.size(); index++) {
+			const auto &mutation = mutations[index];
+			if (mutation.binding_type.id != GqlTypeId::NODE) {
+				continue;
+			}
+			for (idx_t table = 0; table < writer.vertices.size(); table++) {
+				const auto &vertex = writer.vertices[table];
+				for (const auto &edge : writer.edges) {
+					vector<string> incident;
+					auto vertex_keys = " IN (SELECT gql_key FROM " + keys[index][table] + ")";
+					if (edge.source_table_id == vertex.element_table_id) {
+						incident.push_back(GqlQuoteIdentifier(edge.source_column) + vertex_keys);
+					}
+					if (edge.target_table_id == vertex.element_table_id) {
+						incident.push_back(GqlQuoteIdentifier(edge.target_column) + vertex_keys);
+					}
+					if (incident.empty()) {
+						continue;
+					}
+					auto condition = StringUtil::Join(incident, " OR ");
+					if (mutation.detach) {
+						writer.Add("DELETE FROM " + ReferencedTable(edge) + " WHERE " + condition);
+					} else {
+						writer.Reject(ReferencedTable(edge) + " WHERE " + condition,
+						              "GQL DELETE cannot remove a node with incident edges; use DETACH DELETE");
+					}
+				}
+			}
+		}
+		for (idx_t index = 0; index < mutations.size(); index++) {
+			if (mutations[index].binding_type.id != GqlTypeId::NODE) {
+				continue;
+			}
+			for (idx_t table = 0; table < writer.vertices.size(); table++) {
+				writer.Add("DELETE FROM " + ReferencedTable(writer.vertices[table]) + " WHERE " +
+				           ReferencedRowFilter(writer.vertices[table], keys[index][table]));
+			}
+		}
+		return writer.Finish();
+	}
+	for (idx_t index = 0; index < mutations.size(); index++) {
+		const auto &mutation = mutations[index];
+		if (mutation.type == GqlMutationType::DELETE_ELEMENT) {
+			throw InternalException("GQL non-delete program contains a delete mutation");
+		}
+		if (keys[index].empty()) {
+			continue;
+		}
+		const auto &sources = mutation.binding_type.id == GqlTypeId::EDGE ? writer.edges : writer.vertices;
+		for (idx_t table = 0; table < sources.size(); table++) {
+			const auto &source = sources[table];
+			if (mutation.type == GqlMutationType::CLEAR_PROPERTIES) {
+				vector<string> columns;
+				for (const auto &entry : source.property_columns) {
+					if (!StringUtil::CIEquals(entry.second, source.key_column) &&
+					    !IsEndpointColumn(source, entry.second)) {
+						columns.push_back(entry.second);
+					}
+				}
+				if (!columns.empty()) {
+					ReferencedUpdate(writer, source, keys[index][table], columns, false);
+				}
+				continue;
+			}
+			auto column = ReferencedColumn(source, mutation.name);
+			if (!column) {
+				writer.Reject(keys[index][table],
+				              "Property '" + mutation.name + "' is not mapped for " + ReferencedName(source));
+				continue;
+			}
+			if (StringUtil::CIEquals(*column, source.key_column) || IsEndpointColumn(source, *column)) {
+				writer.Reject(keys[index][table], "Property '" + mutation.name + "' identifies elements of " +
+				                                      ReferencedName(source) + " and can't be changed");
+				continue;
+			}
+			ReferencedUpdate(writer, source, keys[index][table], {*column},
+			                 mutation.type == GqlMutationType::SET_PROPERTY);
+		}
+	}
+	return writer.Finish();
+}
+
+vector<unique_ptr<SQLStatement>> GqlLowerReferencedMatchInsert(const GqlTableGraphBinding &graph,
+                                                               const vector<GqlLogicalPlan> &plans) {
+	if (plans.empty() || !plans[0].insertion) {
+		throw InternalException("GQL MATCH INSERT lowering requires a bound insertion");
+	}
+	const auto &insert = *plans[0].insertion;
+	ReferencedWriter writer(graph, "gql_referenced_match_insert_");
+	writer.Begin();
+	auto snapshot_name = "_" + writer.command_id + "_snapshot";
+	writer.statements.push_back(CreateSnapshot(plans, snapshot_name));
+	writer.temporaries.push_back(snapshot_name);
+	// Endpoint keys per vertex: a matched vertex may be in any vertex table, a new one in its label's table.
+	vector<unordered_map<uint64_t, string>> endpoint_keys(insert.vertices.size());
+	unordered_map<idx_t, idx_t> created;
+	string select = "SELECT gql_match.*";
+	string joins;
+	for (idx_t index = 0; index < insert.vertices.size(); index++) {
+		const auto &vertex = insert.vertices[index];
+		if (!vertex.existing) {
+			continue;
+		}
+		for (idx_t table = 0; table < writer.vertices.size(); table++) {
+			const auto &source = writer.vertices[table];
+			auto alias = "gql_identity_" + to_string(index) + "_" + to_string(table);
+			auto column = "gql_vertex_key_" + to_string(index) + "_" + to_string(table);
+			select += ", " + alias + ".gql_key AS " + GqlQuoteIdentifier(column);
+			joins += " LEFT JOIN " + source.identity_sql + " AS " + alias + " ON gql_match." +
+			         GqlQuoteIdentifier(vertex.existing_id_column) + " = " + alias + ".__gql_id";
+			endpoint_keys[index][source.element_table_id] = "gql_rows." + GqlQuoteIdentifier(column);
+		}
+	}
+	auto rows = writer.Temporary("rows");
+	writer.Add("CREATE TEMP TABLE " + rows + " AS " + select + " FROM temp.main." +
+	           GqlQuoteIdentifier(snapshot_name) + " AS gql_match" + joins);
+	auto rows_from = rows + " AS gql_rows";
+	vector<string> inserts;
+	auto add_insert = [&](const GqlReferencedSource &source, vector<string> columns, vector<string> values,
+	                      const vector<GqlBoundInsertProperty> &properties, const string &where) {
+		string key;
+		for (const auto &property : properties) {
+			const auto &column = ReferencedPropertyColumn(source, property.name);
+			auto value = "gql_rows." + GqlQuoteIdentifier(property.value_column);
+			if (StringUtil::CIEquals(column, source.key_column)) {
+				key = value;
+			}
+			columns.push_back(GqlQuoteIdentifier(column));
+			values.push_back(std::move(value));
+		}
+		auto filter = where.empty() ? string() : " WHERE " + where;
+		if (HasOwnKey(source)) {
+			if (key.empty()) {
+				throw InvalidInputException("GQL INSERT into %s requires property '%s'", ReferencedName(source),
+				                            ReferencedKeyProperty(source));
+			}
+			auto key_column = GqlQuoteIdentifier(source.key_column);
+			writer.Reject(rows_from + (where.empty() ? " WHERE " : filter + " AND ") + key + " IS NULL",
+			              "GQL INSERT into " + ReferencedName(source) + " requires property '" +
+			                  ReferencedKeyProperty(source) + "'");
+			writer.Reject(
+			    "(SELECT " + key + " AS gql_key FROM " + rows_from + filter + ") AS gql_new WHERE gql_new.gql_key IN " +
+			        "(SELECT " + key_column + " FROM " + ReferencedTable(source) + ") OR (SELECT count(*) FROM " +
+			        rows_from + filter + (where.empty() ? " WHERE " : " AND ") + key + " = gql_new.gql_key) > 1",
+			    "GQL INSERT key already exists in " + ReferencedName(source));
+		}
+		inserts.push_back("INSERT INTO " + ReferencedTable(source) + " (" + StringUtil::Join(columns, ", ") +
+		                  ") SELECT " + StringUtil::Join(values, ", ") + " FROM " + rows_from + filter);
+		return key;
+	};
+	for (idx_t index = 0; index < insert.vertices.size(); index++) {
+		const auto &vertex = insert.vertices[index];
+		if (vertex.existing) {
+			continue;
+		}
+		if (!vertex.create) {
+			// A repeated variable shares the first occurrence's vertex.
+			endpoint_keys[index] = endpoint_keys[created.at(vertex.allocation_index)];
+			continue;
+		}
+		created[vertex.allocation_index] = index;
+		const auto &source = writer.vertices[ReferencedVertexTable(writer, vertex.labels)];
+		if (source.key_column.empty()) {
+			if (vertex.properties.empty()) {
+				throw NotImplementedException("GQL INSERT into %s requires at least one property",
+				                              ReferencedName(source));
+			}
+		}
+		auto key = add_insert(source, {}, {}, vertex.properties, "");
+		if (!source.key_column.empty()) {
+			endpoint_keys[index][source.element_table_id] = key;
+		}
+	}
+	for (const auto &edge : insert.edges) {
+		auto type = ReferencedEdgeType(edge.labels);
+		vector<string> covered;
+		for (const auto &table : writer.edges) {
+			if (!StringUtil::CIEquals(table.labels[0], type)) {
+				continue;
+			}
+			auto source_key = endpoint_keys[edge.source_vertex].find(table.source_table_id);
+			auto target_key = endpoint_keys[edge.target_vertex].find(table.target_table_id);
+			if (source_key == endpoint_keys[edge.source_vertex].end() ||
+			    target_key == endpoint_keys[edge.target_vertex].end()) {
+				continue;
+			}
+			auto where = source_key->second + " IS NOT NULL AND " + target_key->second + " IS NOT NULL";
+			covered.push_back("(" + where + ")");
+			add_insert(table, {GqlQuoteIdentifier(table.source_column), GqlQuoteIdentifier(table.target_column)},
+			           {source_key->second, target_key->second}, edge.properties, where);
+		}
+		writer.Reject(rows_from + (covered.empty() ? string() : " WHERE NOT (" + StringUtil::Join(covered, " OR ") + ")"),
+		              "No edge table of the referenced graph has type " + type + " between these nodes");
+	}
+	for (const auto &sql : inserts) {
+		writer.Add(sql);
+	}
+	return writer.Finish();
 }
 
 } // namespace duckdb

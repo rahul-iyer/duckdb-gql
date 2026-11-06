@@ -19,15 +19,18 @@ storage and execution engine, plus an explicit CSR layer for graph algorithms.
 ## What works today
 
 - Managed property graphs backed by typed DuckDB vertex and edge tables.
-- Read-only, zero-copy typed graph projections over existing DuckDB and
-  DuckLake tables, with live or pinned snapshots and snapshot-aware CSR
-  invalidation.
+- Zero-copy typed graph projections over existing DuckDB and DuckLake tables,
+  with live or pinned snapshots and snapshot-aware CSR invalidation. Graphs
+  registered as `READ_WRITE` accept GQL `INSERT`, `SET`, `REMOVE`, and `DELETE`,
+  which write through to the source tables.
 - Graph-header CSV, compressed CSV, and Parquet bulk import.
 - Directed `MATCH`, `OPTIONAL MATCH`, filtering, projection, aggregation,
   ordering, paging, fixed multi-hop paths, and a bounded variable-length path
   subset.
 - Standalone node and directed-path `INSERT`, fixed directed
   `MATCH`-and-`INSERT`, property `SET` and `REMOVE`, and edge/node deletion.
+- CSR snapshots that absorb inserts incrementally and are saved in the database
+  file, so a reopened database answers graph queries without a rebuild.
 - Explicit CSR-backed BFS, DFS, unweighted and weighted SSSP, PageRank, weak and strong
   components, Louvain community detection, degree, closeness, local clustering
   coefficient, and triangle counting.
@@ -224,8 +227,53 @@ COPY GRAPH social FROM (
 ) FORMAT GRAPH OPTIONS (VALIDATE FALSE);
 ```
 
+`COPY GRAPH` automatically refreshes DuckDB optimizer statistics and graph
+fanout statistics on the imported vertex and edge tables before committing. After subsequent data changes, refresh
+these statistics explicitly:
+
+```sql
+ANALYZE GRAPH social;
+```
+
+The result reports `success`, `graph_name`, and `tables_analyzed`. This command
+refreshes native column distinct-count statistics used for join planning, plus
+per-edge-type edge counts, distinct source/target counts, and maximum incoming
+and outgoing degrees. Collection uses grouped table scans, without building CSR
+snapshots or property indexes.
+
+The graph access planner uses average degree among active endpoints to estimate
+expansion rows, choose between reachable starting endpoints, and break ties
+between eligible expansions. Persisted estimates also work for bounded relational
+paths without a prebuilt CSR. A current CSR's statistics take precedence when
+available. These are per-type averages, not vertex-label-conditioned fanouts or
+multi-hop correlation estimates, and they do not replace DuckDB's SQL join costing.
+
+Graph statistics persist across restarts and are tagged with the graph version.
+After a GQL mutation, the planner ignores outdated statistics until the next
+`ANALYZE GRAPH`. Direct SQL edits to managed tables require an explicit refresh;
+they do not advance the graph version. Explicit transactions do not consume
+persisted graph statistics from a separate connection.
+
+Inspect the collected counts and average active-endpoint fanouts with:
+
+```sql
+SELECT g.graph_name, s.edge_label, s.edge_count,
+       s.edge_count::DOUBLE / s.source_count AS average_out_degree,
+       s.edge_count::DOUBLE / s.target_count AS average_in_degree,
+       s.max_out_degree, s.max_in_degree,
+       s.graph_version = g.graph_version AS current_graph_version
+FROM gql_internal.graph_fanout_statistics s
+JOIN gql_internal.graphs g USING (graph_id);
+```
+
+`ANALYZE GRAPH` supports managed graphs (an empty graph has zero tables). For referenced
+graphs, run native `ANALYZE` on the source tables directly. Native SQL `ANALYZE`
+and `ANALYZE table_name` retain their usual behavior. Native column statistics follow DuckDB's
+lifecycle; checkpoint/reopen can change the estimates, so rerun
+`ANALYZE GRAPH` when fresh estimates are needed after reopening.
+
 `DROP GRAPH social` removes both the graph metadata and its managed tables.
-`CREATE GRAPH`, `DROP GRAPH`, and `COPY GRAPH` are lifecycle operations that
+`CREATE GRAPH`, `DROP GRAPH`, `COPY GRAPH`, and `ANALYZE GRAPH` are operations that
 must run in autocommit mode; DuckGQL rejects them inside an explicit
 transaction. Graph queries and mutations can participate in an explicit
 caller-controlled DuckDB transaction.
@@ -305,13 +353,43 @@ and parallel edges are coalesced, and self-loops are ignored.
 
 CSR snapshots are immutable, database-instance scoped, and version checked.
 Connections sharing one DuckDB database instance reuse the same derived graph
-projection. Graph mutations and direct SQL writes to a graph's vertex or edge
-tables invalidate the affected snapshot instead of allowing an algorithm to use
-stale data. The next algorithm call rebuilds its required projection
-automatically, with concurrent automatic builders coalesced per graph. Run
-`gql_build_csr` explicitly only to prepare the full
-optimizer/neighbor/inspection snapshot. CSR construction and CSR algorithms
-must run in autocommit mode.
+projection. Inserts, through GQL or direct SQL, are added to a small delta that
+queries read alongside the snapshot, so the CSR stays usable without a rebuild.
+Updates and deletes to a graph's vertex or edge tables invalidate the affected
+snapshot instead of allowing an algorithm to use stale data. The next algorithm
+call rebuilds its required projection automatically, with concurrent automatic
+builders coalesced per graph. Run `gql_build_csr` explicitly only to prepare the
+full optimizer/neighbor/inspection snapshot. CSR construction and CSR
+algorithms must run in autocommit mode.
+
+`gql_build_csr` also saves the snapshot in the database file, in
+`gql_internal.csr_snapshots` and `gql_internal.csr_pages`. After a restart, the
+first query loads the saved CSR page by page through DuckDB's buffer manager
+instead of rebuilding it, and this also works for databases opened read-only.
+Pages are paged in on demand and can be evicted under memory pressure. Updates
+and deletes drop the saved copy. Pass `persist := false` to keep a snapshot in
+memory only:
+
+```sql
+CALL gql_build_csr('social', persist := false);
+```
+
+Use `shortest_path_length` for the minimum number of directed hops between two
+matched vertices:
+
+```sql
+MATCH (source:Person), (target:Person)
+WHERE source.name = 'Ada' AND target.name = 'Grace'
+CALL algo.shortest_path_length('social', element_id(source), element_id(target))
+YIELD distance RETURN distance;
+```
+
+The call requires one distinct source and target, returns `0` for the same
+vertex and `-1` when the target is unreachable. Optional `vertex_label` and
+`edge_label` arguments restrict the paths. Bidirectional search expands from
+both endpoints, choosing the side with fewer edges to scan. Its cached graph
+projection includes incoming and outgoing edges, so the first call can require
+more construction time and memory than an outgoing-only traversal.
 
 Use weighted SSSP to find cheapest directed paths using a numeric edge property:
 
@@ -354,7 +432,9 @@ SELECT * FROM gql_csr_edge_stats('social');
 
 `gql_csr_stats` reports the smallest current projection and exposes capability
 columns such as `has_outgoing`, `has_incoming`, `has_edge_ids`, and
-`has_edge_labels`. Its `snapshot_acquisition_count` distinguishes consumer
+`has_edge_labels`. `delta_vertex_count` and `delta_edge_count` show inserts not
+yet folded into the snapshot, and `loaded_from_disk` shows whether it was read
+from the database file. Its `snapshot_acquisition_count` distinguishes consumer
 acquisition from CSR construction; fixed-hop and path expansion operators pin
 one immutable snapshot instead of reacquiring it for every lateral seed.
 `gql_csr_edge_stats` reports per-type edge counts, active source/target counts,
@@ -454,7 +534,53 @@ The pinned graph continues to read snapshot 42. If `lake` is attached at a
 different snapshot, DuckGQL asks you to reattach it with the required
 `SNAPSHOT_VERSION` instead of returning different results.
 
-DuckLake-backed graphs are currently read-only and support multiple vertex and
+### Write to DuckLake tables with GQL
+
+Register a live graph with `ACCESS_MODE 'READ_WRITE'` to let GQL mutations
+write to its source tables. The data stays in DuckLake: DuckGQL translates each
+mutation into SQL against the mapped tables and columns.
+
+```sql
+-- Use the same typed schema and FROM TABLES mapping shown above.
+CREATE GRAPH social TYPED { ... }
+FROM TABLES ( ... )
+OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_WRITE');
+
+SESSION SET GRAPH social;
+
+INSERT (:Customer {id: 7, name: 'Edsger'})
+       -[:BOUGHT {id: 900, quantity: 2}]->
+       (:ProductNode {id: 31, name: 'Notebook', price: 4.5});
+
+MATCH (c:Customer) WHERE c.id = 7 SET c.name = 'Edsger D.';
+
+MATCH (c:Customer), (p:ProductNode)
+WHERE c.id = 1 AND p.id = 31
+INSERT (c)-[:BOUGHT {id: 901, quantity: 1}]->(p);
+
+MATCH (c:Customer) WHERE c.id = 7 DETACH DELETE c;
+```
+
+- A new node goes to the vertex table mapped to its labels, and a new edge to
+  the edge table for its type and endpoint node types. Edge endpoint columns are
+  filled from the connected nodes' keys.
+- The key property is required for new nodes and for edges whose mapping has a
+  `KEY`. A key that already exists is rejected, because DuckLake tables have no
+  unique constraints.
+- `SET` and `REMOVE` update mapped columns by key. Key and endpoint properties
+  can't be changed, and neither can labels or edge types, which come from the
+  mapping.
+- `DELETE` refuses to remove a node that still has edges in any mapped edge
+  table, and `DETACH DELETE` removes those edges too.
+- Each GQL mutation commits as one DuckLake snapshot, even when it writes
+  several tables, and can run inside an explicit transaction.
+
+`READ_WRITE` requires `SNAPSHOT_POLICY 'LIVE'`; a pinned graph is always
+read-only. `MERGE` and `INSERT ... RETURN` are not yet supported on referenced
+graphs. The same mode works for referenced graphs over an attached DuckDB
+database.
+
+DuckLake-backed graphs support multiple vertex and
 edge tables from the same DuckLake catalog, using integer keys. A node type may
 be mapped by one vertex table; joining several physical tables into one node
 record is not yet supported.
@@ -531,8 +657,8 @@ python3 scripts/benchmark/benchmark_snb_gql_interactive.py \
 ```
 
 For owned graphs, DuckLake tables can still be exported to graph-header Parquet
-and loaded with `COPY GRAPH`. The referenced-table mode above is the zero-copy,
-read-only alternative.
+and loaded with `COPY GRAPH`. The referenced-table mode above is the zero-copy
+alternative.
 
 ## Current limitations
 
@@ -540,9 +666,10 @@ read-only alternative.
   not imply semantic or transactional conformance.
 - `CREATE GRAPH`, `DROP GRAPH`, and the full-load `COPY GRAPH` operation are
   autocommit-only. `COPY GRAPH` requires an empty graph.
-- CSR construction and CSR algorithms are autocommit-only. Snapshots are shared
-  by connections in one database instance, but are not persisted across process
-  or database-instance restarts.
+- CSR construction and CSR algorithms are autocommit-only. Snapshots built by
+  `gql_build_csr` are saved in the database file; projections that algorithms
+  build automatically, weighted projections, and endpoint statistics are kept in
+  memory only.
 - Bulk import currently accepts one vertex file, one edge file, at most one
   scalar vertex label column, and one edge type column. Every relationship row
   must contain exactly one non-empty type.
@@ -553,9 +680,10 @@ read-only alternative.
   GQL value/type system remain incomplete.
 - Referenced graphs support heterogeneous vertex and edge table mappings,
   mapping-scoped integer source keys, generated snapshot-local element IDs,
-  static types, live or pinned snapshots, and read-only access. Composite/string
-  identities, multi-table joins for one node record, mapping predicates, and
-  write-through mutations are not yet supported.
+  static types, live or pinned snapshots, and read-only or write-through access.
+  Composite/string identities, multi-table joins for one node record, mapping
+  predicates, `MERGE`, `INSERT ... RETURN`, and label changes on referenced
+  graphs are not yet supported.
 
 The machine-readable status is
 [`test/conformance/iso-gql-2024.tsv`](test/conformance/iso-gql-2024.tsv). The

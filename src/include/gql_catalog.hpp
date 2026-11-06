@@ -25,6 +25,13 @@ struct GqlReferencedSource {
 	string key_column;
 	vector<string> labels;
 	unordered_map<string, string> property_columns;
+	//! Edges only: endpoint key columns and the vertex tables they reference.
+	string source_column;
+	string target_column;
+	uint64_t source_table_id = 0;
+	uint64_t target_table_id = 0;
+	//! Each row's ID as MATCH assigns it within a transaction, with its row ID and key.
+	string identity_sql;
 };
 
 struct GqlElementTableBinding {

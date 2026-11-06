@@ -18,6 +18,7 @@
 #include "duckdb/parser/simplified_token.hpp"
 #include "duckdb/parser/statement/explain_statement.hpp"
 #include "gql_binder.hpp"
+#include "gql_catalog.hpp"
 #include "gql_import.hpp"
 #include "gql_lowerer.hpp"
 #include "gql_mutation.hpp"
@@ -1087,8 +1088,8 @@ public:
 					}
 				} else if (ConsumeKeyword("ACCESS_MODE")) {
 					result.access_mode = StringUtil::Upper(ParseString());
-					if (result.access_mode != "READ_ONLY") {
-						Error("only ACCESS_MODE 'READ_ONLY' is supported");
+					if (result.access_mode != "READ_ONLY" && result.access_mode != "READ_WRITE") {
+						Error("ACCESS_MODE must be 'READ_ONLY' or 'READ_WRITE'");
 					}
 				} else if (ConsumeKeyword("VALIDATE")) {
 					result.validate = ParseBoolean();
@@ -2335,8 +2336,21 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 
 	try {
 		const auto parameter_map = GqlParameterMap(*gql_ptr->statement);
+		// Writes to a referenced graph go to its source tables, which only the selected graph names.
+		GqlTableGraphBinding referenced_graph;
+		const bool writes = gql_ptr->statement->type == GqlStatementType::INSERT ||
+		                    gql_ptr->statement->type == GqlStatementType::MERGE ||
+		                    (gql_ptr->statement->type == GqlStatementType::MATCH &&
+		                     gql_ptr->statement->Cast<GqlMatchStatement>().has_mutation);
+		const bool referenced_write =
+		    writes && options.context && GqlLoadReferencedWriteGraph(*options.context, referenced_graph);
+		if (referenced_write && gql_ptr->statement->type == GqlStatementType::MERGE) {
+			throw NotImplementedException("MERGE is not supported for referenced graphs");
+		}
 		if (gql_ptr->statement->type == GqlStatementType::INSERT) {
-			auto statements = GqlLowerInsert(gql_ptr->statement->Cast<GqlInsertStatement>());
+			auto &insert = gql_ptr->statement->Cast<GqlInsertStatement>();
+			auto statements =
+			    referenced_write ? GqlLowerReferencedInsert(referenced_graph, insert) : GqlLowerInsert(insert);
 			for (auto &statement : statements) {
 				statement->query = query;
 				statement->stmt_location = QueryLocation(0, query.size());
@@ -2374,7 +2388,12 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 		auto plans = binder.BindAlternatives(match);
 		vector<unique_ptr<SQLStatement>> statements;
 		if (match.has_mutation) {
-			statements = match.insertion ? GqlLowerMatchInsert(plans) : GqlLowerMutation(plans);
+			if (referenced_write) {
+				statements = match.insertion ? GqlLowerReferencedMatchInsert(referenced_graph, plans)
+				                             : GqlLowerReferencedMutation(referenced_graph, plans);
+			} else {
+				statements = match.insertion ? GqlLowerMatchInsert(plans) : GqlLowerMutation(plans);
+			}
 		} else {
 			statements.push_back(GqlLowerSelect(std::move(plans)));
 		}

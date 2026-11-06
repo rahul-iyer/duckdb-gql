@@ -628,8 +628,8 @@ void GqlAttachReferencedGraphTables(Connection &connection, const string &graph_
 	for (auto &entry : resolved) {
 		entry.table_id = InsertElementTable(connection, graph_id, entry.mapping->kind.c_str(), *entry.table,
 		                                    entry.key ? entry.key->Name().GetIdentifierName() : string(), "REFERENCED");
-		GqlQuery(connection, "UPDATE gql_internal.graph_element_tables SET access_mode = 'READ_ONLY' WHERE "
-		                     "element_table_id = " +
+		GqlQuery(connection, "UPDATE gql_internal.graph_element_tables SET access_mode = " +
+		                         GqlQuoteLiteral(mapping.access_mode) + " WHERE element_table_id = " +
 		                         to_string(entry.table_id));
 		InsertStaticLabels(connection, entry.table_id, entry.schema_id, entry.mapping->schema_type);
 		InsertReferencedProperties(connection, entry.table_id, entry.schema_id, *entry.table, entry.mapping->properties,
@@ -668,6 +668,9 @@ void GqlAttachReferencedGraphTables(Connection &connection, const string &graph_
 		source_kind = "DUCKDB";
 	} else {
 		throw NotImplementedException("Referenced graphs do not yet support catalog type '%s'", database_type);
+	}
+	if (StringUtil::CIEquals(mapping.snapshot_policy, "PINNED") && StringUtil::CIEquals(mapping.access_mode, "READ_WRITE")) {
+		throw BinderException("ACCESS_MODE 'READ_WRITE' requires SNAPSHOT_POLICY 'LIVE'");
 	}
 	string snapshot = "NULL";
 	if (source_kind == "DUCKLAKE") {
@@ -819,10 +822,24 @@ static GqlElementTableBinding BuildReferencedUnion(Connection &connection, uint6
 	for (const auto &property : properties) {
 		result.property_columns.emplace(property.first, property.first);
 	}
-	for (const auto &entry : tables) {
-		result.referenced_sources.push_back({entry.table.element_table_id, entry.table.catalog_name,
-		                                     entry.table.schema_name, entry.table.table_name, entry.table.key_column,
-		                                     entry.table.static_labels, entry.table.property_columns});
+	for (idx_t index = 0; index < tables.size(); index++) {
+		const auto &entry = tables[index];
+		GqlReferencedSource source {entry.table.element_table_id, entry.table.catalog_name,
+		                            entry.table.schema_name,       entry.table.table_name,
+		                            entry.table.key_column,        entry.table.static_labels,
+		                            entry.table.property_columns};
+		source.source_column = entry.source_column;
+		source.target_column = entry.target_column;
+		source.source_table_id = entry.source_table_id;
+		source.target_table_id = entry.target_table_id;
+		// The numbering of MATCH outside the per-snapshot key cache, as writes see it.
+		const auto alias = "gql_identity_" + to_string(index);
+		const auto key = entry.table.key_column.empty() ? string("rowid") : entry.table.key_column;
+		source.identity_sql = "(SELECT " + GqlQuoteIdentifier(alias) + ".rowid AS gql_rowid, " +
+		                      GqlQuoteIdentifier(alias) + "." + GqlQuoteIdentifier(key) + " AS gql_key, " +
+		                      ReferencedDenseId(tables, index, alias, false, 0) + " AS __gql_id FROM " +
+		                      QualifiedReferencedTable(entry.table) + " AS " + GqlQuoteIdentifier(alias) + ")";
+		result.referenced_sources.push_back(std::move(source));
 	}
 	if (cached_ids) {
 		auto mapping = [&](uint64_t id, const string &alias) {

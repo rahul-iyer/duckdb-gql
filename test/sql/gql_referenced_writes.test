@@ -1,0 +1,381 @@
+# name: test/sql/gql_referenced_writes.test
+# description: GQL writes to a READ_WRITE graph over tables of an attached DuckDB database
+# group: [gql]
+
+require duckgql
+
+load {TEST_DIR}/gql_referenced_writes.db
+
+statement ok
+ATTACH '{TEST_DIR}/gql_referenced_writes_source.db' AS lake
+
+statement ok
+CREATE TABLE lake.main.person (person_id BIGINT NOT NULL, full_name VARCHAR, age_years BIGINT)
+
+statement ok
+CREATE TABLE lake.main.city (city_id BIGINT NOT NULL, city_name VARCHAR)
+
+statement ok
+CREATE TABLE lake.main.knows (relationship_id BIGINT NOT NULL, src BIGINT NOT NULL, dst BIGINT NOT NULL, since_year INTEGER)
+
+statement ok
+CREATE TABLE lake.main.lives (src BIGINT NOT NULL, dst BIGINT NOT NULL)
+
+statement ok
+INSERT INTO lake.main.person VALUES (1, 'Ada', 42), (2, 'Grace', 37), (3, 'Alan', 41)
+
+statement ok
+INSERT INTO lake.main.city VALUES (100, 'London'), (200, 'New York')
+
+statement ok
+INSERT INTO lake.main.knows VALUES (10, 1, 2, 2020), (11, 2, 3, 2021)
+
+statement ok
+INSERT INTO lake.main.lives VALUES (1, 100), (3, 200)
+
+statement error
+CREATE GRAPH pinned_writes TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING, age INT64}),
+    (Person)-[:KNOWS {id INT64 NOT NULL, since INT32}]->(Person)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.person MAP TO NODE TYPE Person KEY (person_id)
+        PROPERTIES (person_id AS id, full_name AS name, age_years AS age),
+    EDGE TABLE lake.main.knows MAP TO EDGE TYPE KNOWS KEY (relationship_id)
+        SOURCE (src) REFERENCES NODE TYPE Person DESTINATION (dst) REFERENCES NODE TYPE Person
+        PROPERTIES (relationship_id AS id, since_year AS since)
+)
+OPTIONS (SNAPSHOT_POLICY 'PINNED', ACCESS_MODE 'READ_WRITE')
+----
+<REGEX>:.*READ_WRITE.*requires SNAPSHOT_POLICY 'LIVE'.*
+
+query IT
+CREATE GRAPH social TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING, age INT64}),
+    (City :City {code INT64 NOT NULL, name STRING}),
+    (Person)-[:KNOWS {id INT64 NOT NULL, since INT32}]->(Person),
+    (Person)-[:LIVES_IN]->(City)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.person MAP TO NODE TYPE Person KEY (person_id)
+        PROPERTIES (person_id AS id, full_name AS name, age_years AS age),
+    VERTEX TABLE lake.main.city MAP TO NODE TYPE City KEY (city_id)
+        PROPERTIES (city_id AS code, city_name AS name),
+    EDGE TABLE lake.main.knows MAP TO EDGE TYPE KNOWS KEY (relationship_id)
+        SOURCE (src) REFERENCES NODE TYPE Person DESTINATION (dst) REFERENCES NODE TYPE Person
+        PROPERTIES (relationship_id AS id, since_year AS since),
+    EDGE TABLE lake.main.lives MAP TO EDGE TYPE LIVES_IN
+        SOURCE (src) REFERENCES NODE TYPE Person DESTINATION (dst) REFERENCES NODE TYPE City
+)
+OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_WRITE', VALIDATE TRUE)
+----
+true	social
+
+query TT
+SELECT DISTINCT et.access_mode, s.access_mode
+FROM gql_internal.graph_element_tables et
+JOIN gql_internal.graph_sources s USING (graph_id)
+JOIN gql_internal.graphs g USING (graph_id)
+WHERE g.graph_name = 'social'
+----
+READ_WRITE	READ_WRITE
+
+statement ok
+SESSION SET GRAPH social
+
+# Each element goes to the table its labels name, and edges take their nodes' keys.
+statement ok
+INSERT (:Person {id: 4, name: 'Katherine', age: 30})
+
+statement ok
+INSERT (:Person {id: 5, name: 'Linus'})-[:KNOWS {id: 12, since: 2024}]->(:Person {id: 6, name: 'Ken'})
+
+statement ok
+INSERT (:Person {id: 7, name: 'Edsger'})-[:LIVES_IN]->(:City {code: 300, name: 'Paris'})
+
+query ITI
+SELECT * FROM lake.main.person ORDER BY person_id
+----
+1	Ada	42
+2	Grace	37
+3	Alan	41
+4	Katherine	30
+5	Linus	NULL
+6	Ken	NULL
+7	Edsger	NULL
+
+query IIII
+SELECT * FROM lake.main.knows ORDER BY relationship_id
+----
+10	1	2	2020
+11	2	3	2021
+12	5	6	2024
+
+query II
+SELECT * FROM lake.main.lives ORDER BY src
+----
+1	100
+3	200
+7	300
+
+query TT
+MATCH (a:Person)-[:LIVES_IN]->(c:City) RETURN a.name, c.name ORDER BY a.name
+----
+Ada	London
+Alan	New York
+Edsger	Paris
+
+# Keys stay unique and required, and labels must name a table.
+statement error
+INSERT (:Person {id: 1, name: 'Duplicate'})
+----
+<REGEX>:.*key already exists in main.person.*
+
+statement error
+INSERT (:Person {id: 8, name: 'A'})-[:KNOWS {id: 13}]->(:Person {id: 8, name: 'B'})
+----
+<REGEX>:.*two elements with the same key in main.person.*
+
+statement error
+INSERT (:Person {name: 'No key'})
+----
+<REGEX>:.*requires property 'id'.*
+
+statement error
+INSERT (:Person {id: 9})-[:KNOWS]->(:Person {id: 10})
+----
+<REGEX>:.*main.knows requires property 'id'.*
+
+statement error
+INSERT (:Robot {id: 9})
+----
+<REGEX>:.*No vertex table of the referenced graph has labels.*
+
+statement error
+INSERT (:Person {id: 9})-[:LIVES_IN]->(:Person {id: 10})
+----
+<REGEX>:.*No edge table of the referenced graph has type.*
+
+statement error
+INSERT (:Person {id: 9, nickname: 'x'})
+----
+<REGEX>:.*nickname.*
+
+statement error
+INSERT (a:Person {id: 9}) RETURN a
+----
+<REGEX>:.*not supported for referenced graphs.*
+
+statement error
+MERGE (:Person {id: 9})
+----
+<REGEX>:.*MERGE is not supported for referenced graphs.*
+
+# A failed write leaves no rows behind.
+query I
+SELECT count(*) FROM lake.main.person
+----
+7
+
+# SET and REMOVE update the mapped columns by key.
+statement ok
+MATCH (p:Person) WHERE p.id = 1 OR p.id = 2 SET p.age = p.age + 1
+
+statement ok
+MATCH (a:Person)-[k:KNOWS]->(b:Person) WHERE a.id = 2 SET k.since = 1999, b.name = 'Alan T'
+
+statement ok
+MATCH (p:Person) WHERE p.id = 4 REMOVE p.age
+
+statement ok
+MATCH (c:City) WHERE c.code = 300 SET c.name = 'Paris FR'
+
+query ITI
+SELECT * FROM lake.main.person WHERE person_id <= 4 ORDER BY person_id
+----
+1	Ada	43
+2	Grace	38
+3	Alan T	41
+4	Katherine	NULL
+
+query II
+SELECT relationship_id, since_year FROM lake.main.knows ORDER BY relationship_id
+----
+10	2020
+11	1999
+12	2024
+
+query T
+MATCH (c:City) WHERE c.code = 300 RETURN c.name
+----
+Paris FR
+
+statement error
+MATCH (p:Person) WHERE p.id = 1 SET p.id = 50
+----
+<REGEX>:.*identifies elements of main.person.*
+
+statement error
+MATCH (p:Person) WHERE p.id = 1 SET p:Robot
+----
+<REGEX>:.*Labels of a referenced graph come from its tables.*
+
+# DELETE removes targeted edges first, keeps attached nodes, and DETACH removes their edges.
+statement error
+MATCH (p:Person) WHERE p.id = 1 DELETE p
+----
+<REGEX>:.*use DETACH DELETE.*
+
+statement ok
+MATCH (a:Person)-[k:KNOWS]->(b:Person) WHERE k.id = 12 DELETE k
+
+statement ok
+MATCH (p:Person) WHERE p.id = 3 DETACH DELETE p
+
+statement ok
+MATCH (p:Person)-[k:KNOWS]->(:Person), (p)-[l:LIVES_IN]->(:City) WHERE p.id = 1 DELETE k, l, p
+
+query I
+SELECT person_id FROM lake.main.person ORDER BY person_id
+----
+2
+4
+5
+6
+7
+
+query IIII
+SELECT * FROM lake.main.knows ORDER BY relationship_id
+----
+
+query II
+SELECT * FROM lake.main.lives ORDER BY src
+----
+7	300
+
+statement error
+MATCH (p:Person) WHERE p.id = 7 DELETE p
+----
+<REGEX>:.*use DETACH DELETE.*
+
+# MATCH ... INSERT connects matched nodes and creates one node per match.
+statement ok
+MATCH (a:Person), (b:Person) WHERE a.id = 5 AND b.id = 6 INSERT (a)-[:KNOWS {id: 20, since: 2025}]->(b)
+
+statement ok
+MATCH (a:Person) WHERE a.id = 2 OR a.id = 4 INSERT (a)-[:LIVES_IN]->(:City {code: a.id + 1000, name: 'Home ' || a.name})
+
+query TIT
+MATCH (a:Person)-[:LIVES_IN]->(c:City) RETURN a.name, c.code, c.name ORDER BY c.code
+----
+Edsger	300	Paris FR
+Grace	1002	Home Grace
+Katherine	1004	Home Katherine
+
+query TIT
+MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name, k.id, b.name
+----
+Linus	20	Ken
+
+statement error
+MATCH (a:Person) WHERE a.id = 5 OR a.id = 6 INSERT (a)-[:LIVES_IN]->(:City {code: 1, name: 'Same'})
+----
+<REGEX>:.*key already exists in main.city.*
+
+statement error
+MATCH (a:Person) WHERE a.id = 5 INSERT (a)-[:KNOWS]->(:Person {id: 60})
+----
+<REGEX>:.*main.knows requires property 'id'.*
+
+statement error
+MATCH (a:Person), (c:City) WHERE a.id = 5 AND c.code = 300 INSERT (a)-[:KNOWS {id: 30}]->(c)
+----
+<REGEX>:.*No edge table of the referenced graph has type.*
+
+query I
+SELECT count(*) FROM lake.main.city
+----
+5
+
+# Writes join an explicit transaction and roll back with it.
+statement ok
+BEGIN
+
+statement ok
+INSERT (:Person {id: 70, name: 'Rolled back'})
+
+statement ok
+MATCH (p:Person) WHERE p.id = 70 SET p.age = 1
+
+query TI
+MATCH (p:Person) WHERE p.id = 70 RETURN p.name, p.age
+----
+Rolled back	1
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (p:Person) WHERE p.id = 70 RETURN count(*)
+----
+0
+
+statement ok
+BEGIN
+
+statement ok
+INSERT (:Person {id: 71, name: 'Committed'})
+
+statement ok
+MATCH (p:Person) WHERE p.id = 71 SET p.age = 2
+
+statement ok
+COMMIT
+
+query TI
+MATCH (p:Person) WHERE p.id = 71 RETURN p.name, p.age
+----
+Committed	2
+
+# Reads after a write see it through a built CSR too.
+statement ok
+CALL gql_build_csr('social')
+
+statement ok
+INSERT (:Person {id: 72, name: 'Reachable'})
+
+statement ok
+MATCH (a:Person), (b:Person) WHERE a.id = 71 AND b.id = 72 INSERT (a)-[:KNOWS {id: 40}]->(b)
+
+query T
+MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person) WHERE a.id = 71 RETURN b.name
+----
+Reachable
+
+# Read-only referenced graphs still refuse writes.
+statement ok
+CREATE GRAPH social_read TYPED {
+    (Person :Person {id INT64 NOT NULL, name STRING, age INT64}),
+    (Person)-[:KNOWS {id INT64 NOT NULL, since INT32}]->(Person)
+}
+FROM TABLES (
+    VERTEX TABLE lake.main.person MAP TO NODE TYPE Person KEY (person_id)
+        PROPERTIES (person_id AS id, full_name AS name, age_years AS age),
+    EDGE TABLE lake.main.knows MAP TO EDGE TYPE KNOWS KEY (relationship_id)
+        SOURCE (src) REFERENCES NODE TYPE Person DESTINATION (dst) REFERENCES NODE TYPE Person
+        PROPERTIES (relationship_id AS id, since_year AS since)
+)
+OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_ONLY')
+
+statement ok
+SESSION SET GRAPH social_read
+
+statement error
+INSERT (:Person {id: 80})
+----
+<REGEX>:.*read-only referenced graph.*
+
+statement error
+MATCH (p:Person) WHERE p.id = 2 SET p.age = 0
+----
+<REGEX>:.*read-only referenced graph.*
