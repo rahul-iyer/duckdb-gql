@@ -34,6 +34,9 @@
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
+#include "duckdb/storage/storage_info.hpp"
+
+#include <algorithm>
 #include <mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -755,6 +758,7 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	if (build_vertex_labels) {
 		snapshot->vertex_label_offsets.push_back(0);
 	}
+	vector<vector<bool>> vertex_label_groups;
 	while (auto chunk = FetchCsrRows(*vertices)) {
 		UnifiedVectorFormat vertex_data;
 		UnifiedVectorFormat label_data;
@@ -801,6 +805,17 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 							              label_id) == snapshot->vertex_label_ids.end()) {
 								snapshot->vertex_label_ids.push_back(label_id);
 							}
+							if (snapshot->vertex_ids_match_rowids) {
+								if (label_id >= vertex_label_groups.size()) {
+									vertex_label_groups.resize(label_id + 1);
+								}
+								auto group = NumericCast<idx_t>(row_ids[row_id_index] / DEFAULT_ROW_GROUP_SIZE);
+								auto &groups = vertex_label_groups[label_id];
+								if (group >= groups.size()) {
+									groups.resize(group + 1, false);
+								}
+								groups[group] = true;
+							}
 						}
 					}
 				}
@@ -808,6 +823,12 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			if (build_vertex_labels) {
 				snapshot->vertex_label_offsets.push_back(snapshot->vertex_label_ids.size());
 			}
+		}
+	}
+	if (snapshot->vertex_ids_match_rowids) {
+		for (const auto &groups : vertex_label_groups) {
+			snapshot->vertex_label_row_groups.push_back(
+			    NumericCast<uint64_t>(std::count(groups.begin(), groups.end(), true)));
 		}
 	}
 	if (snapshot->vertex_ids_match_rowids) {
@@ -1011,6 +1032,9 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	auto edge_rows = make_uniq<QueryResultStream<>>(connection.Submit(edge_projection));
 
 	idx_t scattered_edges = 0;
+	// Managed edge IDs are rowids + 1, so each edge's row group is known without another scan.
+	const bool count_row_groups = build_edge_stats && build_edge_labels && snapshot->edge_ids_match_rowids;
+	vector<vector<bool>> label_row_groups;
 	bool edge_labels_uniform = true;
 	bool saw_edge_label = false;
 	uint32_t uniform_edge_label_id = 0;
@@ -1070,6 +1094,17 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 				if (build_edge_stats) {
 					snapshot->edge_label_stats[label_id].edge_count++;
 				}
+				if (count_row_groups) {
+					if (label_id >= label_row_groups.size()) {
+						label_row_groups.resize(label_id + 1);
+					}
+					auto group = NumericCast<idx_t>((edge_id - 1) / DEFAULT_ROW_GROUP_SIZE);
+					auto &groups = label_row_groups[label_id];
+					if (group >= groups.size()) {
+						groups.resize(group + 1, false);
+					}
+					groups[group] = true;
+				}
 				if (!saw_edge_label) {
 					uniform_edge_label_id = label_id;
 					saw_edge_label = true;
@@ -1117,6 +1152,11 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			}
 			scattered_edges++;
 		}
+	}
+	for (idx_t label = 0; label < label_row_groups.size() && label < snapshot->edge_label_stats.size(); label++) {
+		const auto &groups = label_row_groups[label];
+		snapshot->edge_label_stats[label].row_groups =
+		    NumericCast<uint64_t>(std::count(groups.begin(), groups.end(), true));
 	}
 	if (scattered_edges != expected_edges) {
 		throw InternalException("GQL CSR edge scan changed within a read transaction");
@@ -1379,7 +1419,7 @@ uint64_t GqlCsrBuildCount(ClientContext &context) {
 	return ReadCsrBuildCount(*GetDerivedGraphStorageState(context));
 }
 
-static constexpr uint32_t GQL_CSR_FORMAT_VERSION = 1;
+static constexpr uint32_t GQL_CSR_FORMAT_VERSION = 2;
 
 class TableCsrPageSource : public GqlCsrPageSource {
 public:
@@ -1469,6 +1509,8 @@ static void WriteCsrMetadata(GqlCsrWriter &writer, const GqlCsrSnapshot &snapsho
 		writer.Write<uint32_t>(label.second);
 	}
 	writer.WriteBytes(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
+	writer.WriteBytes(snapshot.vertex_label_row_groups.data(),
+	                  snapshot.vertex_label_row_groups.size() * sizeof(uint64_t));
 	writer.Write<idx_t>(snapshot.label_fanout_stats.size());
 	for (const auto &entry : snapshot.label_fanout_stats) {
 		writer.Write<uint64_t>(entry.first);
@@ -1508,6 +1550,9 @@ static bool ReadCsrMetadata(GqlCsrReader &reader, GqlCsrSnapshot &snapshot) {
 	}
 	snapshot.edge_label_stats.resize(reader.ReadSize() / sizeof(GqlCsrEdgeLabelStats));
 	reader.ReadInto(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
+	snapshot.vertex_label_row_groups.resize(reader.ReadSize() / sizeof(uint64_t));
+	reader.ReadInto(snapshot.vertex_label_row_groups.data(),
+	                snapshot.vertex_label_row_groups.size() * sizeof(uint64_t));
 	const auto fanout_count = reader.Read<idx_t>();
 	for (idx_t index = 0; index < fanout_count; index++) {
 		const auto key = reader.Read<uint64_t>();

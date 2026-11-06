@@ -141,8 +141,9 @@ MATCH (s:Person)-[:R]->(t:Country) RETURN count(*)
 ----
 0
 
+# No Person reaches a Country, whichever side the edge is read from.
 query II
-SELECT endpoint_edges,estimated_rows FROM gql_optimizer_plan() WHERE edge_label='r'
+SELECT endpoint_edges,joined_rows FROM gql_optimizer_plan() WHERE edge_label='r'
 ----
 0	0
 

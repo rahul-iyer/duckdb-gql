@@ -751,7 +751,7 @@ static GqlPlanCost AccessCost(const GqlCostModel &cost_model, const GqlBindingAc
 		auto candidate_scan = cost_model.Scan(total_rows, path.candidate_rows, path.cardinality.row_width);
 		auto result = lookup.Total() < candidate_scan.Total() ? lookup : candidate_scan;
 		if (path.candidate_rows != DConstants::INVALID_INDEX) {
-			result.join += static_cast<double>(path.candidate_rows) * 0.05;
+			result.join += cost_model.Join(0, 0, path.candidate_rows, 0).join;
 			result.peak_memory_bytes = MaxValue<idx_t>(
 			    result.peak_memory_bytes,
 			    ClampCardinality(static_cast<long double>(path.candidate_rows) * path.cardinality.row_width));
@@ -854,11 +854,28 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 	// Keep cardinality and physical costs on the same model. Without complete
 	// endpoint analysis the established multi-edge estimator remains in use.
 	const bool analyzed_domains = snapshot && snapshot->endpoint_statistics;
-	GqlCostModel cost_model(TaskScheduler::GetScheduler(context).NumberOfThreads(), analyzed_domains);
+	GqlCostModel cost_model;
 	GqlNativeStatistics vertex_statistics(context, graph.vertex);
 	GqlNativeStatistics edge_statistics(context, graph.edge);
 	const auto vertex_count = snapshot ? snapshot->vertex_ids.size() : vertex_statistics.rows;
 	const auto edge_count = snapshot ? snapshot->edge_count : edge_statistics.rows;
+	// Rows a scan filtered on one edge type reads: only the row groups holding that type.
+	auto edge_scan_rows = [&](const string &label) {
+		auto stats = TryEdgeLabelStats(statistics, label);
+		if (!stats || !stats->row_groups)
+			return edge_count;
+		return MinValue<idx_t>(edge_count, NumericCast<idx_t>(stats->row_groups) * DEFAULT_ROW_GROUP_SIZE);
+	};
+	// Each vertex label's edges of every type, per direction. A CSR expansion reads all of a
+	// seed's edges in its direction and drops other types, so this is the work it walks.
+	unordered_map<uint32_t, pair<uint64_t, uint64_t>> label_degree_totals;
+	if (snapshot && snapshot->has_label_fanout_stats) {
+		for (const auto &entry : snapshot->label_fanout_stats) {
+			auto &totals = label_degree_totals[static_cast<uint32_t>(entry.first >> 32)];
+			totals.first += entry.second.outgoing_edges;
+			totals.second += entry.second.incoming_edges;
+		}
+	}
 
 	vector<double> predicate_selectivity(input.binding_types.size(), 1);
 	for (idx_t binding = 0; binding < input.binding_types.size(); binding++) {
@@ -1071,6 +1088,8 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			vector<bool> frontier;
 			vector<idx_t> component;
 			vector<GqlCardinalityEstimate> domain;
+			//! Work a vertex scan saved by skipping row groups outside its join keys' range.
+			vector<double> pruned_scan_savings;
 		};
 		struct SearchEdge {
 			GqlAccessPatternElement left;
@@ -1099,7 +1118,8 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 		                     vector<bool>(edges.size(), false),
 		                     vector<bool>(input.binding_types.size(), false),
 		                     {},
-		                     {}};
+		                     {},
+		                     vector<double>(input.binding_types.size(), 0)};
 		// Marginal endpoint distributions do not describe the tuple domain of a
 		// joined or quantified region. Keep the existing estimates there until a
 		// joint-domain model can cost the complete region. This is a statistics
@@ -1278,6 +1298,35 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			}
 			return true;
 		};
+		// Edges a CSR expansion from each seed walks in total, and of its edge type.
+		auto seed_adjacency = [&](idx_t binding, const string &label, const string &direction) {
+			pair<double, double> result {0, 0};
+			if (!snapshot || snapshot->vertex_ids.empty())
+				return result;
+			const bool outgoing = direction == "out";
+			result.first = static_cast<double>(snapshot->edge_count) / snapshot->vertex_ids.size();
+			if (auto stats = TryEdgeLabelStats(statistics, label))
+				result.second = static_cast<double>(stats->edge_count) / snapshot->vertex_ids.size();
+			auto vertex_label = population_labels[binding].empty()
+			                        ? snapshot->label_ids.end()
+			                        : snapshot->label_ids.find(StringUtil::Lower(population_labels[binding]));
+			auto totals = vertex_label == snapshot->label_ids.end() ? label_degree_totals.end()
+			                                                        : label_degree_totals.find(vertex_label->second);
+			if (totals == label_degree_totals.end() || population_rows[binding] == 0 ||
+			    population_rows[binding] == DConstants::INVALID_INDEX)
+				return result;
+			const auto population = static_cast<double>(population_rows[binding]);
+			result.first = (outgoing ? totals->second.first : totals->second.second) / population;
+			auto edge_label = snapshot->label_ids.find(StringUtil::Lower(label));
+			auto typed =
+			    edge_label == snapshot->label_ids.end()
+			        ? snapshot->label_fanout_stats.end()
+			        : snapshot->label_fanout_stats.find(GqlCsrLabelFanoutKey(vertex_label->second, edge_label->second));
+			result.second = typed == snapshot->label_fanout_stats.end()
+			                    ? 0
+			                    : (outgoing ? typed->second.outgoing_edges : typed->second.incoming_edges) / population;
+			return result;
+		};
 		auto schedule = [&](SearchState &state, idx_t binding) {
 			if (state.plan.introduced[binding] && !state.scheduled[binding]) {
 				state.plan.source_order.push_back(binding);
@@ -1294,12 +1343,35 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			schedule(state, binding);
 			state.reachable[binding] = true;
 		};
+		// A vertex joined on its ID reads only its label's row groups: vertices of a label are stored
+		// together, and DuckDB skips row groups outside the range of the join keys.
+		auto joined_scan = [&](const GqlBindingAccessPath &path, idx_t binding) {
+			auto rows = vertex_count;
+			if (snapshot && !population_labels[binding].empty()) {
+				auto label = snapshot->label_ids.find(StringUtil::Lower(population_labels[binding]));
+				if (label != snapshot->label_ids.end() && label->second < snapshot->vertex_label_row_groups.size() &&
+				    snapshot->vertex_label_row_groups[label->second] > 0) {
+					rows = MinValue<idx_t>(rows, NumericCast<idx_t>(snapshot->vertex_label_row_groups[label->second]) *
+					                                 DEFAULT_ROW_GROUP_SIZE);
+				}
+			}
+			return cost_model.Scan(rows, path.cardinality.rows, path.cardinality.row_width);
+		};
 		auto attach_vertex = [&](SearchState &state, idx_t binding, const SearchEdge &entry, idx_t fetch_rows) {
 			if (state.reachable[binding])
 				return;
 			auto &path = state.plan.bindings[binding];
 			auto fetch = cost_model.Fetch(fetch_rows, path.cardinality.row_width);
 			auto scan = AccessCost(cost_model, path, vertex_count);
+			bool scan_joined = false;
+			if (path.type == GqlBindingAccessPathType::TABLE_SCAN ||
+			    path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+				auto joined = joined_scan(path, binding);
+				if (joined.Total() < scan.Total()) {
+					scan = joined;
+					scan_joined = true;
+				}
+			}
 			if ((can_fetch_vertices || can_fetch_referenced) &&
 			    (path.type == GqlBindingAccessPathType::TABLE_SCAN ||
 			     path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) &&
@@ -1319,6 +1391,19 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 				                           : (entry.edge.reverse ? source_column : target_column);
 				path.cost = fetch;
 				state.plan.cost.Add(fetch);
+				schedule(state, binding);
+				state.reachable[binding] = true;
+			} else if (scan_joined) {
+				if (path.type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+					path.type = GqlBindingAccessPathType::TABLE_SCAN;
+					path.label_postings.clear();
+					path.fetch_columns.clear();
+				}
+				path.cost = scan;
+				path.cost.ApplyMemoryBudget(memory_budget);
+				state.plan.cost.Add(path.cost);
+				state.pruned_scan_savings[binding] =
+				    AccessCost(cost_model, path, vertex_count).Total() - path.cost.Total();
 				schedule(state, binding);
 				state.reachable[binding] = true;
 			} else {
@@ -1622,7 +1707,7 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 						schedule(candidate, edge_binding);
 						attach_vertex(candidate, entry.left.binding_index, entry, scan_rows);
 						attach_vertex(candidate, entry.right.binding_index, entry, scan_rows);
-						path.cost = cost_model.Scan(edge_count, scan_rows, path.cardinality.row_width);
+						path.cost = cost_model.Scan(edge_scan_rows(edge.label), scan_rows, path.cardinality.row_width);
 						path.cost.Add(cost_model.Join(
 						    joint_region ? state.domain[entry.left.binding_index].rows
 						                 : candidate.plan.bindings[entry.left.binding_index].cardinality.rows,
@@ -1658,6 +1743,14 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							auto seed_binding = from_left ? entry.left.binding_index : entry.right.binding_index;
 							auto neighbor_binding = from_left ? entry.right.binding_index : entry.left.binding_index;
 							seed(candidate, seed_binding);
+							// A vertex scan that seeds an expansion runs inside DuckDB's decorrelated
+							// lateral join, where the join keys no longer prune it: it reads every row group.
+							if (candidate.pruned_scan_savings[seed_binding] > 0) {
+								candidate.plan.bindings[seed_binding].cost.scan +=
+								    candidate.pruned_scan_savings[seed_binding];
+								candidate.plan.cost.scan += candidate.pruned_scan_savings[seed_binding];
+								candidate.pruned_scan_savings[seed_binding] = 0;
+							}
 							auto seed_rows = joint_region ? state.domain[seed_binding].distinct_ids
 							                              : candidate.plan.bindings[seed_binding].cardinality.rows;
 							auto &path = candidate.plan.bindings[edge_binding];
@@ -1682,14 +1775,30 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 							                                    ? DConstants::INVALID_INDEX
 							                                    : MinValue<idx_t>(path.cardinality.rows, edge_count);
 							path.cardinality.from_statistics = path.cardinality.rows != DConstants::INVALID_INDEX;
-							path.cost =
-							    csr ? cost_model.Expand(seed_rows, path.cardinality.rows)
-							        : cost_model.Scan(edge_count, path.cardinality.rows, path.cardinality.row_width);
+							if (csr) {
+								auto adjacency = seed_adjacency(seed_binding, edge.label, path.expansion_direction);
+								auto seeds =
+								    seed_rows == DConstants::INVALID_INDEX ? 0.0 : static_cast<double>(seed_rows);
+								auto walked = seeds * adjacency.first;
+								auto checked = label_constrained[neighbor_binding] ? seeds * adjacency.second : 0.0;
+								if (edge.quantified && adjacency.second > 0 &&
+								    path.cardinality.rows != DConstants::INVALID_INDEX) {
+									// Every repetition walks its frontier's edges again.
+									auto rows = static_cast<double>(path.cardinality.rows);
+									walked = MaxValue<double>(walked, rows * adjacency.first / adjacency.second);
+									checked =
+									    label_constrained[neighbor_binding] ? MaxValue<double>(checked, rows) : 0.0;
+								}
+								path.cost = cost_model.Expand(seed_rows, walked, checked, path.cardinality.rows);
+							} else {
+								path.cost = cost_model.Scan(edge_scan_rows(edge.label), path.cardinality.rows,
+								                            path.cardinality.row_width);
+							}
 
 							if (path.type == GqlBindingAccessPathType::CSR_EDGE_PROPERTY_EXPANSION) {
 								auto fetch = cost_model.Fetch(path.cardinality.rows, edge_statistics.Width({}));
-								auto scan =
-								    cost_model.Scan(edge_count, path.cardinality.rows, path.cardinality.row_width);
+								auto scan = cost_model.Scan(edge_scan_rows(edge.label), path.cardinality.rows,
+								                            path.cardinality.row_width);
 								path.fetch_edge_properties = can_fetch_edges && fetch.Total() < scan.Total();
 								path.cost.Add(path.fetch_edge_properties ? fetch : scan);
 							}
@@ -1810,8 +1919,9 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			if (!best.scheduled[binding]) {
 				auto &path = best.plan.bindings[binding];
 				path.cost = AccessCost(cost_model, path,
-				                       input.binding_types[binding] == GqlPatternElementType::VERTEX ? vertex_count
-				                                                                                     : edge_count);
+				                       input.binding_types[binding] == GqlPatternElementType::VERTEX
+				                           ? vertex_count
+				                           : edge_scan_rows(path.edge_label));
 				path.cost.ApplyMemoryBudget(memory_budget);
 				best.plan.cost.Add(path.cost);
 				schedule(best, binding);
@@ -1819,6 +1929,15 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 			auto &path = best.plan.bindings[binding];
 
 			propagated_cardinality[binding] = path.cardinality;
+		}
+		// Only graph-specific sources need an order: their seeds come first. A stage of native scans
+		// is a plain join that DuckDB's optimizer orders, so give it the pattern's order unchanged.
+		bool native_join = true;
+		for (const auto binding : best.plan.source_order) {
+			native_join &= best.plan.bindings[binding].type == GqlBindingAccessPathType::TABLE_SCAN;
+		}
+		if (native_join) {
+			std::sort(best.plan.source_order.begin(), best.plan.source_order.end());
 		}
 		best.plan.costed = true;
 		best.plan.alternatives_considered = considered;

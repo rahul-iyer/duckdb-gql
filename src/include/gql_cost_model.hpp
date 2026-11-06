@@ -4,7 +4,8 @@
 
 namespace duckdb {
 
-// Relative work units, not milliseconds. No cost or cardinality is a semantic
+// Total single-threaded work, in units of one sequential tuple (about 4ns), not wall time.
+// Every operator parallelizes, so no operator gets a parallelism discount. No cost or cardinality is a semantic
 // bound: duplicate bindings can produce more rows than there are graph edges.
 struct GqlCardinalityEstimate {
 	idx_t rows = DConstants::INVALID_INDEX;
@@ -26,22 +27,17 @@ struct GqlPlanCost {
 	void ApplyMemoryBudget(idx_t bytes);
 };
 
-// Shared by access-path enumeration and diagnostics. These deliberately simple
-// coefficients are independent of query names and scale factors. They model
-// sequential column work versus random row fetches and per-seed lateral work.
+// Shared by access-path enumeration and diagnostics. Each operator costs the tuples it touches:
+// sequential work counts one per tuple, a random vertex or row access costs more. The constants
+// were measured once on synthetic graphs, independent of any benchmark query.
 struct GqlCostModel {
-	explicit GqlCostModel(idx_t worker_count_p = 1, bool analyzed_domains_p = false)
-	    : worker_count(worker_count_p ? worker_count_p : 1), analyzed_domains(analyzed_domains_p) {
-	}
 	GqlPlanCost Scan(idx_t table_rows, idx_t output_rows, idx_t width) const;
 	GqlPlanCost Lookup(idx_t table_rows, idx_t output_rows, idx_t width) const;
 	GqlPlanCost Fetch(idx_t rows, idx_t width) const;
-	GqlPlanCost Expand(idx_t seed_rows, idx_t output_rows) const;
+	//! A CSR expansion walks every edge of each seed in its direction, checks the neighbor's
+	//! label on edges of the requested type when the pattern requires one, and emits output_rows.
+	GqlPlanCost Expand(idx_t seed_rows, double walked_edges, double checked_edges, idx_t output_rows) const;
 	GqlPlanCost Join(idx_t left_rows, idx_t right_rows, idx_t output_rows, idx_t width) const;
-
-private:
-	idx_t worker_count;
-	bool analyzed_domains;
 };
 
 } // namespace duckdb

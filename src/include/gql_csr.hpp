@@ -529,6 +529,9 @@ struct GqlCsrEdgeLabelStats {
 	//! Sums of squared degree. A vertex reached over an edge is degree-biased, with mean degree squares/edges.
 	double outgoing_degree_squares = 0;
 	double incoming_degree_squares = 0;
+	//! Storage row groups holding edges of this type, or 0 when unknown. A scan filtered on the
+	//! type skips the others by their min/max statistics.
+	uint64_t row_groups = 0;
 };
 
 // Population totals include vertices with zero matching degree. Sparse pairs
@@ -664,6 +667,9 @@ struct GqlCsrSnapshot {
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
 	vector<GqlCsrEdgeLabelStats> edge_label_stats;
+	//! Storage row groups holding vertices of each label id, or 0 when unknown. Vertices of a label
+	//! are stored together, so a join on their IDs lets DuckDB skip the other row groups.
+	vector<uint64_t> vertex_label_row_groups;
 	unordered_map<uint64_t, GqlCsrLabelFanoutStats> label_fanout_stats;
 	bool has_label_fanout_stats = false;
 	unique_ptr<GqlEndpointStatistics> endpoint_statistics;
