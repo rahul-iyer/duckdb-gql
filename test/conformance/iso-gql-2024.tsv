@@ -14,8 +14,8 @@ GQL-13.5	modification	delete edges, delete isolated nodes, and detach delete	par
 GQL-14	query	linear/composite queries and union/except/intersect/otherwise	planned	parser,binder,execution
 GQL-14.4	query	match and optional match	partial	parser,binder,execution
 GQL-14.6	query	filter	partial	parser,binder,execution
-GQL-14.7	query	let	planned	parser,binder,types,execution
-GQL-14.8	query	for, ordinality, and offset	planned	parser,binder,execution
+GQL-14.7	query	let	partial	parser,binder,types,execution
+GQL-14.8	query	for, ordinality, and offset	partial	parser,binder,execution
 GQL-14.9	result	order by, offset, and limit	partial	parser,binder,execution
 GQL-14.10	result	return, finish, projection, distinct, grouping, and aggregation	partial	parser,binder,types,execution
 GQL-14.12	query	select, from graph match, where, having, grouping, and paging	planned	parser,binder,execution
