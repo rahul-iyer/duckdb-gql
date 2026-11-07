@@ -21,6 +21,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parser/common_table_expression_info.hpp"
+#include "duckdb/parser/expression/between_expression.hpp"
 #include "duckdb/parser/expression/case_expression.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -2923,8 +2924,27 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				    match.binding_types[binding_index] == GqlPatternElementType::EDGE ? graph.edge : graph.vertex;
 				source = ElementTable(table, identities[binding_index].table_alias);
 				auto filters = lower_checks(local_predicates[stage_index]);
-				if (!filters.empty() || expansion_seed)
+				// The plan's ID range lets DuckDB skip other labels' row groups by their statistics.
+				unique_ptr<ParsedExpression> id_range;
+				if (path.id_range) {
+					id_range = make_uniq<BetweenExpression>(
+					    Column(identities[binding_index].table_alias, table.key_column),
+					    Constant(Value::UBIGINT(path.id_low)), Constant(Value::UBIGINT(path.id_high)));
+				}
+				if (!filters.empty() || expansion_seed) {
+					if (id_range)
+						filters.push_back(std::move(id_range));
 					fence_source(std::move(filters));
+				} else if (id_range) {
+					auto select = make_uniq<SelectNode>();
+					select->from_table = std::move(source);
+					select->select_list.push_back(make_uniq<StarExpression>());
+					select->where_clause = std::move(id_range);
+					auto statement = make_uniq<SelectStatement>();
+					statement->node = std::move(select);
+					source =
+					    make_uniq<SubqueryRef>(std::move(statement), Identifier(identities[binding_index].table_alias));
+				}
 			}
 			// A posting or indexed equality can still leave other conjunctive labels
 			// or predicates to check. They must precede expansion as well.

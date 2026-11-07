@@ -106,6 +106,10 @@ struct GqlBindingAccessPath {
 	idx_t endpoint_edges = DConstants::INVALID_INDEX;
 	//! Estimated joined tuple rows after this edge, distinct from physical expansion rows.
 	idx_t joined_rows = DConstants::INVALID_INDEX;
+	//! A vertex table scan reads only IDs in [id_low, id_high]: its labels hold no others.
+	bool id_range = false;
+	uint64_t id_low = 0;
+	uint64_t id_high = 0;
 };
 
 struct GqlStageAccessPlan {

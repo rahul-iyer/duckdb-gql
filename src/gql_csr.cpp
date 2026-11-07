@@ -758,7 +758,6 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 	if (build_vertex_labels) {
 		snapshot->vertex_label_offsets.push_back(0);
 	}
-	vector<vector<bool>> vertex_label_groups;
 	while (auto chunk = FetchCsrRows(*vertices)) {
 		UnifiedVectorFormat vertex_data;
 		UnifiedVectorFormat label_data;
@@ -805,17 +804,6 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 							              label_id) == snapshot->vertex_label_ids.end()) {
 								snapshot->vertex_label_ids.push_back(label_id);
 							}
-							if (snapshot->vertex_ids_match_rowids) {
-								if (label_id >= vertex_label_groups.size()) {
-									vertex_label_groups.resize(label_id + 1);
-								}
-								auto group = NumericCast<idx_t>(row_ids[row_id_index] / DEFAULT_ROW_GROUP_SIZE);
-								auto &groups = vertex_label_groups[label_id];
-								if (group >= groups.size()) {
-									groups.resize(group + 1, false);
-								}
-								groups[group] = true;
-							}
 						}
 					}
 				}
@@ -823,12 +811,6 @@ static shared_ptr<GqlCsrSnapshot> BuildTableSnapshot(ClientContext &context, con
 			if (build_vertex_labels) {
 				snapshot->vertex_label_offsets.push_back(snapshot->vertex_label_ids.size());
 			}
-		}
-	}
-	if (snapshot->vertex_ids_match_rowids) {
-		for (const auto &groups : vertex_label_groups) {
-			snapshot->vertex_label_row_groups.push_back(
-			    NumericCast<uint64_t>(std::count(groups.begin(), groups.end(), true)));
 		}
 	}
 	if (snapshot->vertex_ids_match_rowids) {
@@ -1419,7 +1401,7 @@ uint64_t GqlCsrBuildCount(ClientContext &context) {
 	return ReadCsrBuildCount(*GetDerivedGraphStorageState(context));
 }
 
-static constexpr uint32_t GQL_CSR_FORMAT_VERSION = 2;
+static constexpr uint32_t GQL_CSR_FORMAT_VERSION = 3;
 
 class TableCsrPageSource : public GqlCsrPageSource {
 public:
@@ -1509,8 +1491,6 @@ static void WriteCsrMetadata(GqlCsrWriter &writer, const GqlCsrSnapshot &snapsho
 		writer.Write<uint32_t>(label.second);
 	}
 	writer.WriteBytes(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
-	writer.WriteBytes(snapshot.vertex_label_row_groups.data(),
-	                  snapshot.vertex_label_row_groups.size() * sizeof(uint64_t));
 	writer.Write<idx_t>(snapshot.label_fanout_stats.size());
 	for (const auto &entry : snapshot.label_fanout_stats) {
 		writer.Write<uint64_t>(entry.first);
@@ -1550,9 +1530,6 @@ static bool ReadCsrMetadata(GqlCsrReader &reader, GqlCsrSnapshot &snapshot) {
 	}
 	snapshot.edge_label_stats.resize(reader.ReadSize() / sizeof(GqlCsrEdgeLabelStats));
 	reader.ReadInto(snapshot.edge_label_stats.data(), snapshot.edge_label_stats.size() * sizeof(GqlCsrEdgeLabelStats));
-	snapshot.vertex_label_row_groups.resize(reader.ReadSize() / sizeof(uint64_t));
-	reader.ReadInto(snapshot.vertex_label_row_groups.data(),
-	                snapshot.vertex_label_row_groups.size() * sizeof(uint64_t));
 	const auto fanout_count = reader.Read<idx_t>();
 	for (idx_t index = 0; index < fanout_count; index++) {
 		const auto key = reader.Read<uint64_t>();
@@ -3821,6 +3798,28 @@ bool GqlLabelPostingBeatsScan(const GqlCsrSnapshot &snapshot, const string &labe
 
 bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot) {
 	return snapshot.vertex_label_offsets.size() == snapshot.vertex_ids.size() + 1;
+}
+
+bool GqlCsrLabelIdRange(const GqlCsrSnapshot &snapshot, const string &label, uint64_t &low, uint64_t &high) {
+	idx_t start, end;
+	if (!TryCsrVertexLabelRange(snapshot, label, start, end) || start >= end) {
+		return false;
+	}
+	// Postings list each label's vertices in ordinal order, and ordinals follow vertex IDs.
+	low = snapshot.vertex_ids[snapshot.vertex_label_postings[start]];
+	high = snapshot.vertex_ids[snapshot.vertex_label_postings[end - 1]];
+	return true;
+}
+
+bool GqlCsrUnchangedSinceBuild(ClientContext &context, const GqlCsrSnapshot &snapshot) {
+	if (snapshot.write_generation != ReadCsrWriteGeneration(context)) {
+		return false;
+	}
+	// A loaded snapshot is unchecked until its first read, and a delta holds vertices it does not list.
+	auto storage = GetDerivedGraphStorageState(context);
+	lock_guard<mutex> guard(storage->lock);
+	return snapshot.synced_generation != NumericLimits<uint64_t>::Maximum() &&
+	       (!snapshot.delta || snapshot.delta->vertex_ids.empty());
 }
 
 // A label check costs cache misses per row, so it must remove enough rows to pay.

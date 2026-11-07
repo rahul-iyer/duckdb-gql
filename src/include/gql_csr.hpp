@@ -667,9 +667,6 @@ struct GqlCsrSnapshot {
 	GqlCsrEdgeLabels incoming_label_ids;
 	unordered_map<string, uint32_t> label_ids;
 	vector<GqlCsrEdgeLabelStats> edge_label_stats;
-	//! Storage row groups holding vertices of each label id, or 0 when unknown. Vertices of a label
-	//! are stored together, so a join on their IDs lets DuckDB skip the other row groups.
-	vector<uint64_t> vertex_label_row_groups;
 	unordered_map<uint64_t, GqlCsrLabelFanoutStats> label_fanout_stats;
 	bool has_label_fanout_stats = false;
 	unique_ptr<GqlEndpointStatistics> endpoint_statistics;
@@ -812,6 +809,10 @@ TableFunction GqlCsrAllShortestFunction();
 uint64_t GqlCsrBuildCount(ClientContext &context);
 //! Whether expansion can test neighbor labels, which it does for its neighbor_label argument.
 bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot);
+//! The smallest and largest vertex ID with a label, or false when the snapshot has no posting for it.
+bool GqlCsrLabelIdRange(const GqlCsrSnapshot &snapshot, const string &label, uint64_t &low, uint64_t &high);
+//! Whether no write has followed the snapshot's build, so its postings describe the tables exactly.
+bool GqlCsrUnchangedSinceBuild(ClientContext &context, const GqlCsrSnapshot &snapshot);
 //! Vertices carrying a label in this snapshot.
 idx_t GqlLabelPostingSize(const GqlCsrSnapshot &snapshot, const string &label);
 //! Whether reading a label's posting list is cheaper than scanning the vertex table for it.
