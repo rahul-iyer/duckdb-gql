@@ -971,14 +971,17 @@ static GqlAccessPathPlan GqlOptimizeAccessPathsCost(ClientContext &context, cons
 				}
 			}
 		}
-		// Rows a vertex table scan reads: managed vertex IDs are row IDs + 1, so an ID range is a row range.
+		// Rows a vertex table scan reads. Managed vertex IDs are row IDs + 1, so an ID range is a row
+		// range, and DuckDB reads every row group that range overlaps in full.
 		vector<idx_t> vertex_scan_rows(input.binding_types.size(), vertex_count);
 		for (idx_t binding = 0; binding < input.binding_types.size(); binding++) {
 			uint64_t low, high;
 			if (stage_plan.introduced[binding] &&
 			    VertexLabelIdRange(context, snapshot, graph, stage, binding, low, high)) {
+				auto groups =
+				    low > high ? 0 : (high - 1) / DEFAULT_ROW_GROUP_SIZE - (low - 1) / DEFAULT_ROW_GROUP_SIZE + 1;
 				vertex_scan_rows[binding] =
-				    low > high ? 0 : MinValue<idx_t>(vertex_count, NumericCast<idx_t>(high - low + 1));
+				    MinValue<idx_t>(vertex_count, NumericCast<idx_t>(groups) * DEFAULT_ROW_GROUP_SIZE);
 			}
 		}
 		auto vertex_access_cost = [&](const GqlBindingAccessPath &path, idx_t binding) {
