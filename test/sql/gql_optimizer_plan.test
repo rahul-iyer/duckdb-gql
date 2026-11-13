@@ -4,6 +4,11 @@
 
 require duckgql
 
+# These plan-shape checks cover the legacy planner, which cost mode does not
+# always match on small fixtures.
+statement ok
+SET gql_optimizer='legacy'
+
 statement ok
 COPY (
     SELECT * FROM (VALUES

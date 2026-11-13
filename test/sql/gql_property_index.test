@@ -6,6 +6,11 @@ load __TEST_DIR__/gql_property_index.db
 
 require duckgql
 
+# These plan-shape checks cover the legacy planner, which cost mode does not
+# always match on small fixtures.
+statement ok
+SET gql_optimizer='legacy'
+
 statement ok
 COPY (
     SELECT 'p' || CAST(i AS VARCHAR) AS "external_id:ID(PropertyIndex)",

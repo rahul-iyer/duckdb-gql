@@ -186,8 +186,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlMutationControlFunction());
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
 	config.AddExtensionOption("gql_optimizer",
-	                          "Graph access planner: legacy (default) or experimental cost-based search",
-	                          LogicalType::VARCHAR, Value("legacy"), SetGqlOptimizer);
+	                          "Graph access planner: cost-based search (default) or legacy",
+	                          LogicalType::VARCHAR, Value("cost"), SetGqlOptimizer);
 	auto parser_override_option = DBConfig::GetOptionByName("allow_parser_override_extension");
 	if (parser_override_option && parser_override_option->setting_idx.IsValid() &&
 	    !config.user_settings.IsSet(parser_override_option->setting_idx.GetIndex())) {

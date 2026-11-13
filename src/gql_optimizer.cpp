@@ -2330,7 +2330,7 @@ static void FinalizeAccessPlan(ClientContext &context, const string &graph_name,
 GqlAccessPathPlan GqlOptimizeAccessPaths(ClientContext &context, const string &graph_name,
                                          const GqlTableGraphBinding &graph, const GqlAccessPathInput &input) {
 	BuildCsrForPathSearches(context, graph_name, graph, input);
-	string mode = "legacy";
+	string mode = "cost";
 	context.TryGetCurrentSetting("gql_optimizer", mode);
 	auto result = mode == "cost" ? GqlOptimizeAccessPathsCost(context, graph_name, graph, input)
 	                             : GqlOptimizeAccessPathsLegacy(context, graph_name, graph, input);

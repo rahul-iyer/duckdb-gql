@@ -12,12 +12,20 @@ SET threads=1
 query T
 SELECT current_setting('gql_optimizer')
 ----
-legacy
+cost
 
 statement error
 SET gql_optimizer='invalid'
 ----
 must be 'legacy' or 'cost'
+
+statement ok
+SET gql_optimizer='LeGaCy'
+
+query T
+SELECT current_setting('gql_optimizer')
+----
+legacy
 
 statement ok
 SET gql_optimizer='CoSt'
@@ -240,9 +248,17 @@ SELECT count(*) FROM gql_optimizer_plan() WHERE access_path IN ('CSR_EXPANSION',
 ----
 0
 
-# RESET restores the tuned default, retaining the same execution semantics.
+# RESET restores the cost default, retaining the same execution semantics.
+statement ok
+SET gql_optimizer='legacy'
+
 statement ok
 RESET gql_optimizer
+
+query T
+SELECT current_setting('gql_optimizer')
+----
+cost
 
 query I
 MATCH (n:Node) WHERE n.bucket = 0 RETURN count(*)
@@ -252,4 +268,4 @@ MATCH (n:Node) WHERE n.bucket = 0 RETURN count(*)
 query TI
 SELECT min(optimizer_mode), count(operator_cost) FROM gql_optimizer_plan()
 ----
-legacy	0
+cost	1
