@@ -441,6 +441,14 @@ shared_ptr<GqlBoundExpression> GqlBinder::BindExpression(const GqlExpression &ex
 			result->result_type = {GqlTypeId::INTEGER, result->arguments[0]->result_type.nullable};
 			return result;
 		}
+		if (name == "log10") {
+			if (result->arguments.size() != 1 || (!IsNumeric(result->arguments[0]->result_type.id) &&
+			                                      result->arguments[0]->result_type.id != GqlTypeId::NULL_VALUE)) {
+				throw BinderException("GQL function 'log10' requires one numeric argument");
+			}
+			result->result_type = {GqlTypeId::DOUBLE, result->arguments[0]->result_type.nullable};
+			return result;
+		}
 		if (name == "exp" || name == "ln") {
 			if (result->arguments.size() != 1 || !IsNumeric(result->arguments[0]->result_type.id)) {
 				throw BinderException("GQL function '%s' requires one numeric argument", expression.function_name);

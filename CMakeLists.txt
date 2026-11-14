@@ -41,6 +41,7 @@ set(EXTENSION_SOURCES
     src/gql_optimizer.cpp
     src/gql_optimizer_legacy.cpp
     src/gql_cost_model.cpp
+    src/gql_log10.cpp
     src/gql_lowerer.cpp
     src/gql_mutation.cpp
     src/gql_relational.cpp

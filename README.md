@@ -212,6 +212,10 @@ RETURN source_name, PATH_LENGTH(p), BYTE_LENGTH(X'00 FF');
 logarithm. Both functions use DuckDB's floating-point and domain behavior and
 preserve `NULL` inputs.
 
+`LOG10` follows GQL 2IWD12 clause 20.22 using `DOUBLE` arithmetic.
+`LOG10(x)` returns the base-10 logarithm. NULL stays NULL; zero and negative
+arguments raise an invalid-argument error containing status `2201Z`.
+
 Labels and property names in `MATCH` and `INSERT` may use double-quoted or
 backtick-delimited identifiers. Property references use the same forms, so names
 such as `person."First Name"` retain their existing identifier spelling.
