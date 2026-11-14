@@ -16,10 +16,14 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 # so include the ANTLR runtime archive explicitly in the final side module.
 # Bind definitions locally so ANTLR's internal calls do not become GOT imports
 # that DuckDB-Wasm would try to resolve from the host module.
+# Each Wasm platform installs its vcpkg packages under its own triplet.
 if(EMSCRIPTEN)
+    if(NOT VCPKG_TARGET_TRIPLET)
+        set(VCPKG_TARGET_TRIPLET wasm32-emscripten)
+    endif()
     set(DUCKDB_EXTENSION_DUCKGQL_LINKED_LIBS
         "-Wl,-Bsymbolic"
-        "../../vcpkg_installed/wasm32-emscripten/lib/libantlr4-runtime.a"
+        "../../vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib/libantlr4-runtime.a"
     )
 endif()
 
