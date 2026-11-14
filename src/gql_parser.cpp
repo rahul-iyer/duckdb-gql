@@ -2280,8 +2280,9 @@ ParserOverrideResult GqlParserOverride(ParserExtensionInfo *, const string &quer
 			auto parser = Parser::GetBuiltinParser();
 			parser.ParseQuery(query);
 			return ParserOverrideResult();
-		} catch (const ParserException &) {
-			// A graph lifecycle command has an additional graph name or FROM clause.
+		} catch (...) {
+			// A graph lifecycle command has an additional graph name or FROM clause. Catch everything:
+			// in a Wasm side module, the host's ParserException does not match this module's type.
 		}
 	}
 
