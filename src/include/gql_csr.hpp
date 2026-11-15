@@ -806,6 +806,23 @@ TableFunction GqlVertexLookupFunction();
 TableFunction GqlCsrShortestExpandFunction();
 TableFunction GqlCsrAllShortestFunction();
 //! Snapshots built in this database instance so far.
+struct GqlTableGraphBinding;
+//! What a statement must find unchanged to trust state derived from a graph's tables.
+struct GqlGraphWriteToken {
+	uint64_t prepared_writes = 0;
+	uint64_t vertex_writes = 0;
+	uint64_t edge_writes = 0;
+	//! Transactions holding a planned write: their rows may become visible before the counters move again.
+	idx_t writes_in_flight = 0;
+
+	bool operator==(const GqlGraphWriteToken &other) const {
+		return prepared_writes == other.prepared_writes && vertex_writes == other.vertex_writes &&
+		       edge_writes == other.edge_writes && writes_in_flight == other.writes_in_flight;
+	}
+};
+GqlGraphWriteToken GqlReadGraphWriteToken(ClientContext &context, const GqlTableGraphBinding &graph);
+//! Whether no write to this database was planned, in flight, or committed since this statement began.
+bool GqlNoWriteSinceQueryBegin(ClientContext &context);
 uint64_t GqlCsrBuildCount(ClientContext &context);
 //! Whether expansion can test neighbor labels, which it does for its neighbor_label argument.
 bool GqlCsrHasVertexLabels(const GqlCsrSnapshot &snapshot);

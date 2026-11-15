@@ -33,6 +33,8 @@ struct GqlType {
 };
 
 Value GqlByteStringValue(const string &hexadecimal);
+//! Types an integer literal as DuckDB does: BIGINT when it fits, else HUGEINT.
+Value GqlIntegerValue(const string &text);
 
 struct GqlBinding {
 	enum class Source : uint8_t { GRAPH, PROCEDURE };

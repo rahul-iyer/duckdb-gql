@@ -5,6 +5,14 @@
 
 namespace duckdb {
 
+Value GqlIntegerValue(const string &text) {
+	Value literal(text);
+	if (auto result = literal.DefaultTryCastAs(LogicalType::BIGINT)) {
+		return *result;
+	}
+	return literal.DefaultCastAs(LogicalType::HUGEINT);
+}
+
 Value GqlByteStringValue(const string &hexadecimal) {
 	if (hexadecimal.size() % 2 != 0) {
 		throw InternalException("Invalid GQL byte-string literal encoding");

@@ -19,6 +19,10 @@ COPY GRAPH key_only_trails FROM (VERTICES '__TEST_DIR__/key_only_trail_nodes.csv
 statement ok
 SESSION SET GRAPH key_only_trails
 
+# These plans are the ones used when vertex IDs do not decide labels; gql_graph_layout.test covers the others.
+statement ok
+SET gql_graph_layout=false
+
 statement ok
 PRAGMA enable_profiling='query_tree'
 

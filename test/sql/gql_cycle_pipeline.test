@@ -19,6 +19,10 @@ COPY GRAPH cycle_pipeline FROM (VERTICES '__TEST_DIR__/cycle_nodes.csv', EDGES '
 statement ok
 SESSION SET GRAPH cycle_pipeline
 
+# These plans are the ones used when vertex IDs do not decide labels; gql_graph_layout.test covers the others.
+statement ok
+SET gql_graph_layout=false
+
 statement ok
 PRAGMA enable_profiling='json'
 

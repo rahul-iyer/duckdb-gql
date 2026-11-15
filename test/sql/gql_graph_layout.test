@@ -1,0 +1,285 @@
+# name: test/sql/gql_graph_layout.test
+# description: Labels tested by vertex ID range, and what stops that after the graph changes
+# group: [gql]
+
+require duckgql
+
+# Comments load first and posts last, so Message vertices occupy two separate ID ranges.
+statement ok
+COPY (SELECT ":ID", ":LABEL", ":ID" AS "name:string" FROM (VALUES
+    ('m3', 'Comment;Message'), ('p1', 'Person'), ('p2', 'Person'), ('p3', 'Person'),
+    ('c1', 'City'), ('c2', 'City'),
+    ('m1', 'Post;Message'), ('m2', 'Post;Message')
+) v(":ID", ":LABEL")) TO '{TEST_DIR}/layout_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('p1', 'p2', 'KNOWS'), ('p2', 'p3', 'KNOWS'), ('p1', 'p3', 'KNOWS'),
+    ('p1', 'c1', 'LOCATED'), ('p2', 'c1', 'LOCATED'), ('p3', 'c2', 'LOCATED'),
+    ('m1', 'c1', 'LOCATED'), ('m2', 'c2', 'LOCATED'), ('m3', 'c2', 'LOCATED'),
+    ('m1', 'p1', 'WROTE'), ('m2', 'p1', 'WROTE'), ('m3', 'p2', 'WROTE'), ('m3', 'm1', 'REPLY')
+) e(":START_ID", ":END_ID", ":TYPE")) TO '{TEST_DIR}/layout_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH layout ANY
+
+statement ok
+COPY GRAPH layout FROM (VERTICES '{TEST_DIR}/layout_nodes.csv', EDGES '{TEST_DIR}/layout_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH layout
+
+query TIIIT
+SELECT name, low, high, "rows", id_ranges FROM gql_graph_layout('layout') WHERE kind = 'labels' ORDER BY low
+----
+comment;message	1	1	1	true
+person	2	4	3	true
+city	5	6	2	true
+post;message	7	8	2	true
+
+# Edge counts are kept per relationship type and pair of endpoint label ranges.
+query TIII
+SELECT name, source_block, target_block, "rows" FROM gql_graph_layout('layout') WHERE kind = 'edges' AND name = 'located' ORDER BY ALL
+----
+located	0	2	1
+located	1	2	3
+located	3	2	2
+
+# Neither vertex's row is read, so the edge scan alone answers the pattern.
+query II
+EXPLAIN MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+physical_plan	<!REGEX>:.*graph_1_vertices.*
+
+# The scan is planned at the size of this label combination, not of the edge table.
+query II
+EXPLAIN MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+physical_plan	<REGEX>:.*~3 rows.*
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+# A label over two ID ranges.
+query I
+MATCH (m:Message)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+query I
+MATCH (m:Post)-[:LOCATED]->(c:City) RETURN count(*)
+----
+2
+
+query I
+MATCH (m:Post&Message)-[:LOCATED]->(c:City) RETURN count(*)
+----
+2
+
+query I
+MATCH (x)-[:LOCATED]->(c) RETURN count(*)
+----
+6
+
+# No vertex has this label, so no ID can.
+query I
+MATCH (x:Ghost)-[:LOCATED]->(c) RETURN count(*)
+----
+0
+
+query I
+MATCH (m:Message)-[:WROTE]->(p:Person)-[:LOCATED]->(c:City)<-[:LOCATED]-(m) RETURN count(*)
+----
+1
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person), (a)-[:KNOWS]->(c) RETURN count(*)
+----
+1
+
+query I
+MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN count(*)
+----
+6
+
+# A vertex whose property is read keeps its table.
+query TI rowsort
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN c.name, count(*)
+----
+c1	2
+c2	1
+
+# An unmatched optional edge leaves its endpoint NULL.
+query II
+MATCH (p:Person) OPTIONAL MATCH (p)<-[:WROTE]-(m:Comment) RETURN count(*), count(element_id(m))
+----
+3	1
+
+# A label a later MATCH puts on a vertex that an earlier one bound to an edge endpoint.
+query I
+MATCH (m:Message)-[:WROTE]->(p) MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+# The same answers come from the vertex table when the layout is off.
+statement ok
+SET gql_graph_layout=false
+
+query II
+EXPLAIN MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+physical_plan	<REGEX>:.*graph_1_vertices.*
+
+query I
+MATCH (m:Message)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+statement ok
+SET gql_graph_layout=true
+
+# A new person's ID lies outside the range recorded for the label.
+statement ok
+INSERT (:Person {name: 'p4'})-[:LOCATED]->(:City {name: 'c3'})
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+4
+
+# So does one written with SQL.
+statement ok
+INSERT INTO gql_data.graph_1_vertices (__gql_id, __gql_label, name) VALUES (100, ['city'], 'c9')
+
+statement ok
+INSERT INTO gql_data.graph_1_edges VALUES (100, 4, 100, 'located')
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+5
+
+# A label changed in place leaves the ID where it was.
+statement ok
+UPDATE gql_data.graph_1_vertices SET __gql_label = ['city'] WHERE name = 'p2'
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+4
+
+query I
+MATCH (p:City)-[:LOCATED]->(c:City) RETURN count(*)
+----
+1
+
+# A deleted vertex leaves edges whose endpoint IDs name nothing.
+statement ok
+DELETE FROM gql_data.graph_1_vertices WHERE name = 'c1'
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+query I
+MATCH (x)-[:LOCATED]->(c) RETURN count(*)
+----
+5
+
+statement ok
+SET gql_graph_layout=false
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+query I
+MATCH (x)-[:LOCATED]->(c) RETURN count(*)
+----
+5
+
+statement ok
+SET gql_graph_layout=true
+
+# A transaction's own uncommitted vertices are in no recorded range.
+statement ok
+BEGIN
+
+statement ok
+INSERT (:Person {name: 'p6'})-[:LOCATED]->(:City {name: 'c5'})
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+4
+
+statement ok
+ROLLBACK
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+3
+
+# Labels differing only by case are different labels, as in the label column.
+statement ok
+COPY (SELECT 'seed' AS ":ID", 'Seed' AS ":LABEL", 'seed' AS "name:string") TO '{TEST_DIR}/cased_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'seed' AS ":START_ID", 'seed' AS ":END_ID", 'SEED' AS ":TYPE") TO '{TEST_DIR}/cased_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH cased ANY
+
+statement ok
+COPY GRAPH cased FROM (VERTICES '{TEST_DIR}/cased_nodes.csv', EDGES '{TEST_DIR}/cased_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH cased
+
+statement ok
+INSERT (:"Item" {name: 'a'})-[:LINK]->(:"item" {name: 'b'})
+
+statement ok
+INSERT (:"item" {name: 'c'})-[:LINK]->(:"Item" {name: 'd'})
+
+query I
+MATCH (x:"Item")-[:LINK]->(y:"item") RETURN count(*)
+----
+1
+
+query I
+MATCH (x:"item")-[:LINK]->(y) RETURN count(*)
+----
+1
+
+# A duplicate ID written with SQL breaks the proof that a count fills a range, so the
+# vertex table is read, and each copy of the vertex matches.
+statement ok
+SESSION SET GRAPH layout
+
+statement ok
+INSERT INTO gql_data.graph_1_vertices (__gql_id, __gql_label, name)
+SELECT __gql_id, __gql_label, 'copy' FROM gql_data.graph_1_vertices WHERE name = 'p3'
+
+query I
+SELECT count(*) FROM gql_graph_layout('layout')
+----
+0
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+5
+
+statement ok
+SET gql_graph_layout=false
+
+query I
+MATCH (p:Person)-[:LOCATED]->(c:City) RETURN count(*)
+----
+5

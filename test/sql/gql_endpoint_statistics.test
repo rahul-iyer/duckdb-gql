@@ -7,6 +7,11 @@ require duckgql
 statement ok
 SET threads=1
 
+# These are the CSR planner's estimates. A pattern no predicate anchors reaches that planner only
+# where the graph layout offers no scans; gql_unanchored_scans.test covers the scans.
+statement ok
+SET gql_graph_layout=false
+
 statement ok
 COPY (SELECT * FROM (VALUES
  ('p1','Person;Sender',1),('p2','Sender;Person',2),('p3','Person;Sender',3),

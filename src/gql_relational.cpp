@@ -4,6 +4,7 @@
 #include "gql_catalog.hpp"
 #include "gql_csr.hpp"
 #include "gql_ir.hpp"
+#include "gql_layout.hpp"
 #include "gql_optimizer.hpp"
 #include "gql_plan_reuse.hpp"
 #include "gql_storage.hpp"
@@ -42,6 +43,7 @@
 #include "duckdb/parser/tableref/joinref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/optimizer/relation_statistics/relation_statistics_helper.hpp"
 #include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
@@ -691,7 +693,9 @@ static bool IsIdentityColumn(const ParsedExpression &expression, const GqlTableG
 		return false;
 	}
 	auto name = column.GetColumnName().GetIdentifierName();
-	return name == graph.vertex.key_column || name == graph.edge.key_column;
+	// A vertex without a source of its own is identified by an edge's endpoint.
+	return name == graph.vertex.key_column || name == graph.edge.key_column || name == graph.edge_source_column ||
+	       name == graph.edge_target_column;
 }
 
 static string ColumnTable(const ParsedExpression &expression) {
@@ -774,7 +778,16 @@ static void DeferIdentityInequalities(vector<unique_ptr<ParsedExpression>> &filt
 			continue;
 		}
 		auto left = ColumnTable(comparison.Left()), right = ColumnTable(comparison.Right());
-		if (left == right || Linked(links, left, right)) {
+		// Vertices named by edge endpoints have no table between their edges, so edges that
+		// share a neighbor are a hop further apart than tables that do.
+		auto endpoint = [&](const ParsedExpression &expression) {
+			auto name = expression.Cast<ColumnRefExpression>().GetColumnName().GetIdentifierName();
+			return name == graph.edge_source_column || name == graph.edge_target_column;
+		};
+		const bool endpoints = endpoint(comparison.Left()) && endpoint(comparison.Right());
+		auto direct = links.find(left);
+		if (left == right ||
+		    (endpoints ? direct != links.end() && direct->second.count(right) > 0 : Linked(links, left, right))) {
 			continue;
 		}
 		vector<unique_ptr<ParsedExpression>> arguments;
@@ -829,6 +842,116 @@ static unique_ptr<TableRef> ElementTable(const GqlElementTableBinding &table, co
 	return std::move(result);
 }
 
+// Whether an ID lies in one of these ranges.
+static unique_ptr<ParsedExpression> IdRangeFilter(const vector<GqlIdRange> &ranges, const string &alias,
+                                                  const string &column) {
+	vector<unique_ptr<ParsedExpression>> alternatives;
+	for (const auto &range : ranges) {
+		alternatives.push_back(make_uniq<BetweenExpression>(Column(alias, column), Constant(Value::UBIGINT(range.low)),
+		                                                    Constant(Value::UBIGINT(range.high))));
+	}
+	if (alternatives.empty()) {
+		return Constant(Value::BOOLEAN(false));
+	}
+	if (alternatives.size() == 1) {
+		return std::move(alternatives[0]);
+	}
+	return make_uniq<ConjunctionExpression>(ExpressionType::CONJUNCTION_OR, std::move(alternatives));
+}
+
+// The edges of one type, limited to endpoints in the given ID ranges. A null range list leaves
+// that end open. When sized, the planner sees the relation at the size the graph's layout records
+// for it: DuckDB otherwise takes any filtered scan of the shared edge table for a fifth of all edges.
+static unique_ptr<TableRef> TypedEdgeScan(const GqlTableGraphBinding &graph, const GqlGraphLayout &layout,
+                                          const string &alias, const string &type,
+                                          const vector<GqlIdRange> *source_ranges, const string &source_labels,
+                                          const vector<GqlIdRange> *target_ranges, const string &target_labels,
+                                          bool sized) {
+	const auto estimate =
+	    layout.EdgeEstimate(type, source_ranges ? source_labels : string(), target_ranges ? target_labels : string());
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(Constant(Value(graph.edge.catalog_name)));
+	arguments.push_back(Constant(Value(graph.edge.schema_name)));
+	arguments.push_back(Constant(Value(graph.edge.table_name)));
+	// DuckDB scales a scan by its default selectivity when its filters reduce nothing it can
+	// estimate. One distinct type keeps the type filter from being estimated a second time.
+	arguments.push_back(Constant(Value::DOUBLE(estimate.edges / RelationStatisticsHelper::DEFAULT_SELECTIVITY)));
+	arguments.push_back(Constant(Value::LIST(LogicalType::VARCHAR,
+	                                         {Value(graph.edge_source_column), Value(graph.edge_target_column),
+	                                          Value(graph.edge.key_column), Value(graph.edge.label_column)})));
+	arguments.push_back(Constant(
+	    Value::LIST(LogicalType::DOUBLE, {Value::DOUBLE(estimate.sources), Value::DOUBLE(estimate.targets),
+	                                      Value::DOUBLE(estimate.edges), Value::DOUBLE(1)})));
+	unique_ptr<TableRef> scan;
+	if (sized) {
+		auto function = make_uniq<TableFunctionRef>();
+		function->function = make_uniq<FunctionExpression>("gql_element_scan", std::move(arguments));
+		function->alias = Identifier(alias);
+		scan = std::move(function);
+	} else {
+		scan = ElementTable(graph.edge, alias);
+	}
+	vector<unique_ptr<ParsedExpression>> filters;
+	filters.push_back(Equal(Column(alias, graph.edge.label_column), Constant(Value(type))));
+	if (source_ranges) {
+		filters.push_back(IdRangeFilter(*source_ranges, alias, graph.edge_source_column));
+	}
+	if (target_ranges) {
+		filters.push_back(IdRangeFilter(*target_ranges, alias, graph.edge_target_column));
+	}
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(scan);
+	select->select_list.push_back(make_uniq<StarExpression>());
+	select->where_clause = And(std::move(filters));
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
+}
+
+static unique_ptr<ParsedExpression> ElementHasLabel(const string &table_alias, const GqlElementTableBinding &table,
+                                                    const string &label);
+
+// The vertices with every one of these labels, at the size the layout records for them. IDs
+// test the labels when they can; the label column does otherwise.
+static unique_ptr<TableRef> LabeledVertexScan(const GqlTableGraphBinding &graph, const GqlGraphLayout &layout,
+                                              const string &alias, const string &labels, bool sized) {
+	const auto population = layout.LabelPopulation(labels);
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(Constant(Value(graph.vertex.catalog_name)));
+	arguments.push_back(Constant(Value(graph.vertex.schema_name)));
+	arguments.push_back(Constant(Value(graph.vertex.table_name)));
+	arguments.push_back(Constant(Value::DOUBLE(population / RelationStatisticsHelper::DEFAULT_SELECTIVITY)));
+	arguments.push_back(Constant(Value::LIST(LogicalType::VARCHAR, {Value(graph.vertex.key_column)})));
+	arguments.push_back(Constant(Value::LIST(LogicalType::DOUBLE, {Value::DOUBLE(population)})));
+	unique_ptr<TableRef> scan;
+	if (sized) {
+		auto function = make_uniq<TableFunctionRef>();
+		function->function = make_uniq<FunctionExpression>("gql_element_scan", std::move(arguments));
+		function->alias = Identifier(alias);
+		scan = std::move(function);
+	} else {
+		scan = ElementTable(graph.vertex, alias);
+	}
+	vector<unique_ptr<ParsedExpression>> filters;
+	vector<GqlIdRange> ranges;
+	if (layout.LabelRanges(labels, ranges)) {
+		filters.push_back(IdRangeFilter(ranges, alias, graph.vertex.key_column));
+	} else {
+		for (const auto &label : StringUtil::Split(labels, ';')) {
+			if (!label.empty()) {
+				filters.push_back(ElementHasLabel(alias, graph.vertex, label));
+			}
+		}
+	}
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(scan);
+	select->select_list.push_back(make_uniq<StarExpression>());
+	select->where_clause = And(std::move(filters));
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	return make_uniq<SubqueryRef>(std::move(statement), Identifier(alias));
+}
+
 static unique_ptr<ParsedExpression> Aliased(unique_ptr<ParsedExpression> expression, const string &alias) {
 	expression->SetAlias(Identifier(alias));
 	return expression;
@@ -851,7 +974,7 @@ static Value LiteralValue(GqlLiteralType type, const string &text) {
 	case GqlLiteralType::BOOLEAN:
 		return Value::BOOLEAN(text == "true");
 	case GqlLiteralType::INTEGER:
-		return Value::BIGINT(std::stoll(text));
+		return GqlIntegerValue(text);
 	case GqlLiteralType::DECIMAL:
 		return Value(text).DefaultCastAs(LogicalType::DECIMAL(38, 18));
 	case GqlLiteralType::DOUBLE:
@@ -2192,8 +2315,407 @@ static bool TryGetManagedColumnType(ClientContext &context, const GqlElementTabl
 	return true;
 }
 
+//! A relation of vertex IDs, in its column "id", that a MATCH's vertex must be among.
+struct RelationalVertexSet {
+	idx_t binding;
+	unique_ptr<TableRef> ids;
+};
+
 static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const string &graph_name,
-                                             const GqlTableGraphBinding &graph, const RelationalMatchInput &match) {
+                                             const GqlTableGraphBinding &graph, const RelationalMatchInput &match,
+                                             vector<RelationalVertexSet> vertex_sets = {});
+
+// Answers a scanned pattern without listing the matches that differ only in a leaf.
+//
+// A leaf is a vertex that one edge reaches and nothing else names. Each match of the rest of the
+// pattern then stands for as many matches as its vertex has such edges. A query that only counts
+// matches has the leaf's edges counted per vertex once, and the matches of the remaining pattern
+// joined to those counts and summed. A query that ignores duplicates only needs the vertices
+// that have such an edge at all. A vertex left with one edge is a leaf in turn, carrying what was
+// gathered at it, which answers a tree-shaped pattern in time linear in its edges however many
+// matches it has.
+//
+// The leaf's labels are tested by its ID, and no edge that could be the leaf's own shares its
+// MATCH, where the two would have to differ. Returns null when the query needs each match or the
+// pattern has no such leaf.
+static unique_ptr<TableRef> ReduceLeaves(ClientContext &context, const string &graph_name,
+                                         const GqlTableGraphBinding &graph, const RelationalMatchInput &match,
+                                         const GqlGraphLayout &layout, bool duplicate_insensitive) {
+	const auto unbound = NumericLimits<uint64_t>::Maximum();
+	const auto binding_count = match.binding_types.size();
+	const bool multiplicity_column =
+	    match.projections.size() == 1 && match.projection_names[0] == GQL_MULTIPLICITY_COLUMN;
+	if (match.modifiers.optional || match.projections.empty()) {
+		return nullptr;
+	}
+	// Whether the query counts matches and reads nothing else of them.
+	bool counts_matches = true;
+	if (multiplicity_column) {
+		counts_matches = !match.modifiers.distinct && !match.modifiers.has_limit && !match.modifiers.has_offset &&
+		                 match.modifiers.order_indices.empty();
+	} else {
+		for (const auto &program : match.projections) {
+			bool counts = false;
+			for (idx_t node = 0; node < program.node_types.size(); node++) {
+				if (program.binding_indices[node] != unbound) {
+					counts_matches = false;
+				}
+				if (!program.aggregate[node]) {
+					continue;
+				}
+				if (program.values[node] != "count" || program.child_counts[node] != 0 || program.distinct[node]) {
+					counts_matches = false;
+				}
+				counts = true;
+			}
+			counts_matches = counts_matches && counts;
+		}
+	}
+	if (!counts_matches && !duplicate_insensitive) {
+		return nullptr;
+	}
+	for (const auto &node : match.nodes) {
+		if (node.type == GqlLogicalOperatorType::LEFT_APPLY || node.type == GqlLogicalOperatorType::CALL) {
+			return nullptr;
+		}
+	}
+	vector<bool> referenced(binding_count, false);
+	for (const auto &programs : {&match.predicates, &match.projections}) {
+		for (const auto &program : *programs) {
+			for (const auto binding : program.binding_indices) {
+				if (binding < binding_count) {
+					referenced[binding] = true;
+				}
+			}
+		}
+	}
+	//! Edges at each vertex in the pattern as written.
+	vector<idx_t> degree(binding_count, 0);
+	vector<string> labels(binding_count);
+	for (const auto &stage : match.match_stages) {
+		for (const auto &pattern : stage.patterns) {
+			for (idx_t index = 0; index < pattern.elements.size(); index++) {
+				const auto &element = pattern.elements[index];
+				if (element.type == GqlPatternElementType::VERTEX) {
+					if (!element.label.empty()) {
+						auto &all = labels[element.binding_index];
+						all += (all.empty() ? "" : ";") + element.label;
+					}
+				} else if (index > 0 && index + 1 < pattern.elements.size()) {
+					degree[pattern.elements[index - 1].binding_index]++;
+					degree[pattern.elements[index + 1].binding_index]++;
+				}
+			}
+		}
+	}
+
+	// Edges of one type are different edges when their sources or their targets have labels that
+	// no vertex shares.
+	auto share_no_vertex = [&](idx_t left, idx_t right) {
+		vector<GqlIdRange> left_ranges, right_ranges;
+		if (!layout.LabelRanges(labels[left], left_ranges) || !layout.LabelRanges(labels[right], right_ranges)) {
+			return false;
+		}
+		for (const auto &a : left_ranges) {
+			for (const auto &b : right_ranges) {
+				if (a.low <= b.high && b.low <= a.high) {
+					return false;
+				}
+			}
+		}
+		return true;
+	};
+	auto may_be_another_edge = [&](idx_t stage_index, const RelationalPatternElement &edge, idx_t source,
+	                               idx_t target) {
+		for (const auto &pattern : match.match_stages[stage_index].patterns) {
+			for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+				const auto &other = pattern.elements[index];
+				if (other.binding_index == edge.binding_index || !StringUtil::CIEquals(other.label, edge.label)) {
+					continue;
+				}
+				const auto left = pattern.elements[index - 1].binding_index;
+				const auto right = pattern.elements[index + 1].binding_index;
+				if (!share_no_vertex(source, other.reverse ? right : left) &&
+				    !share_no_vertex(target, other.reverse ? left : right)) {
+					return true;
+				}
+			}
+		}
+		return false;
+	};
+
+	struct Leaf {
+		RelationalPatternElement edge;
+		idx_t vertex;
+		idx_t attached_to;
+		bool is_source;
+		//! Leaves counted at this one's vertex before it became a leaf itself.
+		vector<idx_t> children;
+	};
+	vector<Leaf> leaves;
+	//! Leaves counted at each vertex still in the pattern.
+	vector<vector<idx_t>> counted_at(binding_count);
+	auto stages = match.match_stages;
+	for (bool changed = true; changed;) {
+		changed = false;
+		vector<idx_t> occurrences(binding_count, 0);
+		for (const auto &stage : stages) {
+			for (const auto &pattern : stage.patterns) {
+				for (const auto &element : pattern.elements) {
+					occurrences[element.binding_index]++;
+				}
+			}
+		}
+		for (idx_t stage_index = 0; stage_index < stages.size(); stage_index++) {
+			for (auto &pattern : stages[stage_index].patterns) {
+				for (const bool front : {true, false}) {
+					const auto size = pattern.elements.size();
+					if (size < 3) {
+						break;
+					}
+					const auto vertex = pattern.elements[front ? 0 : size - 1];
+					const auto edge = pattern.elements[front ? 1 : size - 2];
+					const auto attached_to = pattern.elements[front ? 2 : size - 3].binding_index;
+					vector<GqlIdRange> ranges;
+					if (occurrences[vertex.binding_index] != 1 || occurrences[edge.binding_index] != 1 ||
+					    referenced[vertex.binding_index] || referenced[edge.binding_index] ||
+					    !layout.LabelRanges(vertex.label, ranges)) {
+						continue;
+					}
+					// Counting the only edge of a vertex per vertex saves no join.
+					if (counts_matches && degree[attached_to] < 2) {
+						continue;
+					}
+					const bool is_source = front != edge.reverse;
+					if (may_be_another_edge(stage_index, edge, is_source ? vertex.binding_index : attached_to,
+					                        is_source ? attached_to : vertex.binding_index)) {
+						continue;
+					}
+					counted_at[attached_to].push_back(leaves.size());
+					leaves.push_back({edge, vertex.binding_index, attached_to, front != edge.reverse,
+					                  std::move(counted_at[vertex.binding_index])});
+					counted_at[vertex.binding_index].clear();
+					occurrences[vertex.binding_index] = occurrences[edge.binding_index] = 0;
+					if (front) {
+						pattern.elements.erase(pattern.elements.begin(), pattern.elements.begin() + 2);
+					} else {
+						pattern.elements.resize(size - 2);
+					}
+					changed = true;
+				}
+			}
+		}
+	}
+	if (leaves.empty()) {
+		return nullptr;
+	}
+	// A pattern cut down to a vertex its MATCH names elsewhere only adds its labels there.
+	for (auto &stage : stages) {
+		for (idx_t index = 0; index < stage.patterns.size();) {
+			RelationalPatternElement *other = nullptr;
+			if (stage.patterns[index].elements.size() == 1) {
+				for (idx_t pattern = 0; pattern < stage.patterns.size() && !other; pattern++) {
+					for (auto &element : stage.patterns[pattern].elements) {
+						if (pattern != index &&
+						    element.binding_index == stage.patterns[index].elements[0].binding_index) {
+							other = &element;
+							break;
+						}
+					}
+				}
+			}
+			if (!other) {
+				index++;
+				continue;
+			}
+			const auto &label = stage.patterns[index].elements[0].label;
+			if (!label.empty()) {
+				other->label += (other->label.empty() ? "" : ";") + label;
+			}
+			stage.patterns.erase(stage.patterns.begin() + NumericCast<int64_t>(index));
+		}
+	}
+
+	// The remaining pattern, over the bindings it still names, returning each vertex leaves were counted at.
+	RelationalMatchInput rest;
+	rest.root = match.root;
+	rest.nodes = match.nodes;
+	rest.predicates = match.predicates;
+	if (!counts_matches) {
+		rest.projections = match.projections;
+		rest.projection_names = match.projection_names;
+		rest.modifiers = match.modifiers;
+	}
+	vector<idx_t> renamed(binding_count, DConstants::INVALID_INDEX);
+	for (auto &stage : stages) {
+		for (auto &pattern : stage.patterns) {
+			for (auto &element : pattern.elements) {
+				auto &name = renamed[element.binding_index];
+				if (name == DConstants::INVALID_INDEX) {
+					name = rest.binding_types.size();
+					rest.binding_types.push_back(match.binding_types[element.binding_index]);
+				}
+				element.binding_index = name;
+			}
+		}
+	}
+	rest.match_stages = std::move(stages);
+	for (const auto &programs : {&rest.predicates, &rest.projections}) {
+		for (auto &program : *programs) {
+			for (auto &binding : program.binding_indices) {
+				if (binding == unbound) {
+					continue;
+				}
+				if (binding >= binding_count || renamed[binding] == DConstants::INVALID_INDEX) {
+					return nullptr;
+				}
+				binding = renamed[binding];
+			}
+		}
+	}
+	const string rows_alias = "gql_counted_rows";
+	auto leaf_alias = [](idx_t leaf) { return "gql_counted_" + to_string(leaf); };
+
+	// How many ways each vertex continues through a leaf's edge and the leaves counted beyond it.
+	auto count_leaf = [&](auto &self, idx_t index) -> unique_ptr<TableRef> {
+		const auto &leaf = leaves[index];
+		const auto scan_alias = "gql_counted_edge_" + to_string(index);
+		vector<GqlIdRange> leaf_ranges, attached_ranges;
+		layout.LabelRanges(labels[leaf.vertex], leaf_ranges);
+		const bool attached_tested = layout.LabelRanges(labels[leaf.attached_to], attached_ranges);
+		const auto source_ranges = leaf.is_source ? &leaf_ranges : attached_tested ? &attached_ranges : nullptr;
+		const auto target_ranges = leaf.is_source ? (attached_tested ? &attached_ranges : nullptr) : &leaf_ranges;
+		auto select = make_uniq<SelectNode>();
+		select->from_table = TypedEdgeScan(graph, layout, scan_alias, leaf.edge.label, source_ranges,
+		                                   labels[leaf.is_source ? leaf.vertex : leaf.attached_to], target_ranges,
+		                                   labels[leaf.is_source ? leaf.attached_to : leaf.vertex], true);
+		const auto &leaf_column = leaf.is_source ? graph.edge_source_column : graph.edge_target_column;
+		const auto &attached_column = leaf.is_source ? graph.edge_target_column : graph.edge_source_column;
+		unique_ptr<ParsedExpression> continuations;
+		for (const auto child : leaf.children) {
+			vector<unique_ptr<ParsedExpression>> conditions;
+			conditions.push_back(Equal(Column(leaf_alias(child), "id"), Column(scan_alias, leaf_column)));
+			AppendJoin(select->from_table, self(self, child), JoinType::INNER, std::move(conditions));
+			if (!counts_matches) {
+				continue;
+			}
+			auto factor = Column(leaf_alias(child), "matches");
+			if (continuations) {
+				vector<unique_ptr<ParsedExpression>> factors;
+				factors.push_back(std::move(continuations));
+				factors.push_back(std::move(factor));
+				continuations = Function("*", std::move(factors));
+			} else {
+				continuations = std::move(factor);
+			}
+		}
+		select->select_list.push_back(Aliased(Column(scan_alias, attached_column), "id"));
+		if (counts_matches) {
+			unique_ptr<ParsedExpression> matches;
+			if (continuations) {
+				vector<unique_ptr<ParsedExpression>> arguments;
+				arguments.push_back(std::move(continuations));
+				matches = Function("sum", std::move(arguments));
+			} else {
+				matches = make_uniq<CastExpression>(LogicalType::HUGEINT, Function("count_star", {}));
+			}
+			select->select_list.push_back(Aliased(std::move(matches), "matches"));
+		}
+		select->groups.group_expressions.push_back(Column(scan_alias, attached_column));
+		GroupingSet grouping_set;
+		grouping_set.insert(ProjectionIndex(0));
+		select->groups.grouping_sets.push_back(std::move(grouping_set));
+		auto statement = make_uniq<SelectStatement>();
+		statement->node = std::move(select);
+		return make_uniq<SubqueryRef>(std::move(statement), Identifier(leaf_alias(index)));
+	};
+	if (!counts_matches) {
+		vector<RelationalVertexSet> vertex_sets;
+		for (idx_t binding = 0; binding < binding_count; binding++) {
+			for (const auto leaf : counted_at[binding]) {
+				vertex_sets.push_back({renamed[binding], count_leaf(count_leaf, leaf)});
+			}
+		}
+		return TableBackedMatch(context, graph_name, graph, rest, std::move(vertex_sets));
+	}
+	vector<idx_t> roots;
+	for (idx_t binding = 0; binding < binding_count; binding++) {
+		for (const auto leaf : counted_at[binding]) {
+			GqlExpressionProgram identity;
+			for (const auto type : {GqlExpressionType::ELEMENT_ID, GqlExpressionType::VARIABLE_REFERENCE}) {
+				identity.node_types.push_back(static_cast<uint8_t>(type));
+				identity.result_types.push_back(static_cast<uint8_t>(
+				    type == GqlExpressionType::ELEMENT_ID ? GqlTypeId::ELEMENT_ID : GqlTypeId::NODE));
+				identity.binding_indices.push_back(renamed[binding]);
+				identity.operators.push_back(0);
+				identity.values.emplace_back();
+				identity.properties.emplace_back();
+				identity.child_counts.push_back(0);
+				identity.aggregate.push_back(false);
+				identity.distinct.push_back(false);
+			}
+			rest.projections.push_back(std::move(identity));
+			rest.projection_names.push_back(leaf_alias(leaf));
+			roots.push_back(leaf);
+		}
+	}
+	auto from = TableBackedMatch(context, graph_name, graph, rest);
+	from->alias = Identifier(rows_alias);
+	unique_ptr<ParsedExpression> multiplicity;
+	for (const auto leaf : roots) {
+		vector<unique_ptr<ParsedExpression>> conditions;
+		conditions.push_back(Equal(Column(rows_alias, leaf_alias(leaf)), Column(leaf_alias(leaf), "id")));
+		AppendJoin(from, count_leaf(count_leaf, leaf), JoinType::INNER, std::move(conditions));
+		auto factor = Column(leaf_alias(leaf), "matches");
+		if (multiplicity) {
+			vector<unique_ptr<ParsedExpression>> factors;
+			factors.push_back(std::move(multiplicity));
+			factors.push_back(std::move(factor));
+			multiplicity = Function("*", std::move(factors));
+		} else {
+			multiplicity = std::move(factor);
+		}
+	}
+	auto select = make_uniq<SelectNode>();
+	select->from_table = std::move(from);
+	if (multiplicity_column) {
+		select->select_list.push_back(Aliased(std::move(multiplicity), match.projection_names[0]));
+		return FinalizeMatchSelect(std::move(select), match.projections, match.projection_names, match.modifiers);
+	}
+	// COUNT(*) is the sum of what each row stands for, and zero over no rows.
+	vector<unique_ptr<ParsedExpression>> arguments;
+	arguments.push_back(std::move(multiplicity));
+	vector<unique_ptr<ParsedExpression>> total;
+	total.push_back(Function("sum", std::move(arguments)));
+	total.push_back(Constant(Value::HUGEINT(0)));
+	select->select_list.push_back(
+	    Aliased(make_uniq<CastExpression>(LogicalType::BIGINT,
+	                                      make_uniq<OperatorExpression>(ExpressionType::OPERATOR_COALESCE,
+	                                                                    std::move(total))),
+	            "matches"));
+	const string count_alias = "gql_counted";
+	auto statement = make_uniq<SelectStatement>();
+	statement->node = std::move(select);
+	auto result = make_uniq<SelectNode>();
+	result->from_table = make_uniq<SubqueryRef>(std::move(statement), Identifier(count_alias));
+	for (idx_t index = 0; index < match.projections.size(); index++) {
+		auto program = match.projections[index];
+		for (idx_t node = 0; node < program.node_types.size(); node++) {
+			if (program.aggregate[node]) {
+				program.node_types[node] = static_cast<uint8_t>(GqlExpressionType::VARIABLE_REFERENCE);
+				program.binding_indices[node] = 0;
+				program.aggregate[node] = false;
+			}
+		}
+		result->select_list.push_back(
+		    Aliased(LowerExpression(program, {}, {{count_alias, "matches"}}), match.projection_names[index]));
+	}
+	return FinalizeMatchSelect(std::move(result), match.projections, match.projection_names, match.modifiers);
+}
+
+static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const string &graph_name,
+                                             const GqlTableGraphBinding &graph, const RelationalMatchInput &match,
+                                             vector<RelationalVertexSet> vertex_sets) {
 	vector<RelationalIdentityAccess> identities(match.binding_types.size());
 	vector<vector<string>> vertex_fetch_columns(match.binding_types.size());
 	// Whether a vertex's row is read beyond its identity; otherwise the edge suffices.
@@ -2331,7 +2853,67 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 	}
 	auto access_plan = GqlOptimizeAccessPaths(context, graph_name, graph, access_input);
+	if (access_plan.scan_layout && vertex_sets.empty()) {
+		if (auto reduced = ReduceLeaves(context, graph_name, graph, match, *access_plan.scan_layout,
+		                                access_input.duplicate_insensitive)) {
+			return reduced;
+		}
+	}
 	const bool cycle_pipeline = access_plan.cycle_pipeline;
+	// Where each label's vertices are, when their IDs tell: an edge endpoint in those ranges is
+	// an existing vertex with those labels, which a join with the vertex table would only repeat.
+	// Reading it scans both tables once per graph state, which only a pattern that scans the
+	// edge table anyway should pay for.
+	auto scans_typed_edges = [&]() {
+		for (idx_t stage_index = 0; stage_index < match.match_stages.size(); stage_index++) {
+			for (const auto &pattern : match.match_stages[stage_index].patterns) {
+				for (const auto &element : pattern.elements) {
+					if (element.type == GqlPatternElementType::EDGE && !element.quantified && element.shortest == 0 &&
+					    !element.label.empty() && stage_index < access_plan.stages.size() &&
+					    access_plan.stages[stage_index].bindings[element.binding_index].type ==
+					        GqlBindingAccessPathType::TABLE_SCAN) {
+						return true;
+					}
+				}
+			}
+		}
+		return false;
+	};
+	auto layout = access_plan.scan_layout ? access_plan.scan_layout
+	                                      : scans_typed_edges() ? GqlTryGetGraphLayout(context, graph) : nullptr;
+	// Vertices with no source of their own; an edge's endpoint column is their identity.
+	vector<bool> id_only_vertex(match.binding_types.size(), false);
+	auto typed_edge = [&](const RelationalPatternElement &edge) {
+		return layout && !edge.quantified && edge.shortest == 0 && !edge.label.empty() &&
+		       edge.label.find(';') == string::npos;
+	};
+	// An edge's scan limited to the endpoints whose labels IDs decide. Each flag asks for an end to be
+	// tested even without labels, as proof that the vertex exists, and returns whether it was tested.
+	// DuckDB cannot estimate a correlated graph function's output and takes it for its input's size.
+	// Exact sizes beside such a guess skew its choices more than uniform guesses do, so a stage
+	// with one keeps DuckDB's own estimates for its scans.
+	auto stage_sized = [&](idx_t stage_index) {
+		for (const auto &path : access_plan.stages[stage_index].bindings) {
+			if (path.type != GqlBindingAccessPathType::TABLE_SCAN &&
+			    path.type != GqlBindingAccessPathType::LABEL_POSTING_FETCH &&
+			    path.type != GqlBindingAccessPathType::PROPERTY_INDEX_LOOKUP) {
+				return false;
+			}
+		}
+		return true;
+	};
+	auto typed_edge_scan = [&](const string &alias, const RelationalPatternElement &edge, const string &left_labels,
+	                           const string &right_labels, bool &left_tested, bool &right_tested, bool sized) {
+		vector<GqlIdRange> left_ranges, right_ranges;
+		left_tested = (left_tested || !left_labels.empty()) && layout->LabelRanges(left_labels, left_ranges);
+		right_tested = (right_tested || !right_labels.empty()) && layout->LabelRanges(right_labels, right_ranges);
+		const auto &source_labels = edge.reverse ? right_labels : left_labels;
+		const auto &target_labels = edge.reverse ? left_labels : right_labels;
+		const auto source_ranges = (edge.reverse ? right_tested : left_tested) ? (edge.reverse ? &right_ranges : &left_ranges) : nullptr;
+		const auto target_ranges = (edge.reverse ? left_tested : right_tested) ? (edge.reverse ? &left_ranges : &right_ranges) : nullptr;
+		return TypedEdgeScan(graph, *layout, alias, edge.label, source_ranges, source_labels, target_ranges,
+		                     target_labels, sized);
+	};
 
 	// Apply single-binding literal checks before dependent graph expansion.
 	// Native predicate pushdown cannot always cross the delim/CTE boundaries
@@ -2408,6 +2990,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			auto cycle = make_uniq<SelectNode>();
 			vector<unique_ptr<ParsedExpression>> filters;
 			auto cycle_alias = "gql_closed_" + to_string(stage_index);
+			// Vertices whose existence and labels an edge scan's ID ranges already established.
+			vector<bool> cycle_tested(elements.size(), false);
 			for (idx_t index = 1; index < elements.size(); index += 2) {
 				const auto &edge = elements[index];
 				auto alias = "gql_cycle_edge_" + to_string(edge.binding_index);
@@ -2416,13 +3000,25 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				auto source_column = edge.reverse ? graph.edge_target_column : graph.edge_source_column;
 				auto target_column = edge.reverse ? graph.edge_source_column : graph.edge_target_column;
 				auto next_source = elements[next].reverse ? graph.edge_target_column : graph.edge_source_column;
+				unique_ptr<TableRef> edge_source;
+				if (typed_edge(edge)) {
+					bool left_tested = true, right_tested = true;
+					edge_source = typed_edge_scan(alias, edge, elements[index - 1].label, elements[index + 1].label,
+					                              left_tested, right_tested, stage_sized(stage_index));
+					// The check below reads each vertex from the edge after it, and the last from the edge before.
+					cycle_tested[index - 1] = left_tested;
+					if (index + 2 == elements.size()) {
+						cycle_tested[index + 1] = right_tested;
+					}
+				} else {
+					edge_source = ElementTable(graph.edge, alias);
+				}
 				if (!cycle->from_table) {
-					cycle->from_table = ElementTable(graph.edge, alias);
+					cycle->from_table = std::move(edge_source);
 				} else {
 					vector<unique_ptr<ParsedExpression>> conditions;
 					conditions.push_back(Constant(Value(true)));
-					AppendJoin(cycle->from_table, ElementTable(graph.edge, alias), JoinType::INNER,
-					           std::move(conditions));
+					AppendJoin(cycle->from_table, std::move(edge_source), JoinType::INNER, std::move(conditions));
 				}
 				filters.push_back(Equal(Column(alias, graph.edge.label_column), Constant(Value(edge.label))));
 				if (index + 2 < elements.size() || elements.front().binding_index == elements.back().binding_index) {
@@ -2459,7 +3055,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				auto edge_alias = "gql_cycle_edge_" + to_string(edge.binding_index);
 				bool target = index + 1 == elements.size();
 				auto column = target != edge.reverse ? graph.edge_target_column : graph.edge_source_column;
-				if (!available[vertex.binding_index] || !vertex.label.empty()) {
+				if (!cycle_tested[index] && (!available[vertex.binding_index] || !vertex.label.empty())) {
 					auto check_alias = "gql_cycle_check_" + to_string(index);
 					vector<unique_ptr<ParsedExpression>> conditions;
 					conditions.push_back(
@@ -2521,8 +3117,18 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				auto alias = identities[edge.binding_index].table_alias;
 				auto source_column = edge.reverse ? graph.edge_target_column : graph.edge_source_column;
 				auto target_column = edge.reverse ? graph.edge_source_column : graph.edge_target_column;
-				auto source = ElementTable(graph.edge, alias);
-				auto check_vertex = [&](const RelationalPatternElement &vertex, const string &column) {
+				bool left_tested = typed_edge(edge), right_tested = typed_edge(edge);
+				auto source = typed_edge(edge)
+				                  ? typed_edge_scan(alias, edge, left.label, right.label, left_tested, right_tested,
+				                                    stage_sized(stage_index))
+				                  : ElementTable(graph.edge, alias);
+				bool joined_checks = false;
+				auto check_vertex = [&](const RelationalPatternElement &vertex, const string &column, bool tested) {
+					identities[vertex.binding_index] = {alias, column};
+					if (tested) {
+						return;
+					}
+					joined_checks = true;
 					auto vertex_alias = "gql_check_" + to_string(vertex.binding_index);
 					vector<unique_ptr<ParsedExpression>> conditions;
 					conditions.push_back(Equal(Column(alias, column), Column(vertex_alias, graph.vertex.key_column)));
@@ -2532,24 +3138,26 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 						}
 					}
 					AppendJoin(source, ElementTable(graph.vertex, vertex_alias), JoinType::SEMI, std::move(conditions));
-					identities[vertex.binding_index] = {alias, column};
 				};
 				if (index == 1) {
-					check_vertex(left, source_column);
+					check_vertex(left, source_column, left_tested);
 				}
-				check_vertex(right, target_column);
-				// OFFSET 0 preserves the bag while keeping these existence checks
-				// local to the edge scan instead of above a high-fanout join.
-				auto checked = make_uniq<SelectNode>();
-				checked->from_table = std::move(source);
-				checked->select_list.push_back(make_uniq<StarExpression>());
-				checked->where_clause = Equal(Column(alias, graph.edge.label_column), Constant(Value(edge.label)));
-				auto boundary = make_uniq<LimitModifier>();
-				boundary->offset = Constant(Value::BIGINT(0));
-				checked->modifiers.push_back(std::move(boundary));
-				auto checked_statement = make_uniq<SelectStatement>();
-				checked_statement->node = std::move(checked);
-				source = make_uniq<SubqueryRef>(std::move(checked_statement), Identifier(alias));
+				check_vertex(right, target_column, right_tested);
+				// A scan that tested both ends by ID range is already the whole relation.
+				if (joined_checks || !typed_edge(edge)) {
+					// OFFSET 0 preserves the bag while keeping these existence checks
+					// local to the edge scan instead of above a high-fanout join.
+					auto checked = make_uniq<SelectNode>();
+					checked->from_table = std::move(source);
+					checked->select_list.push_back(make_uniq<StarExpression>());
+					checked->where_clause = Equal(Column(alias, graph.edge.label_column), Constant(Value(edge.label)));
+					auto boundary = make_uniq<LimitModifier>();
+					boundary->offset = Constant(Value::BIGINT(0));
+					checked->modifiers.push_back(std::move(boundary));
+					auto checked_statement = make_uniq<SelectStatement>();
+					checked_statement->node = std::move(checked);
+					source = make_uniq<SubqueryRef>(std::move(checked_statement), Identifier(alias));
+				}
 				if (!result.source) {
 					result.source = std::move(source);
 				} else {
@@ -2635,6 +3243,81 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 					identities[binding] = {identities[edge.binding_index].table_alias,
 					                       (from_left != edge.reverse) ? graph.edge_target_column
 					                                                   : graph.edge_source_column};
+				}
+			}
+		}
+		// The same holds for an edge read by table scan once vertex IDs decide labels: the scan
+		// keeps the endpoints in the label's ID ranges, and every ID in them is such a vertex.
+		vector<string> stage_labels(match.binding_types.size());
+		//! Elements whose scan already tests this stage's labels.
+		vector<bool> typed_scan(match.binding_types.size(), false);
+		if (layout) {
+			for (const auto &pattern : stage.patterns) {
+				for (const auto &element : pattern.elements) {
+					if (element.type == GqlPatternElementType::VERTEX && !element.label.empty()) {
+						auto &labels = stage_labels[element.binding_index];
+						labels += (labels.empty() ? "" : ";") + element.label;
+					}
+				}
+			}
+			vector<idx_t> occurrences(match.binding_types.size(), 0);
+			for (const auto &other_stage : match.match_stages) {
+				for (const auto &pattern : other_stage.patterns) {
+					for (const auto &element : pattern.elements) {
+						occurrences[element.binding_index]++;
+					}
+				}
+			}
+			// Every label test of a vertex without a row must be one its ID can answer.
+			auto ids_decide = [&](idx_t binding) {
+				vector<GqlIdRange> ranges;
+				if (!layout->LabelRanges(stage_labels[binding], ranges)) {
+					return false;
+				}
+				for (const auto &other_stage : match.match_stages) {
+					for (const auto &pattern : other_stage.patterns) {
+						for (const auto &element : pattern.elements) {
+							if (element.binding_index == binding && !layout->LabelRanges(element.label, ranges)) {
+								return false;
+							}
+						}
+					}
+				}
+				return true;
+			};
+			for (const auto &pattern : stage.patterns) {
+				for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+					const auto &edge = pattern.elements[index];
+					if (!typed_edge(edge) || !stage_plan.introduced[edge.binding_index] ||
+					    stage_plan.bindings[edge.binding_index].type != GqlBindingAccessPathType::TABLE_SCAN) {
+						continue;
+					}
+					typed_scan[edge.binding_index] = true;
+					if (occurrences[edge.binding_index] != 1) {
+						continue;
+					}
+					for (auto side : {index - 1, index + 1}) {
+						const auto binding = pattern.elements[side].binding_index;
+						const auto &path = stage_plan.bindings[binding];
+						// A label posting only proves what the edge's ID range proves, at a cost the planner misjudges.
+						if (!stage_plan.introduced[binding] || vertex_row_read[binding] ||
+						    endpoint_edge[binding] != DConstants::INVALID_INDEX ||
+						    (path.type != GqlBindingAccessPathType::TABLE_SCAN &&
+						     path.type != GqlBindingAccessPathType::LABEL_POSTING_FETCH) ||
+						    std::any_of(stage_plan.bindings.begin(), stage_plan.bindings.end(),
+						                [&](const GqlBindingAccessPath &other) {
+							                return other.expansion_vertex_binding == binding ||
+							                       other.fetch_id_binding == binding;
+						                }) ||
+						    !ids_decide(binding)) {
+							continue;
+						}
+						endpoint_edge[binding] = edge.binding_index;
+						id_only_vertex[binding] = true;
+						identities[binding] = {identities[edge.binding_index].table_alias,
+						                       ((side < index) != edge.reverse) ? graph.edge_source_column
+						                                                        : graph.edge_target_column};
+					}
 				}
 			}
 		}
@@ -2735,11 +3418,15 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				}
 			}
 		};
+		idx_t stage_root = DConstants::INVALID_INDEX;
 		for (const auto binding_index : stage_plan.source_order) {
 			if (endpoint_edge[binding_index] != DConstants::INVALID_INDEX) {
-				component_ids[binding_index] = component_ids[endpoint_edge[binding_index]];
-				joined[binding_index] = true;
-				merge_connected_endpoints();
+				// A vertex ordered before its edge joins it once the edge has a source.
+				if (joined[endpoint_edge[binding_index]]) {
+					component_ids[binding_index] = component_ids[endpoint_edge[binding_index]];
+					joined[binding_index] = true;
+					merge_connected_endpoints();
+				}
 				continue;
 			}
 			unique_ptr<TableRef> source;
@@ -2790,7 +3477,7 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 							    std::any_of(path.label_postings.begin(), path.label_postings.end(), [&](const string &posting) {
 								    return StringUtil::CIEquals(posting, label);
 							    });
-							if (!label.empty() && !posting_selected)
+							if (!label.empty() && !posting_selected && !typed_scan[binding_index])
 								filters.push_back(ElementHasLabel(identities[binding_index].table_alias, table, label));
 						}
 					}
@@ -2923,6 +3610,28 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				const auto &table =
 				    match.binding_types[binding_index] == GqlPatternElementType::EDGE ? graph.edge : graph.vertex;
 				source = ElementTable(table, identities[binding_index].table_alias);
+				if (typed_scan[binding_index]) {
+					for (const auto &pattern : stage.patterns) {
+						for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+							if (pattern.elements[index].binding_index != binding_index) {
+								continue;
+							}
+							bool left_tested = id_only_vertex[pattern.elements[index - 1].binding_index];
+							bool right_tested = id_only_vertex[pattern.elements[index + 1].binding_index];
+							source = typed_edge_scan(identities[binding_index].table_alias, pattern.elements[index],
+							                         stage_labels[pattern.elements[index - 1].binding_index],
+							                         stage_labels[pattern.elements[index + 1].binding_index],
+							                         left_tested, right_tested, stage_sized(stage_index));
+						}
+					}
+				}
+				if (layout && match.binding_types[binding_index] == GqlPatternElementType::VERTEX &&
+				    stage_plan.introduced[binding_index] && !stage_labels[binding_index].empty() &&
+				    path.label_postings.empty()) {
+					source = LabeledVertexScan(graph, *layout, identities[binding_index].table_alias,
+					                           stage_labels[binding_index], stage_sized(stage_index));
+					typed_scan[binding_index] = true;
+				}
 				auto filters = lower_checks(local_predicates[stage_index]);
 				// The plan's ID range lets DuckDB skip other labels' row groups by their statistics.
 				unique_ptr<ParsedExpression> id_range;
@@ -2955,11 +3664,20 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 			components[binding_index] = std::move(source);
 			component_ids[binding_index] = binding_index;
 			joined[binding_index] = true;
+			for (idx_t vertex = 0; vertex < endpoint_edge.size(); vertex++) {
+				if (endpoint_edge[vertex] == binding_index && !joined[vertex]) {
+					component_ids[vertex] = binding_index;
+					joined[vertex] = true;
+				}
+			}
+			if (stage_root == DConstants::INVALID_INDEX) {
+				stage_root = binding_index;
+			}
 			// Preserve the established lateral nesting for stages that capture
 			// outer bindings (including OPTIONAL MATCH). Splitting those trees
 			// requires representing their external dependencies explicitly.
-			if (correlated_stage && binding_index != stage_plan.source_order.front()) {
-				merge_components(component_ids[stage_plan.source_order.front()], binding_index);
+			if (correlated_stage && binding_index != stage_root) {
+				merge_components(component_ids[stage_root], binding_index);
 			}
 			// A lateral source must stay with its seed, but independent indexed
 			// branches should not be multiplied together before they meet at a
@@ -2995,7 +3713,8 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 		idx_t posting_index = 0;
 		for (idx_t binding_index = 0; binding_index < stage_plan.bindings.size(); binding_index++) {
-			if (stage_plan.bindings[binding_index].type == GqlBindingAccessPathType::LABEL_POSTING_FETCH) {
+			if (stage_plan.bindings[binding_index].type == GqlBindingAccessPathType::LABEL_POSTING_FETCH ||
+			    id_only_vertex[binding_index]) {
 				continue;
 			}
 			for (const auto &label : stage_plan.bindings[binding_index].label_postings) {
@@ -3011,7 +3730,18 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		for (const auto &pattern : stage.patterns) {
 			auto trail_strategy = SelectTrailStrategy(pattern, graph, HasClosingPattern(pattern, stage));
 			for (const auto &element : pattern.elements) {
-				if (element.label.empty() || endpoint_edge[element.binding_index] != DConstants::INVALID_INDEX) {
+				if (element.label.empty() || endpoint_edge[element.binding_index] != DConstants::INVALID_INDEX ||
+				    typed_scan[element.binding_index]) {
+					continue;
+				}
+				if (id_only_vertex[element.binding_index]) {
+					// Bound by an earlier stage to an edge endpoint: its ID answers this stage's labels too.
+					vector<GqlIdRange> ranges;
+					if (!layout || !layout->LabelRanges(element.label, ranges)) {
+						throw InternalException("GQL vertex without a source has a label its ID cannot test");
+					}
+					result.conditions.push_back(IdRangeFilter(ranges, identities[element.binding_index].table_alias,
+					                                          identities[element.binding_index].column_name));
 					continue;
 				}
 				const auto &table = element.type == GqlPatternElementType::EDGE ? graph.edge : graph.vertex;
@@ -3082,8 +3812,24 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 				result.conditions.push_back(Function("gql_trail_unique", std::move(arguments)));
 				continue;
 			}
+			// Each edge has one type, so edges matched under different types already differ.
+			auto edge_type = [&](idx_t binding) {
+				for (const auto &element : pattern.elements) {
+					if (element.binding_index == binding) {
+						return element.label;
+					}
+				}
+				return string();
+			};
+			const bool typed = !graph.edge.label_is_list && graph.edge.static_labels.empty() &&
+			                   !graph.edge.label_column.empty();
 			for (idx_t edge_index = 0; edge_index < path_edges.size(); edge_index++) {
 				for (idx_t prior = 0; prior < edge_index; prior++) {
+					const auto type = edge_type(path_edges[edge_index]), prior_type = edge_type(path_edges[prior]);
+					if (typed && !type.empty() && !prior_type.empty() && type.find(';') == string::npos &&
+					    prior_type.find(';') == string::npos && !StringUtil::CIEquals(type, prior_type)) {
+						continue;
+					}
 					result.conditions.push_back(
 					    NotEqual(Column(identities[path_edges[edge_index]].table_alias, graph.edge.key_column),
 					             Column(identities[path_edges[prior]].table_alias, graph.edge.key_column)));
@@ -3311,6 +4057,12 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		}
 	}
 
+	for (auto &set : vertex_sets) {
+		vector<unique_ptr<ParsedExpression>> conditions;
+		conditions.push_back(Equal(Column(identities[set.binding].table_alias, identities[set.binding].column_name),
+		                           Column(set.ids->alias.GetIdentifierName(), "id")));
+		AppendJoin(pipeline.from, std::move(set.ids), JoinType::INNER, std::move(conditions));
+	}
 	auto select = make_uniq<SelectNode>();
 	select->from_table = std::move(pipeline.from);
 	DeferIdentityInequalities(pipeline.filters, *select->from_table, graph);

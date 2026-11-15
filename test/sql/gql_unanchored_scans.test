@@ -1,0 +1,206 @@
+# name: test/sql/gql_unanchored_scans.test
+# description: A pattern no predicate anchors is scanned and joined in DuckDB's order, however it is written
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+# 4 countries, 40 cities and 2000 persons. Persons i, i+40 and i+80 share a city and form a
+# friendship triangle; other friendships cross countries.
+statement ok
+COPY (SELECT 'c' || i AS ":ID", 'Country' AS ":LABEL", 'c' || i AS "name:string" FROM range(4) t(i)
+      UNION ALL SELECT 'y' || i, 'City', 'y' || i FROM range(40) t(i)
+      UNION ALL SELECT 'p' || i, 'Person', 'p' || i FROM range(2000) t(i)) TO '{TEST_DIR}/unanchored_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'y' || i AS ":START_ID", 'c' || (i % 4) AS ":END_ID", 'IS_PART_OF' AS ":TYPE" FROM range(40) t(i)
+      UNION ALL SELECT 'p' || i, 'y' || (i % 40), 'IS_LOCATED_IN' FROM range(2000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 7 + 3) % 2000), 'KNOWS' FROM range(2000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 13 + 5) % 2000), 'KNOWS' FROM range(2000) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || (i + 40), 'KNOWS' FROM range(300) t(i)
+      UNION ALL SELECT 'p' || (i + 40), 'p' || (i + 80), 'KNOWS' FROM range(300) t(i)
+      UNION ALL SELECT 'p' || (i + 80), 'p' || i, 'KNOWS' FROM range(300) t(i)) TO '{TEST_DIR}/unanchored_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH unanchored ANY
+
+statement ok
+COPY GRAPH unanchored FROM (VERTICES '{TEST_DIR}/unanchored_nodes.csv', EDGES '{TEST_DIR}/unanchored_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH unanchored
+
+# With a CSR, expansions are on offer for every edge below.
+statement ok
+CALL gql_build_csr('unanchored')
+
+# The same pattern written three ways: seed first, cycle first, and as one MATCH. Each is
+# scanned, so DuckDB orders the joins of all its parts together.
+query II
+EXPLAIN MATCH (country:Country)
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country)
+MATCH (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+MATCH (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query I
+MATCH (country:Country)
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country)
+MATCH (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+MATCH (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+3120
+
+query I
+SELECT count(*) FROM gql_optimizer_plan() WHERE access_path <> 'TABLE_SCAN'
+----
+0
+
+query II
+EXPLAIN MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:KNOWS]->(p1)
+MATCH (p1)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country:Country)
+MATCH (p2)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query I
+MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:KNOWS]->(p1)
+MATCH (p1)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country:Country)
+MATCH (p2)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country)
+MATCH (p3)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country)
+RETURN count(*)
+----
+3120
+
+query II
+EXPLAIN MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country:Country),
+      (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country),
+      (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country),
+      (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query I
+MATCH (p1:Person)-[:IS_LOCATED_IN]->(y1:City)-[:IS_PART_OF]->(country:Country),
+      (p2:Person)-[:IS_LOCATED_IN]->(y2:City)-[:IS_PART_OF]->(country),
+      (p3:Person)-[:IS_LOCATED_IN]->(y3:City)-[:IS_PART_OF]->(country),
+      (p1)-[:KNOWS]->(p2)-[:KNOWS]->(p3)-[:KNOWS]->(p1)
+RETURN count(*)
+----
+3120
+
+# A predicate comparing two vertices joins them; it anchors neither.
+query II
+EXPLAIN MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query I
+MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name RETURN count(*)
+----
+4900
+
+# A predicate on one vertex anchors the pattern there, alone or beside a join predicate, and
+# its neighbors are then reached through the CSR.
+query II
+EXPLAIN MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name = 'p5' RETURN count(*)
+----
+physical_plan	<REGEX>:.*gql_csr_expand.*
+
+query II
+EXPLAIN MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name AND p.name = 'p5' RETURN count(*)
+----
+physical_plan	<REGEX>:.*gql_csr_expand.*
+
+query I
+MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name AND p.name = 'p5' RETURN count(*)
+----
+3
+
+# OPTIONAL MATCH is scanned and joined the same way.
+query II
+EXPLAIN MATCH (y:City)-[:IS_PART_OF]->(country:Country) OPTIONAL MATCH (y)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*), count(p)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query II
+MATCH (y:City)-[:IS_PART_OF]->(country:Country) OPTIONAL MATCH (y)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*), count(p)
+----
+2000	2000
+
+# Without the layout the planner chooses each access path, CSR expansions among them.
+statement ok
+SET gql_graph_layout=false
+
+query II
+EXPLAIN MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name RETURN count(*)
+----
+physical_plan	<REGEX>:.*gql_csr_expand.*
+
+query I
+MATCH (p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City) WHERE p.name <> q.name RETURN count(*)
+----
+4900
+
+statement ok
+SET gql_graph_layout=true
+
+# Three Rare vertices have one LINK each, a row group apart among 300,000 LINKs of one Hub.
+statement ok
+COPY (SELECT 'r' || i AS ":ID", 'Rare' AS ":LABEL" FROM range(3) t(i)
+      UNION ALL SELECT 'h0', 'Hub'
+      UNION ALL SELECT 't' || i, 'Target' FROM range(8) t(i)) TO '{TEST_DIR}/scattered_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT CASE WHEN i % 130000 = 0 THEN 'r' || (i // 130000) ELSE 'h0' END AS ":START_ID",
+             't' || (i % 8) AS ":END_ID", 'LINK' AS ":TYPE" FROM range(300000) t(i)) TO '{TEST_DIR}/scattered_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH scattered ANY
+
+statement ok
+COPY GRAPH scattered FROM (VERTICES '{TEST_DIR}/scattered_nodes.csv', EDGES '{TEST_DIR}/scattered_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH scattered
+
+statement ok
+CALL gql_build_csr('scattered')
+
+query II
+SELECT "rows", row_groups FROM gql_graph_layout('scattered') WHERE kind = 'edges' ORDER BY "rows"
+----
+3	3
+299997	3
+
+# Scanning for the Rare vertices' three edges would read every row group, so they are expanded.
+query II
+EXPLAIN MATCH (r:Rare)-[:LINK]->(t:Target) RETURN count(*)
+----
+physical_plan	<REGEX>:.*gql_csr_expand.*
+
+query I
+MATCH (r:Rare)-[:LINK]->(t:Target) RETURN count(*)
+----
+3
+
+# The Hub's edges fill the row groups a scan reads.
+query II
+EXPLAIN MATCH (h:Hub)-[:LINK]->(t:Target) RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(gql_csr|inout function).*
+
+query I
+MATCH (h:Hub)-[:LINK]->(t:Target) RETURN count(*)
+----
+299997

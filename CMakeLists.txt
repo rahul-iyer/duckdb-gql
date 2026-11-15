@@ -54,6 +54,7 @@ set(EXTENSION_SOURCES
     src/gql_batched_inout.cpp
     src/gql_plan_reuse.cpp
     src/gql_statistics.cpp
+    src/gql_layout.cpp
     src/gql_algorithms.cpp
     src/parser/generated/GQLBaseVisitor.cpp
     src/parser/generated/GQLLexer.cpp

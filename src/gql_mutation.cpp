@@ -941,7 +941,7 @@ static Value MergeLiteralValue(const GqlLiteral &literal) {
 	case GqlLiteralType::BOOLEAN:
 		return Value::BOOLEAN(literal.value == "true");
 	case GqlLiteralType::INTEGER:
-		return Value::BIGINT(std::stoll(literal.value));
+		return GqlIntegerValue(literal.value);
 	case GqlLiteralType::DECIMAL:
 		return Value(literal.value).DefaultCastAs(LogicalType::DECIMAL(38, 18));
 	case GqlLiteralType::DOUBLE:

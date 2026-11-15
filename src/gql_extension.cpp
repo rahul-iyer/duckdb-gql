@@ -24,6 +24,7 @@
 #include "gql_batched_inout.hpp"
 #include "gql_csr.hpp"
 #include "gql_import.hpp"
+#include "gql_layout.hpp"
 #include "gql_mutation.hpp"
 #include "gql_optimizer.hpp"
 #include "gql_parser.hpp"
@@ -163,6 +164,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GqlCsrEdgeStatsFunction());
 	loader.RegisterFunction(GqlCsrEndpointStatsFunction());
 	loader.RegisterFunction(GqlAlgorithmStatsFunction());
+	loader.RegisterFunction(GqlElementScanFunction());
+	loader.RegisterFunction(GqlGraphLayoutFunction());
 	loader.RegisterFunction(GqlCreatePropertyIndexFunction());
 	loader.RegisterFunction(GqlDropPropertyIndexFunction());
 	loader.RegisterFunction(GqlPropertyIndexesFunction());
@@ -188,6 +191,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("gql_optimizer",
 	                          "Graph access planner: cost-based search (default) or legacy",
 	                          LogicalType::VARCHAR, Value("cost"), SetGqlOptimizer);
+	config.AddExtensionOption("gql_graph_layout",
+	                          "Test labels by vertex ID range and plan with per-label relationship counts",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	auto parser_override_option = DBConfig::GetOptionByName("allow_parser_override_extension");
 	if (parser_override_option && parser_override_option->setting_idx.IsValid() &&
 	    !config.user_settings.IsSet(parser_override_option->setting_idx.GetIndex())) {

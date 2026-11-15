@@ -2496,7 +2496,7 @@ static Value AlgorithmLiteralValue(GqlLiteralType type, const string &text) {
 	case GqlLiteralType::BOOLEAN:
 		return Value::BOOLEAN(StringUtil::CIEquals(text, "true"));
 	case GqlLiteralType::INTEGER:
-		return Value::BIGINT(std::stoll(text));
+		return GqlIntegerValue(text);
 	case GqlLiteralType::DECIMAL:
 		return Value(text).DefaultCastAs(LogicalType::DECIMAL(38, 18));
 	case GqlLiteralType::DOUBLE:
@@ -2731,7 +2731,7 @@ static unique_ptr<FunctionData> AlgorithmCallBind(ClientContext &, TableFunction
 		    (argument.type.id == GqlTypeId::INTEGER && literal_type != GqlLiteralType::INTEGER)) {
 			throw BinderException("Invalid configuration for GQL procedure 'algo.%s'", procedure_name);
 		}
-		if (argument.type.id == GqlTypeId::INTEGER && std::stoll(literal.value) < 0) {
+		if (argument.type.id == GqlTypeId::INTEGER && GqlIntegerValue(literal.value) < Value::BIGINT(0)) {
 			throw BinderException("GQL procedure configuration '%s' must be non-negative", argument.name);
 		}
 		result->configuration.push_back(std::move(literal));

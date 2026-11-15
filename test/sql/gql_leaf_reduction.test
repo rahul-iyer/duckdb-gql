@@ -1,0 +1,222 @@
+# name: test/sql/gql_leaf_reduction.test
+# description: Leaves of a scanned pattern are counted or tested per vertex instead of joined match by match
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+# Persons know persons (five know themselves), live in cities, and have interests. Comments have
+# creators, tags and cities. One city is part of no country.
+statement ok
+COPY (SELECT 'c' || i AS ":ID", 'Country' AS ":LABEL", 'c' || i AS "name:string" FROM range(3) t(i)
+      UNION ALL SELECT 'y' || i, 'City', 'y' || i FROM range(12) t(i)
+      UNION ALL SELECT 'p' || i, 'Person', 'p' || i FROM range(200) t(i)
+      UNION ALL SELECT 't' || i, 'Tag', 't' || i FROM range(30) t(i)
+      UNION ALL SELECT 'm' || i, 'Comment', 'm' || i FROM range(100) t(i)) TO '{TEST_DIR}/leaf_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'y' || i AS ":START_ID", 'c' || (i % 3) AS ":END_ID", 'IS_PART_OF' AS ":TYPE" FROM range(11) t(i)
+      UNION ALL SELECT 'p' || i, 'y' || (i % 12), 'IS_LOCATED_IN' FROM range(200) t(i)
+      UNION ALL SELECT 'm' || i, 'y' || (i % 7), 'IS_LOCATED_IN' FROM range(100) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 7 + 3) % 200), 'KNOWS' FROM range(200) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 13 + 5) % 200), 'KNOWS' FROM range(150) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || i, 'KNOWS' FROM range(5) t(i)
+      UNION ALL SELECT 'p' || i, 't' || (i % 30), 'HAS_INTEREST' FROM range(180) t(i)
+      UNION ALL SELECT 'p' || i, 't' || ((i * 3 + 1) % 30), 'HAS_INTEREST' FROM range(90) t(i)
+      UNION ALL SELECT 'm' || i, 't' || (i % 20), 'HAS_TAG' FROM range(100) t(i)
+      UNION ALL SELECT 'm' || i, 'p' || ((i * 3) % 50), 'HAS_CREATOR' FROM range(100) t(i)) TO '{TEST_DIR}/leaf_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH leaves ANY
+
+statement ok
+COPY GRAPH leaves FROM (VERTICES '{TEST_DIR}/leaf_nodes.csv', EDGES '{TEST_DIR}/leaf_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH leaves
+
+# The tag is a leaf: each two-hop path counts once per interest of its last person, so interests
+# are counted per person and never joined to the paths.
+query II
+EXPLAIN MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+physical_plan	<REGEX>:(?i).*group.by.*
+
+query I
+MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+874
+
+# Each direction an undirected edge is taken in counts its leaves the same way.
+query I
+MATCH (p1:Person)-[:KNOWS]-(p2:Person)-[:KNOWS]-(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+2734
+
+# A vertex left with one edge is a leaf in turn, so a tree is counted without listing a match.
+query I
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country) RETURN count(*)
+----
+248
+
+query I
+MATCH (t:Tag)<-[:HAS_TAG]-(m:Comment)-[:HAS_CREATOR]->(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country),
+      (p)-[:HAS_INTEREST]->(i:Tag)
+RETURN count(*)
+----
+184
+
+# Leaves of separate MATCH statements.
+query I
+MATCH (m:Comment)-[:HAS_CREATOR]->(p:Person) MATCH (p)-[:HAS_INTEREST]->(t:Tag) MATCH (p)-[:IS_LOCATED_IN]->(y:City) RETURN count(*)
+----
+200
+
+# The count stays a count inside an expression.
+query II
+MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*) + 1, count(*) * 2
+----
+486	970
+
+# No match at all counts zero.
+query I
+MATCH (c:Country)<-[:IS_PART_OF]-(y:City)<-[:IS_LOCATED_IN]-(m:Comment)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+0
+
+# Two edges of one type in a MATCH must differ, so neither end of a path of KNOWS edges is
+# counted apart from the other: five persons know themselves.
+query II
+EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*group.by.*
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN count(*)
+----
+635
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)<-[:KNOWS]-(c:Person) RETURN count(*)
+----
+318
+
+# In separate MATCH statements the two may be one edge.
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person) MATCH (b)-[:KNOWS]->(c:Person) RETURN count(*)
+----
+640
+
+# Edges of one type whose sources share no label range cannot be one edge.
+query II
+EXPLAIN MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+physical_plan	<REGEX>:(?i).*group.by.*
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+1700
+
+# A vertex a predicate reads is not a leaf.
+query II
+EXPLAIN MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:HAS_INTEREST]->(t:Tag) WHERE t.name <> p1.name RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*group.by.*
+
+query I
+MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:HAS_INTEREST]->(t:Tag) WHERE t.name <> p1.name RETURN count(*)
+----
+485
+
+# Nor is any vertex when the query reads more of a match than that it exists.
+query TI
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City) RETURN y.name, count(*) ORDER BY y.name LIMIT 2
+----
+y0	23
+y1	23
+
+query I
+MATCH (y:City)<-[:IS_LOCATED_IN]-(p:Person)-[:HAS_INTEREST]->(t:Tag) OPTIONAL MATCH (p)<-[:HAS_CREATOR]-(m:Comment) RETURN count(*)
+----
+370
+
+# A query that ignores duplicate matches only needs the vertices that have a leaf's edge, so
+# each person is kept once, however many interests they have.
+query II
+EXPLAIN MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country) RETURN count(DISTINCT p)
+----
+physical_plan	<REGEX>:(?i).*group.by.*group.by.*group.by.*
+
+query I
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country) RETURN count(DISTINCT p)
+----
+165
+
+query II
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country)
+RETURN count(DISTINCT q), count(DISTINCT y)
+----
+180	11
+
+query I
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:KNOWS]-(q:Person)-[:IS_LOCATED_IN]->(y:City) RETURN count(DISTINCT p)
+----
+180
+
+query T
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country)
+RETURN DISTINCT y.name ORDER BY y.name LIMIT 3
+----
+y0
+y1
+y10
+
+query TT
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:IS_LOCATED_IN]->(y:City) RETURN min(y.name), max(p.name)
+----
+y0	p99
+
+# Every match joined in full gives the same answers.
+statement ok
+SET gql_graph_layout=false
+
+query II
+EXPLAIN MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*group.by.*
+
+query I
+MATCH (p1:Person)-[:KNOWS]->(p2:Person)-[:KNOWS]->(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+874
+
+query I
+MATCH (p1:Person)-[:KNOWS]-(p2:Person)-[:KNOWS]-(p3:Person)-[:HAS_INTEREST]->(t:Tag) RETURN count(*)
+----
+2734
+
+query I
+MATCH (t:Tag)<-[:HAS_TAG]-(m:Comment)-[:HAS_CREATOR]->(p:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country),
+      (p)-[:HAS_INTEREST]->(i:Tag)
+RETURN count(*)
+----
+184
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+1700
+
+query II
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:KNOWS]->(q:Person)-[:IS_LOCATED_IN]->(y:City)-[:IS_PART_OF]->(c:Country)
+RETURN count(DISTINCT q), count(DISTINCT y)
+----
+180	11
+
+query I
+MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:KNOWS]-(q:Person)-[:IS_LOCATED_IN]->(y:City) RETURN count(DISTINCT p)
+----
+180

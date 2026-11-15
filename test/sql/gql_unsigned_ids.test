@@ -1,0 +1,67 @@
+# name: test/sql/gql_unsigned_ids.test
+# description: UBIGINT keys and integer literals past the signed 64-bit range
+# group: [gql]
+
+require duckgql
+
+statement ok
+CREATE TABLE person (pid UBIGINT NOT NULL, name VARCHAR)
+
+statement ok
+CREATE TABLE knows (kid UBIGINT NOT NULL, src UBIGINT NOT NULL, dst UBIGINT NOT NULL)
+
+statement ok
+INSERT INTO person VALUES (18446744073709551615, 'max'), (9223372036854775808, 'mid'), (7, 'small')
+
+statement ok
+INSERT INTO knows VALUES (18446744073709551614, 18446744073709551615, 9223372036854775808), (5, 9223372036854775808, 7)
+
+statement ok
+CREATE GRAPH unsigned_ids TYPED {
+    (Person :Person {id UINT64 NOT NULL, name STRING}),
+    (Person)-[:KNOWS {id UINT64 NOT NULL}]->(Person)
+} FROM TABLES (
+    VERTEX TABLE memory.main.person MAP TO NODE TYPE Person KEY (pid) PROPERTIES (pid AS id, name AS name),
+    EDGE TABLE memory.main.knows MAP TO EDGE TYPE KNOWS KEY (kid)
+        SOURCE (src) REFERENCES NODE TYPE Person DESTINATION (dst) REFERENCES NODE TYPE Person
+        PROPERTIES (kid AS id)
+) OPTIONS (SNAPSHOT_POLICY 'LIVE', ACCESS_MODE 'READ_ONLY', VALIDATE TRUE)
+
+statement ok
+SESSION SET GRAPH unsigned_ids
+
+# Keys above the signed range join and return unchanged.
+query IIIT
+MATCH (a:Person)-[k:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN a.id, k.id, b.id, c.name
+----
+18446744073709551615	18446744073709551614	9223372036854775808	small
+
+# Literals above the signed range are typed as DuckDB types them, not parsed as BIGINT.
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id = 18446744073709551615 RETURN b.name
+----
+mid
+
+query T
+MATCH (a)-[k:KNOWS]->(b) WHERE k.id = 18446744073709551614 RETURN b.name
+----
+mid
+
+query T
+MATCH (a:Person) WHERE a.id > 9223372036854775807 RETURN a.name ORDER BY a.name
+----
+max
+mid
+
+statement ok
+CALL gql_build_csr('unsigned_ids')
+
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id = 18446744073709551615 RETURN b.name
+----
+mid
+
+query T
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.id = 9223372036854775808 RETURN a.name
+----
+max

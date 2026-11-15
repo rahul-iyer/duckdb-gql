@@ -4,6 +4,7 @@
 #include "gql_catalog.hpp"
 #include "gql_csr.hpp"
 #include "gql_import.hpp"
+#include "gql_layout.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -2295,13 +2296,105 @@ static void BuildCsrForPathSearches(ClientContext &context, const string &graph_
 	}
 }
 
+// Whether a conjunct of this predicate, rooted at node, compares fewer than two bindings: it then
+// narrows one vertex or edge instead of joining two.
+static bool NarrowsOneBinding(const GqlExpressionProgram &program, idx_t node) {
+	if (static_cast<GqlExpressionType>(program.node_types[node]) == GqlExpressionType::BINARY &&
+	    static_cast<GqlBinaryOperator>(program.operators[node]) == GqlBinaryOperator::AND) {
+		return NarrowsOneBinding(program, node + 1) ||
+		       NarrowsOneBinding(program, GqlExpressionEnd(program, node + 1));
+	}
+	idx_t first = DConstants::INVALID_INDEX;
+	for (auto index = node; index < GqlExpressionEnd(program, node); index++) {
+		const auto binding = program.binding_indices[index];
+		if (binding == NumericLimits<uint64_t>::Maximum()) {
+			continue;
+		}
+		if (first != DConstants::INVALID_INDEX && binding != first) {
+			return false;
+		}
+		first = binding;
+	}
+	return true;
+}
+
+// The layout of a pattern that is cheapest read by scanning each relationship once, or null.
+//
+// That is a pattern nothing anchors to a few vertices: every edge is one hop of one type and no
+// predicate narrows a single vertex or edge. It matches across whole label populations, so any
+// plan reads the edges between them. A correlated CSR expansion reads only those, where a scan
+// also reads the rest of their row groups; but the expansion fixes the order its stage joins in
+// before DuckDB can weigh it, and one misjudged order costs more than any scan. So while the
+// scans read at most a fixed multiple of the edges that can match, every binding is scanned at
+// the layout's exact sizes, and DuckDB orders the joins of all stages together.
+static shared_ptr<const GqlGraphLayout> UnanchoredScanLayout(ClientContext &context, const string &graph_name,
+                                                             const GqlTableGraphBinding &graph,
+                                                             const GqlAccessPathInput &match) {
+	//! Rows a scan may read per edge that can match before per-vertex expansion is considered.
+	static constexpr double MAX_SCAN_ROWS_PER_MATCH = 16;
+	for (const auto &program : match.predicates) {
+		if (program.IsEmpty() || NarrowsOneBinding(program, 0)) {
+			return nullptr;
+		}
+	}
+	for (const auto &node : match.nodes) {
+		if (node.type == GqlLogicalOperatorType::CALL) {
+			return nullptr;
+		}
+	}
+	vector<string> labels(match.binding_types.size());
+	bool has_edge = false;
+	for (const auto &stage : match.match_stages) {
+		for (const auto &pattern : stage.patterns) {
+			for (const auto &element : pattern.elements) {
+				if (element.type == GqlPatternElementType::VERTEX) {
+					if (!element.label.empty()) {
+						auto &all = labels[element.binding_index];
+						all += (all.empty() ? "" : ";") + element.label;
+					}
+					continue;
+				}
+				if (element.quantified || element.shortest || element.all_shortest || element.label.empty() ||
+				    element.label.find(';') != string::npos) {
+					return nullptr;
+				}
+				has_edge = true;
+			}
+		}
+	}
+	if (!has_edge) {
+		return nullptr;
+	}
+	auto layout = GqlTryGetGraphLayout(context, graph);
+	// Without a CSR every plan scans, and only the sizes are in question.
+	if (!layout || !GqlTryGetCsrSnapshot(context, graph_name)) {
+		return layout;
+	}
+	double scan_rows = 0, matching_edges = 0;
+	for (const auto &stage : match.match_stages) {
+		for (const auto &pattern : stage.patterns) {
+			for (idx_t index = 1; index + 1 < pattern.elements.size(); index += 2) {
+				const auto &edge = pattern.elements[index];
+				const auto &left = labels[pattern.elements[index - 1].binding_index];
+				const auto &right = labels[pattern.elements[index + 1].binding_index];
+				const auto estimate = layout->EdgeEstimate(edge.label, edge.reverse ? right : left,
+				                                           edge.reverse ? left : right);
+				scan_rows += estimate.scan_rows;
+				matching_edges += estimate.edges;
+			}
+		}
+	}
+	// One row group is the least any scan reads.
+	if (scan_rows > MaxValue<double>(DEFAULT_ROW_GROUP_SIZE, MAX_SCAN_ROWS_PER_MATCH * matching_edges)) {
+		return nullptr;
+	}
+	return layout;
+}
+
 // Structural strategies apply to whichever access paths the selected planner chose.
 static void FinalizeAccessPlan(ClientContext &context, const string &graph_name, const GqlTableGraphBinding &graph,
                                const GqlAccessPathInput &input, GqlAccessPathPlan &plan) {
-	// The cycle pipeline joins each stage's tables to the closing cycle first. Per-binding CSR
-	// sources would instead evaluate the stages one after another, before the cycle limits them.
-	plan.cycle_pipeline = UseCyclePipeline(input, graph);
-	if (plan.cycle_pipeline) {
+	auto scan_every_binding = [&]() {
 		for (auto &stage : plan.stages) {
 			for (auto &path : stage.bindings) {
 				auto cardinality = path.cardinality;
@@ -2309,6 +2402,18 @@ static void FinalizeAccessPlan(ClientContext &context, const string &graph_name,
 				path.cardinality = cardinality;
 			}
 		}
+	};
+	plan.scan_layout = UnanchoredScanLayout(context, graph_name, graph, input);
+	if (plan.scan_layout) {
+		scan_every_binding();
+		plan.independent_optional_branches = FindIndependentOptionalBranches(input, plan);
+		return;
+	}
+	// The cycle pipeline joins each stage's tables to the closing cycle first. Per-binding CSR
+	// sources would instead evaluate the stages one after another, before the cycle limits them.
+	plan.cycle_pipeline = UseCyclePipeline(input, graph);
+	if (plan.cycle_pipeline) {
+		scan_every_binding();
 		return;
 	}
 	ReadIdOnlyVerticesFromPostings(context, graph_name, graph, input, plan);

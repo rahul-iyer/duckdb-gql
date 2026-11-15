@@ -47,6 +47,11 @@ RETURN count(*)
 statement ok
 CALL gql_build_csr('cycle_csr')
 
+# The cycle goes first where the graph layout offers no sized scans to order every stage by;
+# gql_unanchored_scans.test covers those.
+statement ok
+SET gql_graph_layout=false
+
 # Each stage joins the cycle's tables; CSR sources would evaluate the stages before the cycle.
 query II
 EXPLAIN MATCH (country:Country)

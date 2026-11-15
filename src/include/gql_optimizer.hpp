@@ -10,6 +10,7 @@ class TableCatalogEntry;
 class ClientContext;
 class TableFunction;
 struct GqlTableGraphBinding;
+struct GqlGraphLayout;
 
 // Applies semantics-preserving logical rewrites and annotates every operator
 // with binding, correlation, nullability, and cardinality properties.
@@ -128,6 +129,9 @@ struct GqlAccessPathPlan {
 	//! Evaluate the closing cycle stage first and join every other stage to it as plain
 	//! table scans, instead of nesting the stages in order.
 	bool cycle_pipeline = false;
+	//! Set for a pattern no predicate anchors: every binding is a table scan sized by this
+	//! layout, and DuckDB orders the joins of all stages together.
+	shared_ptr<const GqlGraphLayout> scan_layout;
 	//! LEFT_APPLY chain, outermost first, whose sibling OPTIONAL branches run as a UNION ALL
 	//! of the base joined to each branch instead of their per-row product. Empty otherwise.
 	vector<idx_t> independent_optional_branches;

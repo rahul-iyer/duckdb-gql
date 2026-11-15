@@ -127,6 +127,8 @@ struct GqlCsrGenerationState : ObjectCacheEntry {
 	unordered_map<string, uint64_t> table_write_generations;
 	//! The subset of those writes that may do more than insert rows.
 	unordered_map<string, uint64_t> table_destructive_generations;
+	//! Transactions that planned a write to a graph table and have neither committed nor rolled back.
+	atomic<idx_t> writes_in_flight {0};
 	//! Whether a saved CSR may exist, once known, so most writes skip looking.
 	bool saved_csr_known = false;
 	bool saved_csr_exists = false;
@@ -229,6 +231,15 @@ struct GqlCsrWriteObserverState : ClientContextState {
 		ClearPlannedWrites();
 	}
 
+	void QueryBegin(ClientContext &context) override {
+		query_begin_generation = GqlDatabaseWriteGeneration(context);
+		query_begin_clean = GetCsrGenerationState(context)->writes_in_flight == 0;
+	}
+
+	//! The database write generation when this statement began, and whether no write was in flight.
+	uint64_t query_begin_generation = 0;
+	bool query_begin_clean = false;
+
 	RebindQueryInfo OnRebindPreparedStatement(ClientContext &context, BindPreparedStatementCallbackInfo &info,
 	                                          RebindQueryInfo current_rebind) override {
 		if (!info.prepared_statement.properties.IsReadOnly()) {
@@ -243,7 +254,25 @@ struct GqlCsrWriteObserverState : ClientContextState {
 	void ClearPlannedWrites() {
 		planned_table_writes.clear();
 		planned_prepared_write = false;
+		if (in_flight) {
+			in_flight->writes_in_flight--;
+			in_flight.reset();
+		}
 	}
+
+	//! Counts this transaction as writing until it ends, however it ends.
+	void NoteWriteInFlight(ClientContext &context) {
+		if (!in_flight) {
+			in_flight = GetCsrGenerationState(context);
+			in_flight->writes_in_flight++;
+		}
+	}
+
+	~GqlCsrWriteObserverState() override {
+		ClearPlannedWrites();
+	}
+
+	shared_ptr<GqlCsrGenerationState> in_flight;
 
 	//! Table to whether its writes in this transaction only inserted.
 	unordered_map<string, bool> planned_table_writes;
@@ -258,6 +287,7 @@ void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog
                                    const string &table_name, bool inserts_only) {
 	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
 	auto key = CsrTableKey(catalog_name, schema_name, table_name);
+	observer->NoteWriteInFlight(context);
 	AdvanceCsrTableWriteGeneration(context, key, inserts_only);
 	if (!inserts_only && StringUtil::CIEquals(schema_name, "gql_data")) {
 		DropSavedCsrs(context, key);
@@ -268,9 +298,30 @@ void GqlNotifyCsrTableWritePlanned(ClientContext &context, const string &catalog
 
 void GqlNotifyCsrPreparedWriteExecution(ClientContext &context) {
 	auto observer = context.registered_state->GetOrCreate<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
+	observer->NoteWriteInFlight(context);
 	AdvanceCsrWriteGeneration(context);
 	observer->planned_prepared_write = true;
 	DropSavedCsrs(context);
+}
+
+bool GqlNoWriteSinceQueryBegin(ClientContext &context) {
+	auto observer = context.registered_state->Get<GqlCsrWriteObserverState>(GQL_CSR_WRITE_OBSERVER_STATE_KEY);
+	return observer && observer->query_begin_clean &&
+	       observer->query_begin_generation == GqlDatabaseWriteGeneration(context) &&
+	       GetCsrGenerationState(context)->writes_in_flight == 0;
+}
+
+GqlGraphWriteToken GqlReadGraphWriteToken(ClientContext &context, const GqlTableGraphBinding &graph) {
+	auto state = GetCsrGenerationState(context);
+	lock_guard<mutex> guard(state->lock);
+	GqlGraphWriteToken token;
+	token.prepared_writes = state->write_generation;
+	token.vertex_writes = state->table_write_generations[CsrTableKey(
+	    graph.vertex.catalog_name, graph.vertex.schema_name, graph.vertex.table_name)];
+	token.edge_writes =
+	    state->table_write_generations[CsrTableKey(graph.edge.catalog_name, graph.edge.schema_name, graph.edge.table_name)];
+	token.writes_in_flight = state->writes_in_flight;
+	return token;
 }
 
 static string QualifiedTable(const GqlElementTableBinding &table) {

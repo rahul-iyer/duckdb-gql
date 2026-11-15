@@ -503,6 +503,70 @@ static shared_ptr<GqlBoundExpression> ExtractAggregateInputs(const shared_ptr<Gq
 	return result;
 }
 
+// Whether the expression's aggregates are all COUNT(*).
+static bool CountsRowsOnly(const GqlBoundExpression &expression) {
+	if (expression.aggregate &&
+	    (expression.function_name != "count" || !expression.arguments.empty() || expression.distinct)) {
+		return false;
+	}
+	for (const auto &child : {expression.left, expression.right}) {
+		if (child && !CountsRowsOnly(*child)) {
+			return false;
+		}
+	}
+	for (const auto &argument : expression.arguments) {
+		if (!CountsRowsOnly(*argument)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// COUNT(*) over rows that each stand for a number of matches: the sum of those numbers, which
+// the first aggregate input holds, and zero over no rows.
+static shared_ptr<GqlBoundExpression> SumMultiplicity(const shared_ptr<GqlBoundExpression> &expression) {
+	if (expression->aggregate) {
+		auto multiplicity = make_shared_ptr<GqlBoundExpression>();
+		multiplicity->expression_type = GqlExpressionType::VARIABLE_REFERENCE;
+		multiplicity->result_type = {GqlTypeId::INTEGER, false};
+		multiplicity->binding_index = 0;
+		auto sum = make_shared_ptr<GqlBoundExpression>();
+		sum->expression_type = GqlExpressionType::FUNCTION;
+		sum->function_name = "sum";
+		sum->aggregate = true;
+		sum->result_type = {GqlTypeId::INTEGER, true};
+		sum->arguments.push_back(std::move(multiplicity));
+		auto zero = make_shared_ptr<GqlBoundExpression>();
+		zero->expression_type = GqlExpressionType::LITERAL;
+		zero->literal = {GqlLiteralType::INTEGER, "0"};
+		zero->result_type = {GqlTypeId::INTEGER, false};
+		auto total = make_shared_ptr<GqlBoundExpression>();
+		total->expression_type = GqlExpressionType::FUNCTION;
+		total->function_name = "coalesce";
+		total->result_type = {GqlTypeId::INTEGER, false};
+		total->arguments.push_back(std::move(sum));
+		total->arguments.push_back(std::move(zero));
+		auto result = make_shared_ptr<GqlBoundExpression>();
+		result->expression_type = GqlExpressionType::FUNCTION;
+		result->function_name = "__gql_cast_integer";
+		result->result_type = expression->result_type;
+		result->arguments.push_back(std::move(total));
+		return result;
+	}
+	auto result = make_shared_ptr<GqlBoundExpression>(*expression);
+	if (expression->left) {
+		result->left = SumMultiplicity(expression->left);
+	}
+	if (expression->right) {
+		result->right = SumMultiplicity(expression->right);
+	}
+	result->arguments.clear();
+	for (const auto &argument : expression->arguments) {
+		result->arguments.push_back(SumMultiplicity(argument));
+	}
+	return result;
+}
+
 unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 	if (plans.empty()) {
 		throw InternalException("GQL MATCH produced no native alternatives");
@@ -565,11 +629,22 @@ unique_ptr<SQLStatement> GqlLowerSelect(vector<GqlLogicalPlan> plans) {
 			// COUNT(*) still needs one row per match, including when every
 			// alternative is empty. It must not count one aggregate row per arm.
 			if (inputs.empty()) {
+				// When nothing but COUNT(*) reads the rows, each may stand for several matches: the
+				// column says how many, and an alternative may then return fewer rows than matches.
+				const bool counts_rows =
+				    std::all_of(expressions.begin(), expressions.end(),
+				                [](const shared_ptr<GqlBoundExpression> &expression) { return CountsRowsOnly(*expression); });
 				auto present = make_shared_ptr<GqlBoundExpression>();
 				present->expression_type = GqlExpressionType::LITERAL;
 				present->literal = {GqlLiteralType::INTEGER, "1"};
 				present->result_type = {GqlTypeId::INTEGER, false};
-				inputs.push_back({std::move(present), "__gql_aggregate_present", {}});
+				inputs.push_back(
+				    {std::move(present), counts_rows ? GQL_MULTIPLICITY_COLUMN : "__gql_aggregate_present", {}});
+				if (counts_rows) {
+					for (auto &expression : expressions) {
+						expression = SumMultiplicity(expression);
+					}
+				}
 			}
 			if (aggregate_expressions.empty()) {
 				aggregate_expressions = std::move(expressions);

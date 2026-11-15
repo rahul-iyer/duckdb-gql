@@ -9,6 +9,11 @@ require json
 statement ok
 SET threads=1
 
+# These are the CSR planner's estimates. A pattern no predicate anchors reaches that planner only
+# where the graph layout offers no scans; gql_unanchored_scans.test covers the scans.
+statement ok
+SET gql_graph_layout=false
+
 statement ok
 SET gql_optimizer='cost'
 
