@@ -105,6 +105,20 @@ bool GqlGraphLayout::LabelRanges(const string &labels, vector<GqlIdRange> &range
 	return ranges.size() <= MAX_LABEL_RANGES;
 }
 
+bool GqlGraphLayout::LabelBounds(const string &labels, vector<GqlIdRange> &ranges) const {
+	ranges.clear();
+	const auto required = SplitLabels(labels);
+	if (required.empty()) {
+		return false;
+	}
+	for (const auto &group : groups) {
+		if (HasLabels(group, required)) {
+			ranges.push_back({group.low, group.high});
+		}
+	}
+	return true;
+}
+
 double GqlGraphLayout::LabelPopulation(const string &labels) const {
 	const auto required = SplitLabels(labels);
 	double result = 0;

@@ -2371,7 +2371,8 @@ static unique_ptr<TableRef> ReduceLeaves(ClientContext &context, const string &g
 			counts_matches = counts_matches && counts;
 		}
 	}
-	if (!counts_matches && !duplicate_insensitive) {
+	// The multiplicity column is summed by whoever asked for it, so its rows are never deduplicated.
+	if (!counts_matches && (!duplicate_insensitive || multiplicity_column)) {
 		return nullptr;
 	}
 	for (const auto &node : match.nodes) {
@@ -2410,10 +2411,10 @@ static unique_ptr<TableRef> ReduceLeaves(ClientContext &context, const string &g
 	}
 
 	// Edges of one type are different edges when their sources or their targets have labels that
-	// no vertex shares.
+	// no vertex shares, which the bounds of the labels' IDs can show.
 	auto share_no_vertex = [&](idx_t left, idx_t right) {
 		vector<GqlIdRange> left_ranges, right_ranges;
-		if (!layout.LabelRanges(labels[left], left_ranges) || !layout.LabelRanges(labels[right], right_ranges)) {
+		if (!layout.LabelBounds(labels[left], left_ranges) || !layout.LabelBounds(labels[right], right_ranges)) {
 			return false;
 		}
 		for (const auto &a : left_ranges) {
@@ -2492,7 +2493,7 @@ static unique_ptr<TableRef> ReduceLeaves(ClientContext &context, const string &g
 						continue;
 					}
 					counted_at[attached_to].push_back(leaves.size());
-					leaves.push_back({edge, vertex.binding_index, attached_to, front != edge.reverse,
+					leaves.push_back({edge, vertex.binding_index, attached_to, is_source,
 					                  std::move(counted_at[vertex.binding_index])});
 					counted_at[vertex.binding_index].clear();
 					occurrences[vertex.binding_index] = occurrences[edge.binding_index] = 0;

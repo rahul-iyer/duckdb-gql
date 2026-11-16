@@ -220,3 +220,76 @@ query I
 MATCH (t:Tag)<-[:HAS_INTEREST]-(p:Person)-[:KNOWS]-(q:Person)-[:IS_LOCATED_IN]->(y:City) RETURN count(DISTINCT p)
 ----
 180
+
+statement ok
+SET gql_graph_layout=true
+
+# Posts load among the comments, so an ID does not decide either label, and forums load inside
+# the span of the comments' IDs.
+statement ok
+COPY (SELECT CASE WHEN i % 3 = 0 THEN 'o' ELSE 'm' END || i AS ":ID",
+             CASE WHEN i % 3 = 0 THEN 'Post' ELSE 'Comment' END AS ":LABEL" FROM range(60) t(i)
+      UNION ALL SELECT 'f' || i, 'Forum' FROM range(10) t(i)
+      UNION ALL SELECT 'm' || i, 'Comment' FROM range(60, 70) t(i)
+      UNION ALL SELECT 'p' || i, 'Person' FROM range(20) t(i)
+      UNION ALL SELECT 'y' || i, 'City' FROM range(4) t(i)) TO '{TEST_DIR}/mixed_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT CASE WHEN i % 3 = 0 THEN 'o' ELSE 'm' END || i AS ":START_ID", 'y' || (i % 4) AS ":END_ID",
+             'IS_LOCATED_IN' AS ":TYPE" FROM range(60) t(i)
+      UNION ALL SELECT 'm' || i, 'y' || (i % 4), 'IS_LOCATED_IN' FROM range(60, 70) t(i)
+      UNION ALL SELECT 'f' || i, 'y' || (i % 3), 'IS_LOCATED_IN' FROM range(10) t(i)
+      UNION ALL SELECT 'p' || i, 'y' || (i % 4), 'IS_LOCATED_IN' FROM range(20) t(i)) TO '{TEST_DIR}/mixed_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH mixed ANY
+
+statement ok
+COPY GRAPH mixed FROM (VERTICES '{TEST_DIR}/mixed_nodes.csv', EDGES '{TEST_DIR}/mixed_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH mixed
+
+query TT
+SELECT name, id_ranges FROM gql_graph_layout('mixed') WHERE kind = 'labels' ORDER BY low
+----
+post	false
+comment	false
+forum	true
+person	true
+city	true
+
+# Every comment's ID lies below every person's, which is enough to tell their edges apart.
+query II
+EXPLAIN MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+physical_plan	<REGEX>:(?i).*group.by.*
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+250
+
+# A forum's ID lies among the comments', so its edge is not told apart from theirs by ID.
+query II
+EXPLAIN MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(f:Forum) RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*group.by.*
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(f:Forum) RETURN count(*)
+----
+127
+
+statement ok
+SET gql_graph_layout=false
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)
+----
+250
+
+query I
+MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(f:Forum) RETURN count(*)
+----
+127
