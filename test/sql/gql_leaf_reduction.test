@@ -259,6 +259,23 @@ forum	true
 person	true
 city	true
 
+# Edges are counted between stretches of IDs that the same labels reach across, so the forums'
+# ten edges are known apart from those of the comments around them.
+query III
+SELECT source_block, target_block, "rows" FROM gql_graph_layout('mixed') WHERE kind = 'edges' ORDER BY ALL
+----
+0	6	1
+1	6	57
+2	6	2
+3	6	10
+4	6	10
+5	6	20
+
+query II
+EXPLAIN MATCH (f:Forum)-[:IS_LOCATED_IN]->(y:City) RETURN count(*)
+----
+physical_plan	<REGEX>:.*~10 rows.*
+
 # Every comment's ID lies below every person's, which is enough to tell their edges apart.
 query II
 EXPLAIN MATCH (m:Comment)-[:IS_LOCATED_IN]->(y:City)<-[:IS_LOCATED_IN]-(p:Person) RETURN count(*)

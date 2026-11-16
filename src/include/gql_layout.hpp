@@ -51,10 +51,19 @@ struct GqlGraphLayout {
 		bool dense;
 		vector<idx_t> groups;
 	};
-	//! Edges of one type between two blocks. A block of -1 holds the IDs outside every block.
+	//! A stretch of IDs between two neighboring ends of group ranges, so the same groups reach
+	//! across all of it. A group that holds every ID of its range has its stretches to itself.
+	struct Segment {
+		uint64_t low;
+		uint64_t high;
+		vector<idx_t> groups;
+		//! The share of the segment's vertices each group is taken to hold.
+		vector<double> shares;
+	};
+	//! Edges of one type between two segments. A segment of -1 holds the IDs outside every segment.
 	struct Triple {
-		int64_t source_block;
-		int64_t target_block;
+		int64_t source_segment;
+		int64_t target_segment;
 		uint64_t edges;
 		uint64_t sources;
 		uint64_t targets;
@@ -64,6 +73,9 @@ struct GqlGraphLayout {
 
 	vector<Group> groups;
 	vector<Block> blocks;
+	//! What edge counts are kept by: finer than blocks, which only tell labels apart where
+	//! their ranges do not overlap at all.
+	vector<Segment> segments;
 	uint64_t vertex_count = 0;
 	uint64_t edge_count = 0;
 	unordered_map<string, vector<Triple>> triples;

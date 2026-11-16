@@ -48,19 +48,19 @@ bool HasLabels(const GqlGraphLayout::Group &group, const vector<string> &require
 	return true;
 }
 
-//! The share of a block's vertices that have the required labels.
-double BlockShare(const GqlGraphLayout &layout, int64_t block_index, const vector<string> &required) {
-	if (block_index < 0) {
+//! The share of a segment's vertices that have the required labels.
+double SegmentShare(const GqlGraphLayout &layout, int64_t segment_index, const vector<string> &required) {
+	if (segment_index < 0) {
 		return required.empty() ? 1 : 0;
 	}
-	const auto &block = layout.blocks[NumericCast<idx_t>(block_index)];
-	uint64_t matching = 0;
-	for (auto group : block.groups) {
-		if (HasLabels(layout.groups[group], required)) {
-			matching += layout.groups[group].count;
+	const auto &segment = layout.segments[NumericCast<idx_t>(segment_index)];
+	double matching = 0;
+	for (idx_t index = 0; index < segment.groups.size(); index++) {
+		if (HasLabels(layout.groups[segment.groups[index]], required)) {
+			matching += segment.shares[index];
 		}
 	}
-	return block.count == 0 ? 0 : static_cast<double>(matching) / static_cast<double>(block.count);
+	return matching;
 }
 
 } // namespace
@@ -139,8 +139,8 @@ GqlEdgeScanEstimate GqlGraphLayout::EdgeEstimate(const string &type, const strin
 	}
 	const auto source_required = SplitLabels(source_labels), target_required = SplitLabels(target_labels);
 	for (const auto &triple : entry->second) {
-		const auto source_share = BlockShare(*this, triple.source_block, source_required);
-		const auto target_share = BlockShare(*this, triple.target_block, target_required);
+		const auto source_share = SegmentShare(*this, triple.source_segment, source_required);
+		const auto target_share = SegmentShare(*this, triple.target_segment, target_required);
 		result.edges += static_cast<double>(triple.edges) * source_share * target_share;
 		// An endpoint keeps at least one edge under the other end's labels only at best.
 		result.sources += static_cast<double>(triple.sources) * source_share * (target_share > 0 ? 1 : 0);
@@ -223,17 +223,17 @@ string QualifiedName(const GqlElementTableBinding &table) {
 }
 
 //! Maps an ID to the block holding it by binary search, or to -1.
-string BlockOf(const GqlGraphLayout &layout, const string &column, idx_t first, idx_t last) {
-	if (layout.blocks.empty()) {
+string SegmentOf(const GqlGraphLayout &layout, const string &column, idx_t first, idx_t last) {
+	if (layout.segments.empty()) {
 		return "-1";
 	}
 	if (first == last) {
-		return "CASE WHEN " + column + " BETWEEN " + to_string(layout.blocks[first].low) + " AND " +
-		       to_string(layout.blocks[first].high) + " THEN " + to_string(first) + " ELSE -1 END";
+		return "CASE WHEN " + column + " BETWEEN " + to_string(layout.segments[first].low) + " AND " +
+		       to_string(layout.segments[first].high) + " THEN " + to_string(first) + " ELSE -1 END";
 	}
 	const auto middle = (first + last) / 2;
-	return "CASE WHEN " + column + " < " + to_string(layout.blocks[middle + 1].low) + " THEN " +
-	       BlockOf(layout, column, first, middle) + " ELSE " + BlockOf(layout, column, middle + 1, last) + " END";
+	return "CASE WHEN " + column + " < " + to_string(layout.segments[middle + 1].low) + " THEN " +
+	       SegmentOf(layout, column, first, middle) + " ELSE " + SegmentOf(layout, column, middle + 1, last) + " END";
 }
 
 // Null when the layout cannot describe every vertex: a missing range would read as an empty label.
@@ -300,10 +300,56 @@ shared_ptr<GqlGraphLayout> ReadLayout(Connection &connection, const GqlTableGrap
 	}
 
 	const auto source = GqlQuoteIdentifier(graph.edge_source_column), target = GqlQuoteIdentifier(graph.edge_target_column);
-	const auto last = layout->blocks.empty() ? 0 : layout->blocks.size() - 1;
+	// Every end of a group's range starts a new segment.
+	vector<uint64_t> starts;
+	for (const auto &group : layout->groups) {
+		starts.push_back(group.low);
+		if (group.high != NumericLimits<uint64_t>::Maximum()) {
+			starts.push_back(group.high + 1);
+		}
+	}
+	std::sort(starts.begin(), starts.end());
+	starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+	for (idx_t index = 0; index < starts.size(); index++) {
+		GqlGraphLayout::Segment segment;
+		segment.low = starts[index];
+		segment.high = index + 1 < starts.size() ? starts[index + 1] - 1 : NumericLimits<uint64_t>::Maximum();
+		const auto length = static_cast<double>(segment.high - segment.low) + 1;
+		double total = 0;
+		for (idx_t group_index = 0; group_index < layout->groups.size(); group_index++) {
+			const auto &group = layout->groups[group_index];
+			if (group.low > segment.low) {
+				break;
+			}
+			if (group.high < segment.high) {
+				continue;
+			}
+			if (group.dense) {
+				// Its range has no ID left for another group.
+				segment.groups = {group_index};
+				segment.shares = {1};
+				total = 1;
+				break;
+			}
+			// Its vertices are taken to lie evenly over its range.
+			const auto share =
+			    static_cast<double>(group.count) * length / (static_cast<double>(group.high - group.low) + 1);
+			segment.groups.push_back(group_index);
+			segment.shares.push_back(share);
+			total += share;
+		}
+		if (segment.groups.empty()) {
+			continue;
+		}
+		for (auto &share : segment.shares) {
+			share /= total;
+		}
+		layout->segments.push_back(std::move(segment));
+	}
+	const auto last = layout->segments.empty() ? 0 : layout->segments.size() - 1;
 	auto edges = GqlQuery(connection,
 	                      "SELECT " + GqlQuoteIdentifier(graph.edge.label_column) + ", " +
-	                          BlockOf(*layout, source, 0, last) + ", " + BlockOf(*layout, target, 0, last) +
+	                          SegmentOf(*layout, source, 0, last) + ", " + SegmentOf(*layout, target, 0, last) +
 	                          ", count(*)::UBIGINT, approx_count_distinct(" + source +
 	                          ")::UBIGINT, approx_count_distinct(" + target +
 	                          ")::UBIGINT, approx_count_distinct(rowid // " + to_string(DEFAULT_ROW_GROUP_SIZE) +
@@ -565,8 +611,8 @@ unique_ptr<GlobalTableFunctionState> LayoutInit(ClientContext &context, TableFun
 		for (const auto &triple : type.second) {
 			result->rows.push_back({Value("edges"), Value(type.first), Value(LogicalType::UBIGINT),
 			                        Value(LogicalType::UBIGINT), Value::UBIGINT(triple.edges),
-			                        Value(LogicalType::BOOLEAN), Value::BIGINT(triple.source_block),
-			                        Value::BIGINT(triple.target_block), Value::UBIGINT(triple.sources),
+			                        Value(LogicalType::BOOLEAN), Value::BIGINT(triple.source_segment),
+			                        Value::BIGINT(triple.target_segment), Value::UBIGINT(triple.sources),
 			                        Value::UBIGINT(triple.targets), Value::UBIGINT(triple.row_groups)});
 		}
 	}
