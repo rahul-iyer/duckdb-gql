@@ -112,9 +112,22 @@ bool GqlGraphLayout::LabelBounds(const string &labels, vector<GqlIdRange> &range
 		return false;
 	}
 	for (const auto &group : groups) {
-		if (HasLabels(group, required)) {
+		if (!HasLabels(group, required)) {
+			continue;
+		}
+		// Groups are in order of their lowest ID.
+		if (!ranges.empty() && group.low <= ranges.back().high) {
+			ranges.back().high = MaxValue(ranges.back().high, group.high);
+		} else {
 			ranges.push_back({group.low, group.high});
 		}
+	}
+	if (ranges.size() > MAX_LABEL_RANGES) {
+		uint64_t high = 0;
+		for (const auto &range : ranges) {
+			high = MaxValue(high, range.high);
+		}
+		ranges = {{ranges[0].low, high}};
 	}
 	return true;
 }
@@ -131,16 +144,35 @@ double GqlGraphLayout::LabelPopulation(const string &labels) const {
 }
 
 GqlEdgeScanEstimate GqlGraphLayout::EdgeEstimate(const string &type, const string &source_labels,
-                                                 const string &target_labels) const {
+                                                 const string &target_labels, bool source_exact,
+                                                 bool target_exact) const {
 	GqlEdgeScanEstimate result;
 	auto entry = triples.find(type);
 	if (entry == triples.end()) {
 		return result;
 	}
 	const auto source_required = SplitLabels(source_labels), target_required = SplitLabels(target_labels);
+	vector<GqlIdRange> source_bounds, target_bounds;
+	source_exact = source_exact || !LabelBounds(source_labels, source_bounds);
+	target_exact = target_exact || !LabelBounds(target_labels, target_bounds);
+	// Every vertex of a segment that the bounds reach counts, whatever its labels.
+	auto bounded_share = [&](int64_t segment_index, const vector<GqlIdRange> &bounds) {
+		if (segment_index < 0) {
+			return 0.0;
+		}
+		const auto &segment = segments[NumericCast<idx_t>(segment_index)];
+		for (const auto &range : bounds) {
+			if (range.low <= segment.high && segment.low <= range.high) {
+				return 1.0;
+			}
+		}
+		return 0.0;
+	};
 	for (const auto &triple : entry->second) {
-		const auto source_share = SegmentShare(*this, triple.source_segment, source_required);
-		const auto target_share = SegmentShare(*this, triple.target_segment, target_required);
+		const auto source_share = source_exact ? SegmentShare(*this, triple.source_segment, source_required)
+		                                       : bounded_share(triple.source_segment, source_bounds);
+		const auto target_share = target_exact ? SegmentShare(*this, triple.target_segment, target_required)
+		                                       : bounded_share(triple.target_segment, target_bounds);
 		result.edges += static_cast<double>(triple.edges) * source_share * target_share;
 		// An endpoint keeps at least one edge under the other end's labels only at best.
 		result.sources += static_cast<double>(triple.sources) * source_share * (target_share > 0 ? 1 : 0);
@@ -150,8 +182,14 @@ GqlEdgeScanEstimate GqlGraphLayout::EdgeEstimate(const string &type, const strin
 		}
 	}
 	result.scan_rows = MinValue(result.scan_rows, static_cast<double>(edge_count));
-	result.sources = MinValue(MinValue(result.sources, result.edges), LabelPopulation(source_labels));
-	result.targets = MinValue(MinValue(result.targets, result.edges), LabelPopulation(target_labels));
+	result.sources = MinValue(result.sources, result.edges);
+	result.targets = MinValue(result.targets, result.edges);
+	if (source_exact) {
+		result.sources = MinValue(result.sources, LabelPopulation(source_labels));
+	}
+	if (target_exact) {
+		result.targets = MinValue(result.targets, LabelPopulation(target_labels));
+	}
 	return result;
 }
 

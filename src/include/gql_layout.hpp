@@ -83,13 +83,14 @@ struct GqlGraphLayout {
 	//! The ID ranges holding exactly the vertices that have every one of these ';'-separated labels.
 	//! False when IDs do not decide those labels; a vertex table join must test them then.
 	bool LabelRanges(const string &labels, vector<GqlIdRange> &ranges) const;
-	//! ID ranges that between them hold every vertex with all of these labels, and maybe others.
-	//! False without a label, when any ID may be meant.
+	//! A few ID ranges that between them hold every vertex with all of these labels, and maybe
+	//! others. False without a label, when any ID may be meant.
 	bool LabelBounds(const string &labels, vector<GqlIdRange> &ranges) const;
 	//! How many vertices have every one of these labels.
 	double LabelPopulation(const string &labels) const;
-	GqlEdgeScanEstimate EdgeEstimate(const string &type, const string &source_labels,
-	                                 const string &target_labels) const;
+	//! An end that is not exact stands for every vertex LabelBounds admits for its labels.
+	GqlEdgeScanEstimate EdgeEstimate(const string &type, const string &source_labels, const string &target_labels,
+	                                 bool source_exact = true, bool target_exact = true) const;
 };
 
 //! The layout of a graph's tables as this statement sees them, or null when it is unknown,

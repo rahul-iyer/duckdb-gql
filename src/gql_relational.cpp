@@ -860,15 +860,16 @@ static unique_ptr<ParsedExpression> IdRangeFilter(const vector<GqlIdRange> &rang
 }
 
 // The edges of one type, limited to endpoints in the given ID ranges. A null range list leaves
-// that end open. When sized, the planner sees the relation at the size the graph's layout records
+// that end open, and an end that is not exact has the bounds of its labels for ranges, which admit
+// other vertices too. When sized, the planner sees the relation at the size the graph's layout records
 // for it: DuckDB otherwise takes any filtered scan of the shared edge table for a fifth of all edges.
 static unique_ptr<TableRef> TypedEdgeScan(const GqlTableGraphBinding &graph, const GqlGraphLayout &layout,
                                           const string &alias, const string &type,
                                           const vector<GqlIdRange> *source_ranges, const string &source_labels,
                                           const vector<GqlIdRange> *target_ranges, const string &target_labels,
-                                          bool sized) {
-	const auto estimate =
-	    layout.EdgeEstimate(type, source_ranges ? source_labels : string(), target_ranges ? target_labels : string());
+                                          bool sized, bool source_exact = true, bool target_exact = true) {
+	const auto estimate = layout.EdgeEstimate(type, source_ranges ? source_labels : string(),
+	                                          target_ranges ? target_labels : string(), source_exact, target_exact);
 	vector<unique_ptr<ParsedExpression>> arguments;
 	arguments.push_back(Constant(Value(graph.edge.catalog_name)));
 	arguments.push_back(Constant(Value(graph.edge.schema_name)));
@@ -937,6 +938,10 @@ static unique_ptr<TableRef> LabeledVertexScan(const GqlTableGraphBinding &graph,
 	if (layout.LabelRanges(labels, ranges)) {
 		filters.push_back(IdRangeFilter(ranges, alias, graph.vertex.key_column));
 	} else {
+		// The bounds of the labels' IDs spare the label test on every row group outside them.
+		if (layout.LabelBounds(labels, ranges)) {
+			filters.push_back(IdRangeFilter(ranges, alias, graph.vertex.key_column));
+		}
 		for (const auto &label : StringUtil::Split(labels, ';')) {
 			if (!label.empty()) {
 				filters.push_back(ElementHasLabel(alias, graph.vertex, label));
@@ -2910,10 +2915,19 @@ static unique_ptr<TableRef> TableBackedMatch(ClientContext &context, const strin
 		right_tested = (right_tested || !right_labels.empty()) && layout->LabelRanges(right_labels, right_ranges);
 		const auto &source_labels = edge.reverse ? right_labels : left_labels;
 		const auto &target_labels = edge.reverse ? left_labels : right_labels;
-		const auto source_ranges = (edge.reverse ? right_tested : left_tested) ? (edge.reverse ? &right_ranges : &left_ranges) : nullptr;
-		const auto target_ranges = (edge.reverse ? left_tested : right_tested) ? (edge.reverse ? &left_ranges : &right_ranges) : nullptr;
+		// An end whose labels IDs do not decide is still limited to the bounds of those labels.
+		const bool left_bounded = !left_tested && layout->LabelBounds(left_labels, left_ranges);
+		const bool right_bounded = !right_tested && layout->LabelBounds(right_labels, right_ranges);
+		const bool source_exact = edge.reverse ? right_tested : left_tested;
+		const bool target_exact = edge.reverse ? left_tested : right_tested;
+		const auto source_ranges = source_exact || (edge.reverse ? right_bounded : left_bounded)
+		                               ? (edge.reverse ? &right_ranges : &left_ranges)
+		                               : nullptr;
+		const auto target_ranges = target_exact || (edge.reverse ? left_bounded : right_bounded)
+		                               ? (edge.reverse ? &left_ranges : &right_ranges)
+		                               : nullptr;
 		return TypedEdgeScan(graph, *layout, alias, edge.label, source_ranges, source_labels, target_ranges,
-		                     target_labels, sized);
+		                     target_labels, sized, source_exact, target_exact);
 	};
 
 	// Apply single-binding literal checks before dependent graph expansion.
