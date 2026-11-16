@@ -1,0 +1,68 @@
+# name: test/sql/gql_shared_scans.test
+# description: The two directions of an undirected edge do not share a scan they join on different columns
+# group: [gql]
+
+require duckgql
+
+statement ok
+SET threads=1
+
+# Persons and comments load among each other, so their labels are tested in the vertex table.
+statement ok
+COPY (SELECT id AS ":ID", label AS ":LABEL", id AS "name:string" FROM (
+        SELECT 'p' || i AS id, 'Person' AS label, 16 + (i * 37) % 330 AS position FROM range(200) t(i)
+        UNION ALL SELECT 'm' || i, 'Comment', 23 + (i * 53) % 321 FROM range(100) t(i)
+        UNION ALL SELECT 't' || i, 'Tag', 117 + i FROM range(30) t(i)
+        UNION ALL SELECT 'y' || i, 'City', i FROM range(12) t(i)) ORDER BY position, id) TO '{TEST_DIR}/shared_nodes.csv' (HEADER)
+
+statement ok
+COPY (SELECT 'p' || i AS ":START_ID", 'p' || ((i * 7 + 3) % 200) AS ":END_ID", 'KNOWS' AS ":TYPE" FROM range(200) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || ((i * 13 + 5) % 200), 'KNOWS' FROM range(150) t(i)
+      UNION ALL SELECT 'p' || i, 'p' || i, 'KNOWS' FROM range(5) t(i)
+      UNION ALL SELECT 'p' || i, 'y' || (i % 12), 'IS_LOCATED_IN' FROM range(200) t(i)
+      UNION ALL SELECT 'p' || i, 't' || (i % 30), 'HAS_INTEREST' FROM range(180) t(i)
+      UNION ALL SELECT 'm' || i, 'p' || ((i * 3) % 50), 'HAS_CREATOR' FROM range(100) t(i)) TO '{TEST_DIR}/shared_edges.csv' (HEADER)
+
+statement ok
+CREATE GRAPH shared ANY
+
+statement ok
+COPY GRAPH shared FROM (VERTICES '{TEST_DIR}/shared_nodes.csv', EDGES '{TEST_DIR}/shared_edges.csv') FORMAT GRAPH
+
+statement ok
+SESSION SET GRAPH shared
+
+# Each direction reads the same tables but joins them on opposite ends of the edge. DuckDB's
+# common subplan optimizer has taken the two for one plan and answered for one direction twice.
+query II
+EXPLAIN MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]-(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(common_subplan|cte.scan).*
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]-(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+941
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+627
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)<-[:KNOWS]-(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+314
+
+query II
+EXPLAIN MATCH (a:Person)-[:KNOWS]-(b:Person)-[:KNOWS]-(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+physical_plan	<!REGEX>:(?i).*(common_subplan|cte.scan).*
+
+statement ok
+SET gql_graph_layout=false
+
+query I
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]-(c:Person) WHERE a.name <> c.name RETURN count(*)
+----
+941

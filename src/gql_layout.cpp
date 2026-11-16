@@ -547,6 +547,9 @@ TableFunction GqlElementScanFunction() {
 	                     native.function, ElementScanBind, native.init_global, native.init_local);
 	result.statistics_extended = ElementScanStatistics;
 	result.cardinality = ElementScanCardinality;
+	// A plan with this scan is not one DuckDB can write down and read back, which also keeps its
+	// common subplan optimizer from sharing a scan between joins on different columns of it.
+	result.verify_serialization = false;
 	result.dependency = native.dependency;
 	result.get_metrics = native.get_metrics;
 	result.to_string = native.to_string;
