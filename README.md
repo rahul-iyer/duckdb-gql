@@ -314,6 +314,20 @@ YIELD vertex_id, rank
 RETURN vertex_id, rank;
 ```
 
+Compare both graph access planners on a deterministic skewed graph, with and
+without CSR, while checking duplicate rows, NULLs, and optional matches:
+
+```sh
+python3 scripts/benchmark/benchmark_optimizer_modes.py \
+  --duckdb build/debug/duckdb \
+  --output build/benchmarks/optimizer-modes.json \
+  --leaves 10000 --threads 1 --warmups 1 --runs 5
+```
+
+The report contains per-query latency samples and median cost/legacy ratios.
+Profiling measures queries after import and optional CSR construction; setup
+and process startup are excluded. The default optimizer remains `legacy`.
+
 ## Graph algorithms
 
 Graph algorithms automatically build and cache a derived CSR projection on
